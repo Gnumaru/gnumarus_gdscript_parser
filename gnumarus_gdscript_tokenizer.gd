@@ -17,6 +17,11 @@ extends RefCounted
 ##   var tokens := gnumarus_gdscript_tokenizer.new().tokenize("res://script.gd")
 ## Usage with a source string:
 ##   var tokens := gnumarus_gdscript_tokenizer.new().tokenize("var x := 1\n")
+## Direct iteration (tokenize_text() itself is just a collector over it):
+##   var tok := gnumarus_gdscript_tokenizer.new()
+##   tok.pending_text = "var x := 1\n"
+##   for token in tok:
+##       print(token)
 
 const TOKEN_ANNOTATION := "ANNOTATION"
 const TOKEN_BOOL := "BOOL"
@@ -98,6 +103,13 @@ var _bracket_depth: int = 0
 var _line_start: bool = true
 var _continued: bool = false
 var _line_has_tokens: bool = false
+## Source text staged for iteration. Only one iteration may be active
+## at a time on the same instance (nested loops need separate instances).
+## Set it before using `for token in tokenizer`.
+var pending_text: String = ""
+var _current: Dictionary = {}
+var _queue_head: int = 0
+var _stream_done: bool = false
 
 
 ## Tokenizes either a file path (res://, user:// or OS path, when the
@@ -118,14 +130,47 @@ func tokenize(source: String) -> Array:
 
 ## Tokenizes a raw GDScript source string.
 func tokenize_text(text: String) -> Array:
-	_reset_state(text.replace("\r\n", "\n").replace("\r", "\n"))
-	while _pos < _length:
-		if _line_start:
+	pending_text = text.replace("\r\n", "\n").replace("\r", "\n")
+	var ret: Array = []
+	for tok in self:
+		ret.push_back(tok)
+	return ret
+
+
+## Custom iterator protocol (see the "Custom iterators" docs):
+## `for tok in tokenizer` yields every token, EOF included.
+## The step counter lives in the single-element `iter` array as
+## documented; the scan cursors stay in member variables.
+func _iter_init(iter) -> bool:
+	_reset_state(pending_text)
+	iter[0] = 0
+	return _iter_next(iter)
+
+
+func _iter_next(iter) -> bool:
+	iter[0] = int(iter[0]) + 1
+	_pump()
+	if _queue_head >= _tokens.size():
+		return false
+	_current = _tokens[_queue_head]
+	_queue_head += 1
+	return true
+
+
+func _iter_get(_unused) -> Variant:
+	return _current
+
+
+## Runs the scanner until one unread token is available or the stream ends.
+func _pump() -> void:
+	while _queue_head >= _tokens.size() and not _stream_done:
+		if _pos >= _length:
+			_finish()
+			_stream_done = true
+		elif _line_start:
 			_begin_line()
 		else:
 			_scan_inline()
-	_finish()
-	return _tokens
 
 
 func _reset_state(text: String) -> void:
@@ -142,6 +187,9 @@ func _reset_state(text: String) -> void:
 	_line_start = true
 	_continued = false
 	_line_has_tokens = false
+	_queue_head = 0
+	_stream_done = false
+	_current = {}
 
 
 func _finish() -> void:
