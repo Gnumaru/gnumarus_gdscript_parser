@@ -386,15 +386,38 @@ static func _with_augmented_operators(tname: String, operators: Array) -> Array:
 
 
 ## Normalizes one method (or signal-like) entry from the extension API.
+## Engine classes report results as return_value {type}, builtins as a
+## return_type string; missing results mean void.
 static func _method_info(m: Dictionary) -> Dictionary:
 	return {
 		"name": str(m.get("name", "")),
-		"returns": str(m.get("return_type", "void")),
+		"returns": _return_type_of(m),
 		"is_vararg": bool(m.get("is_vararg", false)),
 		"is_const": bool(m.get("is_const", false)),
 		"is_virtual": bool(m.get("is_virtual", false)),
 		"params": _params_info(m.get("arguments", [])),
 	}
+
+
+## Reads the result type of a method entry in either API shape.
+static func _return_type_of(m: Dictionary) -> String:
+	if m.has("return_type"):
+		return _normalize_type_name(str(m["return_type"]))
+	var rv: Variant = m.get("return_value", null)
+	if rv is Dictionary:
+		return _normalize_type_name(str((rv as Dictionary).get("type", "void")))
+	return "void"
+
+
+## Normalizes exotic type spellings from the extension API.
+## typedarray::Node becomes Array[Node]; enum::X becomes int because
+## enum values behave as ints for semantic purposes.
+static func _normalize_type_name(t: String) -> String:
+	if t.begins_with("typedarray::"):
+		return "Array[" + t.trim_prefix("typedarray::") + "]"
+	if t.begins_with("enum::"):
+		return "int"
+	return t
 
 
 ## Normalizes one parameter list with expected types and defaults.
