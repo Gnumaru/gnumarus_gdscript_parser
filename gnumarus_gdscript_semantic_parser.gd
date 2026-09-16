@@ -42,6 +42,7 @@ const KIND_ARITY := "arity"
 const KIND_CONST_ASSIGN := "const_assign"
 const KIND_UNDECLARED := "undeclared"
 const KIND_ASSIGN := "assign"
+const KIND_SUBSCRIPT := "subscript"
 
 const SIGNAL_METHODS := ["connect", "disconnect", "is_connected", "emit", "get_connections"]
 const NODE_SIGNALS := ["ready", "renamed", "tree_entered", "tree_entering", "tree_exited", "tree_exiting", "replacing_by"]
@@ -283,7 +284,7 @@ func _build_script_infos(ast: Dictionary) -> void:
 	var root_parent = _script_extends
 	if root_parent == "":
 		root_parent = "RefCounted"
-	_script_infos[""] = {"methods": {}, "parent": root_parent, "full": _script_class}
+	_script_infos[""] = _new_script_info(root_parent, _script_class)
 	if _script_class != "":
 		_script_infos[_script_class] = _script_infos[""]
 	for child in ast.get("children", []):
@@ -293,11 +294,28 @@ func _build_script_infos(ast: Dictionary) -> void:
 				_build_inner_info(child, "")
 
 
+func _new_script_info(parent: String, full: String) -> Dictionary:
+	return {"methods": {}, "fields": {}, "consts": {}, "signals": {}, "enums": {}, "parent": parent, "full": full}
+
+
 func _collect_methods(node: Dictionary, info: Dictionary, _prefix: String) -> void:
 	var t = str(node.get("type", ""))
 	if t == "FUNC_DECL":
 		(info["methods"] as Dictionary)[str(node.get("name", ""))] = _script_method_entry(node)
-	elif t == "VAR_DECL" or t == "CONST_DECL" or t == "SIGNAL_DECL" or t == "ENUM_DECL" or t == "CLASS_DECL":
+	elif t == "VAR_DECL":
+		(info["fields"] as Dictionary)[str(node.get("name", ""))] = _declared_type_of(node)
+	elif t == "CONST_DECL":
+		(info["consts"] as Dictionary)[str(node.get("name", ""))] = true
+	elif t == "SIGNAL_DECL":
+		(info["signals"] as Dictionary)[str(node.get("name", ""))] = true
+	elif t == "ENUM_DECL":
+		var ename = str(node.get("name", ""))
+		if ename != "":
+			(info["enums"] as Dictionary)[ename] = true
+		for m in node.get("members", []):
+			if m is Dictionary and str((m as Dictionary).get("type", "")) == "ENUM_MEMBER":
+				(info["enums"] as Dictionary)[str((m as Dictionary).get("name", ""))] = true
+	elif t == "CLASS_DECL":
 		return
 	elif t == "BLOCK":
 		for child in node.get("children", []):
@@ -335,7 +353,7 @@ func _build_inner_info(node: Dictionary, prefix: String) -> void:
 					break
 	if parent == "":
 		parent = "RefCounted"
-	var info = {"methods": {}, "parent": parent, "full": full}
+	var info = _new_script_info(parent, full)
 	_script_infos[iname] = info
 	_script_infos[full] = info
 	var body2: Variant = node.get("body", null)
@@ -877,11 +895,16 @@ func _chain_of(info: Dictionary) -> Array:
 ## Finds a method through the type and its ancestors. Script types use
 ## the collected tables, other types use loaded JSON files. Returns a
 ## Dictionary with entry/owner/static/chain or {} when missing.
-func _find_method(type_name: String, method: String) -> Dictionary:
+func _find_method(type_name: String, method: String, extra_root: bool = false) -> Dictionary:
 	var seen = {}
 	var cur = type_name
 	while cur != "" and not seen.has(cur):
 		seen[cur] = true
+		if extra_root:
+			var root_methods: Dictionary = (_script_infos.get("", {}) as Dictionary).get("methods", {})
+			if root_methods.has(method):
+				var rentry: Dictionary = root_methods[method]
+				return {"entry": rentry, "owner": cur, "static": bool(rentry.get("static", false)), "chain": _script_chain_names(cur)}
 		var sinfo = _script_info_for(cur)
 		if not sinfo.is_empty():
 			var methods: Dictionary = sinfo.get("methods", {})
@@ -1045,6 +1068,8 @@ func _check_range(tokens: Array, start: int, end: int, scope: Dictionary, self_t
 				i = _skip_chain(tokens, i, end)
 			continue
 		if ty == "LPAREN" or ty == "LBRACKET" or ty == "LBRACE":
+			if ty == "LBRACKET" and _is_subscript_context(tokens, i):
+				_check_subscript(tokens, i, end, scope, self_type, lambda_extra, depth)
 			depth += 1
 			i += 1
 			continue
@@ -1247,6 +1272,7 @@ func _check_dot_chain(tokens: Array, i: int, end: int, scope: Dictionary, self_t
 func _check_chain_from(tokens: Array, dot_idx: int, end: int, scope: Dictionary, self_type: String, base_info: Dictionary) -> int:
 	var cur_type = str(base_info.get("type", ""))
 	var cur_kind = str(base_info.get("kind", ""))
+	var self_lookup = cur_kind == "self"
 	var j = dot_idx
 	while j < end and j < tokens.size():
 		if str((tokens[j] as Dictionary).get("type", "")) != "DOT":
@@ -1302,7 +1328,8 @@ func _check_chain_from(tokens: Array, dot_idx: int, end: int, scope: Dictionary,
 				cur_kind = "unknown"
 				j += 1
 				continue
-			var found2 = _find_method(cur_type, mname)
+			var found2 = _find_method(cur_type, mname, self_lookup)
+			self_lookup = false
 			if found2.is_empty():
 				var chain = _display_chain(cur_type)
 				_error(KIND_MISSING_METHOD, "type '" + cur_type + "' has no method '" + mname + "'" + chain, int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)))
@@ -1350,8 +1377,340 @@ func _skip_chain(tokens: Array, dot_idx: int, end: int) -> int:
 	return j
 
 
-## Classifies the base of a dotted chain: type name, signal, singleton,
-## instance with known type, enum, super, self or unknown.
+## True when `[` at i opens a subscript (has a value base on its left)
+## rather than an array literal.
+func _is_subscript_context(tokens: Array, i: int) -> bool:
+	if i <= 0:
+		return false
+	var pt = str((tokens[i - 1] as Dictionary).get("type", ""))
+	if pt in ["OPERATOR", "LPAREN", "LBRACKET", "LBRACE", "COMMA", "COLON", "SEMICOLON", "INDENT", "DEDENT", "NEWLINE", "EOF", "ANNOTATION"]:
+		return false
+	if pt == "KEYWORD" and str((tokens[i - 1] as Dictionary).get("value", "")) != "self":
+		return false
+	return true
+
+
+## Validates one `base[key]` (and `base[key] = value`) subscript without
+## consuming anything: the main loop still walks the key for nested
+## checks. Mirrors engine behavior: index types are checked statically
+## (like the engine's own parse errors) and literal String keys on
+## Objects and member-ful builtins must name a real member (the engine
+## only fails those at runtime, so this goes one step further).
+func _check_subscript(tokens: Array, i: int, end: int, scope: Dictionary, self_type: String, overlay: Dictionary, depth: int) -> void:
+	var base = _subscript_base(tokens, i - 1, scope, self_type, overlay)
+	var btype = str(base.get("type", ""))
+	var bkind = str(base.get("kind", ""))
+	if btype == "" or btype == "Variant" or _is_enum_type(btype):
+		return
+	if bkind == "singleton" or bkind == "super" or bkind == "signal":
+		return
+	var close = _match_forward(tokens, i)
+	if close >= end:
+		close = mini(end, tokens.size()) - 1
+	var key_toks: Array = []
+	var k = i + 1
+	while k < close and k < tokens.size():
+		key_toks.append(tokens[k])
+		k += 1
+	var key_type = _infer_tokens(key_toks, scope, self_type)
+	var key_name = _key_literal_text(key_toks)
+	var line = int((tokens[i] as Dictionary).get("line", 0))
+	var column = int((tokens[i] as Dictionary).get("column", 0))
+	var is_set = false
+	var set_op = ""
+	var value_type = ""
+	if depth == 0:
+		var after = close + 1
+		if after < end and after < tokens.size():
+			var at = str((tokens[after] as Dictionary).get("type", ""))
+			var av = str((tokens[after] as Dictionary).get("value", ""))
+			if at == "OPERATOR" and (av == "=" or av in AUGMENTED_OPS):
+				is_set = true
+				set_op = av
+				var vslice: Array = []
+				var q = after + 1
+				while q < end and q < tokens.size():
+					vslice.append(tokens[q])
+					q += 1
+				value_type = _infer_tokens(vslice, scope, self_type)
+	_check_subscript_rules(btype, bkind, key_type, key_name, is_set, set_op, value_type, line, column, bkind == "self")
+
+
+## Classifies a subscript base (no errors reported here; bare names are
+## validated by the main loop). Returns {kind, type}.
+func _subscript_base(tokens: Array, idx: int, scope: Dictionary, self_type: String, overlay: Dictionary) -> Dictionary:
+	if idx < 0 or idx >= tokens.size():
+		return {"kind": "unknown", "type": ""}
+	var t: Dictionary = tokens[idx]
+	var ty = str(t.get("type", ""))
+	var v = str(t.get("value", ""))
+	if ty == "KEYWORD" and v == "self":
+		return {"kind": "self", "type": self_type}
+	if ty == "KEYWORD" and v == "super":
+		return {"kind": "super", "type": ""}
+	if ty == "BUILTIN_TYPE":
+		return {"kind": "type", "type": v}
+	if ty == "IDENTIFIER":
+		if v in SINGLETONS:
+			return {"kind": "singleton", "type": ""}
+		var entry = _scope_get(scope, v)
+		if entry.has("kind"):
+			var kind = str(entry.get("kind", ""))
+			if kind == "signal":
+				return {"kind": "signal", "type": ""}
+			if kind in ["var", "param", "member", "loop", "bind", "const"]:
+				return {"kind": "instance", "type": str(entry.get("type", ""))}
+			if kind in ["class", "enum"]:
+				return {"kind": "type", "type": str(entry.get("type", v))}
+			return {"kind": "unknown", "type": ""}
+		if (overlay as Dictionary).has(v):
+			return {"kind": "instance", "type": ""}
+		if _script_types.has(v):
+			var st: Dictionary = _script_types[v]
+			if str(st.get("kind", "")) == "enum":
+				return {"kind": "enum", "type": v}
+			return {"kind": "type", "type": str(st.get("full", v))}
+		if _is_all_caps(v) or v in KEYWORDS:
+			return {"kind": "unknown", "type": ""}
+		if _resolve_type_quiet(v).has("name"):
+			return {"kind": "type", "type": v}
+		return {"kind": "unknown", "type": ""}
+	var back = _infer_operand_back(tokens, idx, scope, self_type, overlay)
+	return {"kind": "instance", "type": str(back.get("type", ""))}
+
+
+## Extracts literal key text from a single STRING or STRING_NAME token.
+## Returns {is_text, text}.
+func _key_literal_text(key_toks: Array) -> Dictionary:
+	if key_toks.size() != 1 or not (key_toks[0] is Dictionary):
+		return {"is_text": false, "text": ""}
+	var t: Dictionary = key_toks[0]
+	var ty = str(t.get("type", ""))
+	var v = str(t.get("value", ""))
+	if ty == "STRING" and v.length() >= 2:
+		return {"is_text": true, "text": v.substr(1, v.length() - 2)}
+	if ty == "STRING_NAME" and v.length() >= 3:
+		return {"is_text": true, "text": v.substr(2, v.length() - 3)}
+	return {"is_text": false, "text": ""}
+
+
+## Core subscript rules per base family. See _check_subscript docs.
+func _check_subscript_rules(btype: String, bkind: String, key_type: String, key_name: Dictionary, is_set: bool, set_op: String, value_type: String, line: int, column: int, is_self: bool = false) -> void:
+	if bkind == "type":
+		_error(KIND_SUBSCRIPT, "cannot use subscript operator on the type '" + btype + "'", line, column)
+		return
+	var base = _base_type(btype)
+	var info = _resolve_type_quiet(base)
+	var is_object = _derives_object(base)
+	if btype == "Dictionary" or base == "Dictionary":
+		return
+	if key_type == "" or key_type == "Variant":
+		return
+	if _is_enum_type(key_type):
+		key_type = "int"
+	if is_object:
+		_check_object_key(btype, info, key_type, key_name, is_set, set_op, value_type, line, column, is_self)
+		return
+	if key_type == "bool":
+		_error(KIND_SUBSCRIPT, "Invalid index type \"bool\" for a base of type \"" + btype + "\"", line, column)
+		return
+	if key_type == "int" or key_type == "float":
+		_check_indexable_key(btype, info, key_type, is_set, set_op, value_type, line, column)
+		return
+	if key_type == "String" or key_type == "StringName":
+		_check_named_key(btype, info, key_name, is_set, set_op, value_type, line, column)
+		return
+	_error(KIND_SUBSCRIPT, "Invalid index type \"" + key_type + "\" for a base of type \"" + btype + "\"", line, column)
+
+
+## Object brackets: String/StringName keys only; literal names must name
+## a property, method, constant or script member (signals excluded).
+func _check_object_key(btype: String, info: Dictionary, key_type: String, key_name: Dictionary, is_set: bool, set_op: String, value_type: String, line: int, column: int, is_self: bool = false) -> void:
+	if key_type != "String" and key_type != "StringName":
+		_error(KIND_SUBSCRIPT, "Only \"String\" or \"StringName\" can be used as index for type \"" + btype + "\", but received \"" + key_type + "\"", line, column)
+		return
+	if not bool(key_name.get("is_text", false)):
+		return
+	var mname = str(key_name.get("text", ""))
+	var found = _find_bracket_member(btype, mname, is_self)
+	if found.is_empty():
+		if is_set:
+			_error(KIND_SUBSCRIPT, "Invalid assignment of property or key '" + mname + "' on a base object of type '" + btype + "'", line, column)
+		else:
+			_error(KIND_SUBSCRIPT, "Invalid access to property or key '" + mname + "' on a base object of type '" + btype + "'", line, column)
+		return
+	_check_bracket_set(found, btype, mname, is_set, set_op, value_type, line, column)
+
+
+## Numeric index on indexable builtins (Array, Packed*, String, VectorN
+## with indexing_return_type, ...). Member-ful builtins without integer
+## indexing (Rect2, Plane, ...) are skipped: the engine itself is
+## inconsistent there (parse error vs runtime values).
+func _check_indexable_key(btype: String, info: Dictionary, key_type: String, is_set: bool, set_op: String, value_type: String, line: int, column: int) -> void:
+	var base = _base_type(btype)
+	if info.is_empty():
+		return
+	if info.has("indexing_return_type") and info.get("indexing_return_type", null) != null:
+		_check_indexed_value(btype, str(info.get("indexing_return_type", "")), base, is_set, set_op, value_type, line, column)
+		return
+	if _builtin_has_members(info):
+		return
+	_error(KIND_SUBSCRIPT, "cannot use subscript operator on a base of type '" + btype + "'", line, column)
+
+
+## String keys on builtins: only member names (Vector2.x, Color.r, ...).
+func _check_named_key(btype: String, info: Dictionary, key_name: Dictionary, is_set: bool, set_op: String, value_type: String, line: int, column: int) -> void:
+	var base = _base_type(btype)
+	if base == "Dictionary":
+		return
+	if info.is_empty():
+		return
+	if not _builtin_has_members(info):
+		_error(KIND_SUBSCRIPT, "Invalid index type \"String\" for a base of type \"" + btype + "\"", line, column)
+		return
+	if not bool(key_name.get("is_text", false)):
+		return
+	var mname = str(key_name.get("text", ""))
+	var mtype = ""
+	for mb in info.get("members", []):
+		if mb is Dictionary and str((mb as Dictionary).get("name", "")) == mname:
+			mtype = str((mb as Dictionary).get("type", ""))
+			break
+	if mtype == "":
+		_error(KIND_SUBSCRIPT, "Invalid access to property or key '" + mname + "' on a base object of type '" + btype + "'", line, column)
+		return
+	_check_indexed_value(btype, mtype, base, is_set, set_op, value_type, line, column)
+
+
+func _builtin_has_members(info: Dictionary) -> bool:
+	var members: Variant = info.get("members", [])
+	return members is Array and (members as Array).size() > 0
+
+
+## Validates the assigned value (or augmented operation) against the
+## known element/member/property type of a subscript target.
+func _check_indexed_value(btype: String, target_type: String, base: String, is_set: bool, set_op: String, value_type: String, line: int, column: int) -> void:
+	if not is_set:
+		return
+	var elem = target_type
+	if base == "Array" and btype != "Array":
+		var param = _bracket_param(btype)
+		if param != "":
+			elem = param
+	if elem == "" or elem == "Variant" or value_type == "" or value_type == "Variant":
+		if set_op != "" and set_op != "=" and elem != "" and elem != "Variant" and value_type != "" and value_type != "Variant" and not _is_enum_type(elem) and not _is_enum_type(value_type):
+			_check_operator(set_op, elem, value_type, line, column)
+		return
+	if set_op == "" or set_op == "=":
+		_check_assignable(elem, value_type, line, column)
+	else:
+		_check_operator(set_op, elem, value_type, line, column)
+
+
+## Element type from a parameterized container text (Array[int] -> int).
+func _bracket_param(text: String) -> String:
+	var open = text.find("[")
+	var close = text.rfind("]")
+	if open == -1 or close == -1 or close <= open + 1:
+		return ""
+	return text.substr(open + 1, close - open - 1).strip_edges()
+
+
+## Set-form validation shared by object and indexed targets.
+func _check_bracket_set(found: Dictionary, btype: String, mname: String, is_set: bool, set_op: String, value_type: String, line: int, column: int) -> void:
+	if not is_set:
+		return
+	if not bool(found.get("writable", false)):
+		_error(KIND_SUBSCRIPT, "Invalid assignment of property or key '" + mname + "' on a base object of type '" + btype + "'", line, column)
+		return
+	var target = str(found.get("type", ""))
+	if target == "" or target == "Variant" or value_type == "" or value_type == "Variant":
+		if set_op != "" and set_op != "=" and target != "" and target != "Variant" and value_type != "" and value_type != "Variant":
+			_check_operator(set_op, target, value_type, line, column)
+		return
+	if set_op == "" or set_op == "=":
+		_check_assignable(target, value_type, line, column)
+	else:
+		_check_operator(set_op, target, value_type, line, column)
+
+
+## Looks a bracket name up through script and engine members.
+## Returns {found, kind, type, writable} with kind in prop, method,
+## const, signal, field. Signals are reported but never accessible.
+## extra_root also consults the analyzed script root members (for
+## `self[...]` in class_name-less scripts).
+func _find_bracket_member(type_name: String, mname: String, extra_root: bool = false) -> Dictionary:
+	var seen = {}
+	var cur = type_name
+	while cur != "" and not seen.has(cur):
+		seen[cur] = true
+		if extra_root:
+			var root = _script_infos.get("", {})
+			if (root.get("fields", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "field", "type": str(((root.get("fields", {}) as Dictionary)[mname])), "writable": true}
+			if (root.get("consts", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "const", "type": "", "writable": false}
+			if (root.get("methods", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "method", "type": "", "writable": false}
+			if (root.get("signals", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "signal", "type": "", "writable": false}
+		var sinfo = _script_info_for(cur)
+		if not sinfo.is_empty():
+			if (sinfo.get("fields", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "field", "type": str(((sinfo.get("fields", {}) as Dictionary)[mname])), "writable": true}
+			if (sinfo.get("consts", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "const", "type": "", "writable": false}
+			if (sinfo.get("methods", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "method", "type": "", "writable": false}
+			if (sinfo.get("signals", {}) as Dictionary).has(mname):
+				return {"found": true, "kind": "signal", "type": "", "writable": false}
+			cur = str(sinfo.get("parent", ""))
+			if cur == "":
+				cur = "RefCounted"
+			continue
+		var info = _resolve_type_quiet(cur)
+		if info.is_empty():
+			var base = _base_type(cur)
+			if base != "" and base != cur:
+				cur = base
+				continue
+			return {}
+		for p in info.get("properties", []):
+			if p is Dictionary and str((p as Dictionary).get("name", "")) == mname:
+				return {"found": true, "kind": "prop", "type": str((p as Dictionary).get("type", "")), "writable": str((p as Dictionary).get("setter", "")) != ""}
+		var smethods: Array = []
+		for m in info.get("static_methods", []):
+			smethods.append(m)
+		for m in info.get("instance_methods", []):
+			smethods.append(m)
+		for m in smethods:
+			if m is Dictionary and str((m as Dictionary).get("name", "")) == mname:
+				return {"found": true, "kind": "method", "type": "", "writable": false}
+		for c in info.get("constants", []):
+			if c is Dictionary and str((c as Dictionary).get("name", "")) == mname:
+				return {"found": true, "kind": "const", "type": "", "writable": false}
+		for e in info.get("enums", []):
+			if e is Dictionary:
+				for ev in (e as Dictionary).get("values", []):
+					if ev is Dictionary and str((ev as Dictionary).get("name", "")) == mname:
+						return {"found": true, "kind": "const", "type": "int", "writable": false}
+		for s in info.get("signals", []):
+			if s is Dictionary and str((s as Dictionary).get("name", "")) == mname:
+				return {"found": true, "kind": "signal", "type": "", "writable": false}
+		var members: Array = []
+		for mb in info.get("members", []):
+			members.append(mb)
+		for mb in members:
+			if mb is Dictionary and str((mb as Dictionary).get("name", "")) == mname:
+				return {"found": true, "kind": "prop", "type": str((mb as Dictionary).get("type", "")), "writable": true}
+		var next = str(info.get("parent", ""))
+		if next == "" or next == cur:
+			if cur != "Variant" and not seen.has("Variant"):
+				cur = "Variant"
+				continue
+			break
+		cur = next
+	return {}
 func _dot_base(tokens: Array, i: int, scope: Dictionary, self_type: String, overlay: Dictionary) -> Dictionary:
 	var t: Dictionary = tokens[i]
 	var ty = str(t.get("type", ""))
@@ -1584,6 +1943,8 @@ func _check_assignable(declared: String, value: String, line: int, column: int) 
 			return
 	if declared in NUMERIC_TYPES and value in NUMERIC_TYPES:
 		return
+	if declared in ["String", "StringName", "NodePath"] and value in ["String", "StringName", "NodePath"]:
+		return
 	if value == "null" or value == "Nil":
 		if _derives_object(declared) or _base_type(declared) == "Variant":
 			return
@@ -1611,6 +1972,10 @@ func _infer_tokens(tokens: Array, scope: Dictionary, self_type: String) -> Strin
 	for t in tokens:
 		if t is Dictionary and str((t as Dictionary).get("type", "")) != "LAMBDA_MARKER":
 			clean.append(t)
+	if clean.is_empty():
+		return ""
+	while clean.size() > 1 and str((clean[0] as Dictionary).get("type", "")) == "OPERATOR" and str((clean[0] as Dictionary).get("value", "")) in ["+", "-", "~"]:
+		clean = clean.slice(1)
 	if clean.is_empty():
 		return ""
 	if clean.size() == 1:
@@ -1773,6 +2138,8 @@ func _infer_binary_fold(tokens: Array, scope: Dictionary, self_type: String) -> 
 					var cname = ""
 					if prev == "IDENTIFIER" or prev == "BUILTIN_TYPE":
 						cname = str((tokens[i - 1] as Dictionary).get("value", ""))
+						if prev == "IDENTIFIER" and cname == "new":
+							cname = _dotted_new_base(tokens, i, scope)
 					var close = _match_forward(tokens, i)
 					if _known_type_name(cname, scope):
 						current = cname
@@ -1814,6 +2181,34 @@ func _infer_binary_fold(tokens: Array, scope: Dictionary, self_type: String) -> 
 			current = ptype
 		i = maxi(i + 1, int(prim.get("next", i + 1)))
 	return current
+
+
+## Resolves the dotted base of a `Type.new(...)` call: walks back over
+## `.new (` to collect `A.B.C`, returning "" unless it names a type.
+func _dotted_new_base(tokens: Array, lparen_idx: int, scope: Dictionary) -> String:
+	var j = lparen_idx - 1
+	if j < 0 or str((tokens[j] as Dictionary).get("value", "")) != "new":
+		return ""
+	j -= 1
+	if j < 0 or str((tokens[j] as Dictionary).get("type", "")) != "DOT":
+		return ""
+	j -= 1
+	var parts: Array = []
+	while j >= 0:
+		var ty = str((tokens[j] as Dictionary).get("type", ""))
+		if ty != "IDENTIFIER" and ty != "BUILTIN_TYPE":
+			break
+		parts.push_front(str((tokens[j] as Dictionary).get("value", "")))
+		j -= 1
+		if j < 0 or str((tokens[j] as Dictionary).get("type", "")) != "DOT":
+			break
+		j -= 1
+	if parts.is_empty():
+		return ""
+	var dotted = ".".join(parts)
+	if _known_type_name(str(parts[0]), scope) or _known_type_name(dotted, scope):
+		return dotted
+	return ""
 
 
 ## True when a name can act as a constructor type (not a variable).

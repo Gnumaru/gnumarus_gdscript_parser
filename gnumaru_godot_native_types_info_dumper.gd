@@ -221,6 +221,7 @@ func _builtin_info(b: Dictionary, _classes_by_name: Dictionary) -> Dictionary:
 	for mb in b.get("members", []):
 		if mb is Dictionary:
 			members.append({"name": str((mb as Dictionary).get("name", "")), "type": str((mb as Dictionary).get("type", VARIANT_ROOT))})
+	var indexing: Variant = b.get("indexing_return_type", null)
 	return {
 		"name": tname,
 		"kind": "builtin",
@@ -228,6 +229,7 @@ func _builtin_info(b: Dictionary, _classes_by_name: Dictionary) -> Dictionary:
 		"inheritance_chain": [tname, VARIANT_ROOT],
 		"is_instantiable": tname != "Nil",
 		"is_keyed": bool(b.get("is_keyed", false)),
+		"indexing_return_type": str(indexing) if indexing != null else null,
 		"operators": operators,
 		"constructors": constructors,
 		"members": members,
