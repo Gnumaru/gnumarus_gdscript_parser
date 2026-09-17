@@ -381,6 +381,62 @@ class Child extends Base:
   root, function parameters, function-local variables, and any
   non-declaration statement.
 
+### `@return`
+
+Declares a function return type. It may precede a function
+declaration or a lambda (a statement whose value is a lambda, e.g.
+`var f = func(): ...`): `"void"`, one type name (`# @return Node`)
+or a union (`# @return Object|String|int`). `"void"` only works
+alone.
+
+```gdscript
+extends Node
+
+# @return void
+func reset() -> void:
+    pass
+
+# @return Control
+func make_button() -> Node:   # OK: Control inherits Node
+    return Button.new()
+
+# @return Node
+func make_node() -> Control:  # ERROR: Node does not inherit Control
+    pass
+
+# @return Object|String|int
+func describe():
+    pass
+
+# @return void
+func bad() -> void:
+    return 1                  # ERROR: cannot return a value from void function 'bad'
+
+# @return int
+func bare():
+    return                    # ERROR: bare return in non-void function 'bare'
+
+# @return int
+var f = func():
+    return 1                  # OK: lambdas work too
+```
+
+- Every named member must be a known type (the script class, script
+  classes/enums, or a `types_info` file); unknown names error
+  (`return_unknown_type`). Empty specs, non-identifiers, empty union
+  arms and `void` combined with names error (`return_malformed`).
+- When the function also has a `->` annotation, every `@return`
+  member must equal it or inherit from it — narrower is fine,
+  wider/unrelated is `return_mismatch`. Only simple `->` names are
+  compared (`Array[int]`, dotted, ... skip the check).
+- Value/bare presence is checked per function (`return_value`);
+  nested lambdas/functions get their own check. Return VALUE
+  compatibility is NOT inferred (flat token scan).
+- Misplaced tags are errors (`return_misplaced`): file header, class
+  name, variables, signals, parameters, and any statement that is not
+  a function or a lambda. Marked nodes gain a `return_ann` stamp;
+  nothing is written to the user JSON files.
+
 ## types_info layout
 
 - `types_info/builtin/<Name>.json` and `types_info/classes/<Name>.json`
@@ -409,9 +465,11 @@ green. `GODOT_BIN` overrides the engine path.
   suite, `check()` per expectation, failed names via printerr.
 - Suites: `test_fixture.gd` (tokenize → parse → analyze on the
   `tests/ValidScript0.gd` fixture, must come out clean),
+  `test_native_guard.gd` (native database contract),
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
-  (`@private` nested-family rule), `test_reuse.gd` (same instance
-  parsing twice must give independent results).
+  (`@private` nested-family rule), `test_return.gd` (`@return` rule),
+  `test_reuse.gd` (same instance parsing twice must give independent
+  results).
 - `tests/ensure_native_types.gd` runs first: if `types_info/builtin/`,
   `types_info/classes/` and `index.json` exist with content it exits
   immediately; otherwise it runs the dumper with the same engine

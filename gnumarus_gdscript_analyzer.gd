@@ -22,6 +22,19 @@ extends RefCounted
 ##
 ## The second rule is "@private":
 ## - It may precede any static or instance member (functions,
+## - It may precede a function declaration or a lambda (a statement
+##   whose value is a lambda, e.g. `var f = func(): ...`) and declares
+##   the function return type: "void", one type name ("# @return Node")
+##   or a union ("# @return Object|String|int").
+## - Every named member must be a known type (script classes/enums or
+##   types_info files); "void" only works alone. When the function also
+##   has a "->" annotation, every @return member must equal it or
+##   inherit from it (Control is fine for "-> Node", Node is not fine
+##   for "-> Control"). Value/bare returns are checked against voidness.
+## - Violations generate ERRORS ("return_misplaced", "return_malformed",
+##   "return_unknown_type", "return_mismatch", "return_value").
+##   Return VALUE compatibility is not inferred (flat token scan).
+## - It may precede any static or instance member (functions,
 ##   variables, nested classes, enums, constants, signals), but never
 ##   the file root, function parameters or function-local variables.
 ## - A private member may be used inside its whole nested family: the
@@ -31,6 +44,20 @@ extends RefCounted
 ## - Violations generate ERRORS (kind "private_use"); misplaced tags
 ##   generate "private_misplaced" errors. Name-based, single-file
 ##   analysis: receivers of unknown type are skipped.
+##
+## The third rule is "@return":
+## - It may precede a function declaration or a lambda (a statement
+##   whose value is a lambda, e.g. `var f = func(): ...`) and declares
+##   the function return type: "void", one type name ("# @return Node")
+##   or a union ("# @return Object|String|int").
+## - Every named member must be a known type (script classes/enums or
+##   types_info files); "void" only works alone. When the function also
+##   has a "->" annotation, every @return member must equal it or
+##   inherit from it (Control is fine for "-> Node", Node is not fine
+##   for "-> Control"). Value/bare returns are checked against voidness.
+## - Violations generate ERRORS ("return_misplaced", "return_malformed",
+##   "return_unknown_type", "return_mismatch", "return_value").
+##   Return VALUE compatibility is not inferred (flat token scan).
 ##
 ## The walk is scope-aware (locals and parameters shadow members) and
 ## threads an explicit owner ("", "Outer", "Outer.Inner") so later
@@ -60,6 +87,11 @@ const ERR_DEPRECATED_UNSUPPORTED := "deprecated_unsupported"
 const ERR_PRIVATE_MISPLACED := "private_misplaced"
 const ERR_PRIVATE_USE := "private_use"
 const ERR_NATIVE_TYPES := "native_types"
+const ERR_RETURN_MISPLACED := "return_misplaced"
+const ERR_RETURN_MALFORMED := "return_malformed"
+const ERR_RETURN_UNKNOWN := "return_unknown_type"
+const ERR_RETURN_MISMATCH := "return_mismatch"
+const ERR_RETURN_VALUE := "return_value"
 
 ## Preloaded (not via class_name) so this script compiles standalone,
 ## even before the editor/cache registers global classes.
@@ -83,6 +115,9 @@ var _script_resource_path = ""
 var _project_root = ""
 var _write_base = "types_info"
 var _written: Array = []
+## Type file lookups (builtin/classes/user JSON info or miss marker),
+## cached per analyze() call for @return name resolution.
+var _type_cache: Dictionary = {}
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -97,6 +132,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_class_extends = {}
 	_script_deprecated = {}
 	_written = []
+	_type_cache = {}
 	_script_class = ""
 	for child in ast.get("children", []):
 		if child is Dictionary and str((child as Dictionary).get("type", "")) == "CLASS_NAME":
@@ -171,6 +207,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_script_deprecated = {"message": str(tag.get("message", "")), "line": int((header as Dictionary).get("line", 0))}
 		if not _find_private(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_PRIVATE_MISPLACED, "@private cannot be used at the file root, only on members inside a class body", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_return(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 
 
 # ------------------------------------------------------------- tag scan
@@ -244,6 +282,288 @@ func _has_private_tag(tok: Dictionary) -> Dictionary:
 	return _find_private(str(tok.get("value", "")))
 
 
+func _find_return(value: String) -> Dictionary:
+	return _find_tag(value, "return")
+
+
+func _has_return_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_return(str(tok.get("value", "")))
+
+
+## Looks for @return in a node's leading_comments (first hit wins).
+func _leading_return(node: Dictionary) -> Dictionary:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary:
+			var tag = _has_return_tag(c)
+			if not tag.is_empty():
+				tag["line"] = int((c as Dictionary).get("line", 0))
+				return tag
+	return {}
+
+
+func _has_any_return_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_return_tag(c).is_empty():
+			return true
+	return false
+
+
+# ------------------------------------------------------- @return helpers
+
+static func _is_type_start(c: int) -> bool:
+	if c >= 65 and c <= 90:
+		return true
+	if c >= 97 and c <= 122:
+		return true
+	if c == 95 or c >= 128:
+		return true
+	return false
+
+
+static func _is_type_part(c: int) -> bool:
+	if _is_type_start(c):
+		return true
+	return c >= 48 and c <= 57
+
+
+## True for plain type identifiers ("Node", "int", "_Helper").
+## Dotted/complex spellings are NOT @return members.
+static func _is_type_name(name: String) -> bool:
+	if name == "":
+		return false
+	if not _is_type_start(name.unicode_at(0)):
+		return false
+	for i in range(1, name.length()):
+		if not _is_type_part(name.unicode_at(i)):
+			return false
+	return true
+
+
+## Parses an @return message into {"ok","types","void","raw"} or
+## {"ok": false, "error"}. Shape: "void" alone, or one or more
+## |-separated type identifiers. "void" cannot be combined.
+static func _parse_return_spec(raw_msg: String) -> Dictionary:
+	var raw := raw_msg.strip_edges()
+	if raw == "":
+		return {"ok": false, "error": "@return needs a type: 'void' or a type name like 'Node' (unions join with '|', e.g. 'Object|String|int')"}
+	var parts := raw.split("|")
+	var types: Array = []
+	for p in parts:
+		var name := str(p).strip_edges()
+		if name == "":
+			return {"ok": false, "error": "@return has an empty type in '" + raw + "'"}
+		if name == "void":
+			if parts.size() > 1:
+				return {"ok": false, "error": "@return 'void' cannot be combined with other types in '" + raw + "'"}
+			return {"ok": true, "types": [], "void": true, "raw": raw}
+		if not _is_type_name(name):
+			return {"ok": false, "error": "@return has an invalid type name '" + name + "'"}
+		types.append(name)
+	return {"ok": true, "types": types, "void": false, "raw": raw}
+
+
+## True when a types_info file exists for the name (builtin, classes or
+## user under _write_base). Results are cached per analyze() call.
+func _type_file_exists(tname: String) -> bool:
+	if _type_cache.has(tname):
+		return not (_type_cache[tname] as Dictionary).is_empty()
+	for sub in ["builtin", "classes", "user"]:
+		var info := _read_json(_write_base + "/" + sub + "/" + tname + ".json")
+		if not info.is_empty():
+			_type_cache[tname] = info
+			return true
+	_type_cache[tname] = {}
+	return false
+
+
+## inheritance_chain of a type from its JSON file ([] when unknown).
+func _engine_chain(tname: String) -> Array:
+	if _type_cache.has(tname):
+		var hit: Dictionary = _type_cache[tname]
+		var chain: Array = hit.get("inheritance_chain", [])
+		return chain
+	for sub in ["builtin", "classes", "user"]:
+		var info := _read_json(_write_base + "/" + sub + "/" + tname + ".json")
+		if not info.is_empty():
+			_type_cache[tname] = info
+			var chain2: Array = info.get("inheritance_chain", [])
+			return chain2
+	_type_cache[tname] = {}
+	return []
+
+
+## A @return member is known when it is the script class, a script class
+## or enum member, or a types_info file exists for it.
+func _return_type_known(tname: String) -> bool:
+	if tname != "" and tname == _script_class:
+		return true
+	for key in _members.keys():
+		var table: Dictionary = _members[key]
+		if table.has(tname) and str((table[tname] as Dictionary).get("kind", "")) in ["class", "enum"]:
+			return true
+	return _type_file_exists(tname)
+
+
+static func _base_simple(dotted: String) -> String:
+	if "." in dotted:
+		return dotted.substr(dotted.rfind(".") + 1)
+	return dotted
+
+
+## True when member equals declared or inherits from it: engine chain
+## first, then the script extends walk, then the engine chain of the
+## terminal script base (e.g. Child extends Base extends Node).
+func _derives_from(member: String, declared: String) -> bool:
+	if member == declared:
+		return true
+	if declared in _engine_chain(member):
+		return true
+	return _script_derives(member, declared)
+
+
+func _script_derives(child: String, ancestor: String) -> bool:
+	var key := _resolve_private_owner(child, "")
+	var seen := {}
+	var guard := 0
+	while key != "" and not seen.has(key) and guard < 32:
+		seen[key] = true
+		guard += 1
+		var base := str(_class_extends.get(key, ""))
+		if base == "":
+			return false
+		if base == ancestor or _base_simple(base) == ancestor:
+			return true
+		if ancestor in _engine_chain(_base_simple(base)):
+			return true
+		key = _resolve_private_owner(base, key)
+	return false
+
+
+## Single type name behind a "->" TYPE_REF ("void" included), or "" when
+## absent or complex (Array[int], dotted, ...): only simple arrows are
+## compared against @return.
+static func _arrow_name(ref: Variant) -> String:
+	if not (ref is Dictionary):
+		return ""
+	var text := ""
+	for t in (ref as Dictionary).get("tokens", []):
+		if t is Dictionary:
+			text += str((t as Dictionary).get("value", ""))
+	text = text.strip_edges()
+	if text == "void":
+		return "void"
+	if _is_type_name(text):
+		return text
+	return ""
+
+
+## Validates one @return tag and stamps fn_node["return_ann"].
+## Malformed or unknown specs error out and record nothing.
+func _attach_return(fn_node: Dictionary, tag: Dictionary, owner: String) -> void:
+	var spec := _parse_return_spec(str(tag.get("message", "")))
+	var line := int(tag.get("line", int(fn_node.get("line", 0))))
+	var col := int(fn_node.get("column", 0))
+	if not bool(spec.get("ok", false)):
+		_error(ERR_RETURN_MALFORMED, str(spec.get("error", "")), line, col, owner)
+		return
+	if not bool(spec.get("void", false)):
+		for m in spec.get("types", []):
+			if not _return_type_known(str(m)):
+				_error(ERR_RETURN_UNKNOWN, "@return has unknown type '" + str(m) + "'", line, col, owner)
+				return
+	fn_node["return_ann"] = {"types": spec.get("types", []), "void": bool(spec.get("void", false)), "raw": str(spec.get("raw", "")), "line": line}
+
+
+## Marks a FUNC_DECL node (@return allowed in any position: a nested
+## named function is still a function declaration).
+func _mark_return_func(fn_node: Dictionary, owner: String) -> void:
+	var tag := _leading_return(fn_node)
+	if tag.is_empty():
+		return
+	_attach_return(fn_node, tag, owner)
+
+
+## Marks @return on a value statement (VAR_DECL/CONST_DECL): attaches
+## to a LAMBDA value, errors otherwise.
+func _mark_return_stmt(stmt_node: Dictionary, value: Variant, owner: String) -> void:
+	if value is Dictionary and str((value as Dictionary).get("type", "")) == "LAMBDA":
+		_attach_return(value, _leading_return(stmt_node), owner)
+	else:
+		_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(stmt_node.get("line", 0)), int(stmt_node.get("column", 0)), owner)
+
+
+## Collects RETURN_STMT nodes under body, never crossing a nested
+## FUNC_DECL/LAMBDA boundary (their returns belong to the inner
+## function, which gets its own check).
+func _collect_returns(body: Variant) -> Array:
+	var out: Array = []
+	_collect_returns_into(body, out)
+	return out
+
+
+func _collect_returns_into(node: Variant, out: Array) -> void:
+	if node is Array:
+		for e in node:
+			_collect_returns_into(e, out)
+		return
+	if not (node is Dictionary):
+		return
+	var d: Dictionary = node
+	var t := str(d.get("type", ""))
+	if t == "RETURN_STMT":
+		out.append(d)
+		return
+	if t == "FUNC_DECL" or t == "LAMBDA":
+		return
+	for k in d.keys():
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
+			continue
+		_collect_returns_into(d[k], out)
+
+
+func _fn_display(fn_node: Dictionary) -> String:
+	var fname := str(fn_node.get("name", ""))
+	if fname == "":
+		return "<lambda>"
+	return "'" + fname + "'"
+
+
+## Runs the @return checks for one function/lambda node: "->"
+## compatibility first, then value/bare return presence. No-op without
+## a recorded return_ann. Takes Variant: statement values may be null.
+func _check_return_ann(fn_node: Variant, owner: String) -> void:
+	if not (fn_node is Dictionary) or not (fn_node as Dictionary).has("return_ann"):
+		return
+	var fn: Dictionary = fn_node
+	var ann: Dictionary = fn["return_ann"]
+	var disp := _fn_display(fn)
+	var arrow := _arrow_name(fn.get("return_type", null))
+	var ann_void := bool(ann.get("void", false))
+	if arrow != "":
+		if ann_void and arrow != "void":
+			_error(ERR_RETURN_MISMATCH, "cannot use @return 'void' with '-> " + arrow + "' on function " + disp, int(fn.get("line", 0)), int(fn.get("column", 0)), owner)
+			return
+		if not ann_void and arrow == "void":
+			_error(ERR_RETURN_MISMATCH, "cannot use @return '" + str(ann.get("raw", "")) + "' with '-> void' on function " + disp, int(fn.get("line", 0)), int(fn.get("column", 0)), owner)
+			return
+		if not ann_void:
+			for m in ann.get("types", []):
+				if str(m) != arrow and not _derives_from(str(m), arrow):
+					_error(ERR_RETURN_MISMATCH, "cannot use @return '" + str(m) + "' with '-> " + arrow + "' on function " + disp + " ('" + str(m) + "' is neither '" + arrow + "' nor a subclass of it)", int(fn.get("line", 0)), int(fn.get("column", 0)), owner)
+	var rets := _collect_returns(fn.get("body", null))
+	if ann_void:
+		for r in rets:
+			if (r as Dictionary).get("value", null) != null:
+				_error(ERR_RETURN_VALUE, "cannot return a value from void function " + disp, int((r as Dictionary).get("line", 0)), int((r as Dictionary).get("column", 0)), owner)
+	else:
+		var expect := str(ann.get("raw", ""))
+		for r in rets:
+			if (r as Dictionary).get("value", null) == null:
+				_error(ERR_RETURN_VALUE, "bare return in non-void function " + disp + " (expects '" + expect + "')", int((r as Dictionary).get("line", 0)), int((r as Dictionary).get("column", 0)), owner)
+
+
 # ------------------------------------------------------- collect passes
 
 ## Records a member (deprecated or not) under owner. kind is one of
@@ -295,6 +615,13 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_mark_private(d, owner)
 		elif _has_any_private_tag(d):
 			_error(ERR_PRIVATE_MISPLACED, "@private must precede a member declaration (variable, function, class, enum, constant or signal) inside a class body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "FUNC_DECL":
+			_mark_return_func(d, owner)
+		elif _has_any_return_tag(d):
+			if t == "VAR_DECL" or t == "CONST_DECL":
+				_mark_return_stmt(d, d.get("value", null), owner)
+			else:
+				_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -307,6 +634,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_script_deprecated = {"message": str(tag.get("message", "")), "line": int(tag.get("line", 0))}
 		if _has_any_private_tag(d):
 			_error(ERR_PRIVATE_MISPLACED, "@private cannot be used at the file root, only on members inside a class body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_return_tag(d):
+			_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "PARAM":
 		var ptag = _leading_tag(d)
@@ -314,6 +643,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_DEPRECATED_UNSUPPORTED, "@deprecated on function parameters is not supported yet", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_private_tag(d):
 			_error(ERR_PRIVATE_MISPLACED, "@private must precede a member declaration (variable, function, class, enum, constant or signal) inside a class body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_return_tag(d):
+			_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "LAMBDA" or t == "ACCESSOR":
 		if _has_any_deprecated_tag(d):
@@ -322,6 +653,12 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_private_tag(d):
 			_error(ERR_PRIVATE_MISPLACED, "@private must precede a member declaration (variable, function, class, enum, constant or signal) inside a class body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_return_tag(d):
+			if t == "LAMBDA":
+				_attach_return(d, _leading_return(d), owner)
+			else:
+				_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+				return
 		_scan(d.get("params", []), owner, false)
 		_scan(d.get("body", null), owner, false)
 		_scan(d.get("detail", null), owner, false)
@@ -330,6 +667,16 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		_scan_children(d.get("children", []), owner, member_pos)
 		return
 	if t == "COMMENT" or t == "DOC_COMMENT" or t == "TYPE_INFO" or t == "ANNOTATION_DECL":
+		return
+	if _has_any_return_tag(d):
+		if t == "EXPR_STMT":
+			var e: Variant = d.get("expr", null)
+			if e is Dictionary and str((e as Dictionary).get("type", "")) == "LAMBDA":
+				_attach_return(e, _leading_return(d), owner)
+			else:
+				_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		else:
+			_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if _has_any_deprecated_tag(d):
 		_error(ERR_DEPRECATED_MISPLACED, "@deprecated must precede a member declaration (variable, function, class, enum, constant or signal)", int(d.get("line", 0)), int(d.get("column", 0)), owner)
@@ -348,7 +695,7 @@ func _scan_children(children: Variant, owner: String, member_pos: bool = true) -
 
 func _scan_generic_children(d: Dictionary, owner: String, member_pos: bool = true) -> void:
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "analyzer_errors", "analyzer_warnings"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "analyzer_errors", "analyzer_warnings"]:
 			continue
 		_scan(d[k], owner, member_pos)
 
@@ -458,12 +805,20 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 			if child is Dictionary and str((child as Dictionary).get("type", "")) == "CLASS_DECL":
 				_mark_decl(child, full)
 				_mark_private(child, full)
+				if _has_any_return_tag(child):
+					_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				_scan_class_body(child, full)
 			elif child is Dictionary and str((child as Dictionary).get("type", "")) in DECL_TYPES:
 				_mark_decl(child, full)
 				_mark_private(child, full)
 				if str((child as Dictionary).get("type", "")) == "FUNC_DECL":
+					_mark_return_func(child, full)
 					_scan((child as Dictionary).get("body", null), full)
+				elif _has_any_return_tag(child):
+					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
+						_mark_return_stmt(child, (child as Dictionary).get("value", null), full)
+					else:
+						_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 
 
 ## Reads the base class text of a CLASS_DECL: inline extends_type
@@ -568,6 +923,7 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 		_check_expr_tokens(_as_tokens(d.get("value", null)), scope, owner)
 		_check_type_ref(d.get("vartype", null), scope, owner)
 		_scope_add(scope, str(d.get("name", "")), "local")
+		_check_return_ann(d.get("value", null), owner)
 		var acc: Variant = d.get("accessors", null)
 		if acc is Dictionary:
 			_walk(acc, scope, owner)
@@ -622,6 +978,7 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 		return
 	if t == "EXPR_STMT":
 		_check_expr_tokens(_as_tokens(d.get("expr", null)), scope, owner)
+		_check_return_ann(d.get("expr", null), owner)
 		return
 	if t == "ACCESSOR":
 		var detail: Variant = d.get("detail", null)
@@ -644,7 +1001,7 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 
 func _walk_generic(d: Dictionary, scope: Dictionary, owner: String) -> void:
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
 			continue
 		_walk(d[k], scope, owner)
 
@@ -662,6 +1019,7 @@ func _walk_members(children: Variant, scope: Dictionary, owner: String) -> void:
 		if t == "VAR_DECL" or t == "CONST_DECL":
 			_check_expr_tokens(_as_tokens((child as Dictionary).get("value", null)), scope, owner)
 			_check_type_ref((child as Dictionary).get("vartype", null), scope, owner)
+			_check_return_ann((child as Dictionary).get("value", null), owner)
 			var acc: Variant = (child as Dictionary).get("accessors", null)
 			if acc is Dictionary:
 				_walk(acc, scope, owner)
@@ -695,6 +1053,7 @@ func _walk_func(node: Dictionary, scope: Dictionary, owner: String) -> void:
 	if rt is Dictionary:
 		_check_type_ref(rt, fscope, owner)
 	_walk(node.get("body", null), fscope, owner)
+	_check_return_ann(node, owner)
 
 
 func _walk_class(node: Dictionary, scope: Dictionary, owner: String) -> void:
@@ -715,6 +1074,7 @@ func _walk_lambda(node: Dictionary, scope: Dictionary, owner: String) -> void:
 			_scope_add(lscope, str((p as Dictionary).get("name", "")), "param")
 	_collect_func_bindings(node.get("body", null), lscope)
 	_walk(node.get("body", null), lscope, owner)
+	_check_return_ann(node, owner)
 
 
 ## Pre-walk collecting VAR/CONST names, FOR targets and `var x`
@@ -743,7 +1103,7 @@ func _collect_func_bindings(node: Variant, scope: Dictionary) -> void:
 	elif t == "CLASS_DECL":
 		return
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann"]:
 			continue
 		_collect_func_bindings(d[k], scope)
 
