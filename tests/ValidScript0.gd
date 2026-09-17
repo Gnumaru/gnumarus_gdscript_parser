@@ -890,7 +890,7 @@ func demo_misc() -> void:
 
 
 func demo_engine_classes() -> void:
-	## Representative sample of the 1036 engine classes (names verified against API 4.7.2).
+	## Representative sample of the 1054 engine classes (names verified against API 4.7.2).
 	## Full coverage is unfeasible in a single file; complete variant types are in demo_builtin_types().
 	var node_ref: Node = null
 	var node_2d_ref: Node2D = null

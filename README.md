@@ -161,7 +161,12 @@ var ast3: Dictionary = syn.parse("res://script.gd")
 ## 4. gnumaru_godot_native_types_info_dumper
 
 Runs a Godot executable with `--dump-extension-api` and converts the
-(huge) `extension_api.json` into one small JSON file per native type:
+(huge) `extension_api.json` into one small JSON file per native type.
+Because the extension dump misses entries (`Object.free()` exists in
+4.7.2 but is absent from it), every `Object`-inheriting class is then
+completed with live `ClassDB` data — methods, signals, properties,
+constants, enums — adding only what the dump lacks (dump data is
+never overridden; classes missing from the dump get a minimal entry):
 
 ```gdscript
 var d := gnumaru_godot_native_types_info_dumper.new()

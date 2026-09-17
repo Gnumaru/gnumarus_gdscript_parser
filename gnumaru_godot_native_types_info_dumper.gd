@@ -8,6 +8,12 @@ extends RefCounted
 ## inheritance (with Variant as the root, e.g. int extends Variant and
 ## Node3D extends Node ... extends Object extends Variant), static and
 ## instance methods, and operators (as, in, is, +, +=, *, **, ...).
+## Because the extension-api dump misses entries (e.g. Object.free()
+## in 4.7.2), every Object-inheriting class is then completed with live
+## ClassDB data (methods, signals, properties, constants, enums):
+## anything ClassDB reports and the dump lacks is added, dump data is
+## never overridden. Builtin Variant types are not in ClassDB and stay
+## dump-only.
 ##
 ## Output layout (created when missing; "types_info" is ignored by the
 ## repo .gitignore):
@@ -49,6 +55,32 @@ const CLASSES_DIR_NAME := "classes"
 const INDEX_FILE_NAME := "index.json"
 const VARIANT_ROOT := "Variant"
 
+## Variant.Type int -> type name (verified against the running engine:
+## NIL=0, INT=2, STRING=4, OBJECT=24, ARRAY=28, MAX=39, ...). Used to
+## translate ClassDB argument/return/property type codes.
+const VARIANT_TYPE_INT := {
+	0: "Nil", 1: "bool", 2: "int", 3: "float", 4: "String",
+	5: "Vector2", 6: "Vector2i", 7: "Rect2", 8: "Rect2i",
+	9: "Vector3", 10: "Vector3i", 11: "Transform2D", 12: "Vector4",
+	13: "Vector4i", 14: "Plane", 15: "Quaternion", 16: "AABB",
+	17: "Basis", 18: "Transform3D", 19: "Projection", 20: "Color",
+	21: "StringName", 22: "NodePath", 23: "RID", 24: "Object",
+	25: "Callable", 26: "Signal", 27: "Dictionary", 28: "Array",
+	29: "PackedByteArray", 30: "PackedInt32Array", 31: "PackedInt64Array",
+	32: "PackedFloat32Array", 33: "PackedFloat64Array",
+	34: "PackedStringArray", 35: "PackedVector2Array",
+	36: "PackedVector3Array", 37: "PackedColorArray",
+	38: "PackedVector4Array",
+}
+
+## ClassDB method flag bits (Godot 4): static placement and entry
+## booleans. Only used to file merged methods and copy flags;
+## verification searches static and instance lists alike.
+const METHOD_FLAG_CONST := 4
+const METHOD_FLAG_VIRTUAL := 8
+const METHOD_FLAG_VARARG := 16
+const METHOD_FLAG_STATIC := 32
+
 ## Binary operators from which an augmented assignment form is derived
 ## (e.g. "+" allows "+="). Derived entries are marked origin "derived"
 ## with "derived_from" set, so consumers know they came from the rule.
@@ -69,6 +101,7 @@ func dump_all(godot_path: String = "") -> Dictionary:
 	if infos.is_empty() and last_error != "":
 		last_summary = {"ok": false, "error": last_error}
 		return last_summary
+	var merged := merge_classdb(infos)
 	var written := write_infos(infos)
 	var summary := {
 		"ok": true,
@@ -77,6 +110,7 @@ func dump_all(godot_path: String = "") -> Dictionary:
 		"class_types": written.get("class_types", []),
 		"builtin_count": written.get("builtin_count", 0),
 		"class_count": written.get("class_count", 0),
+		"classdb_added": merged,
 		"builtin_dir": _join_path(output_base, BUILTIN_DIR_NAME),
 		"classes_dir": _join_path(output_base, CLASSES_DIR_NAME),
 		"index_path": _join_path(output_base, INDEX_FILE_NAME),
@@ -181,6 +215,199 @@ func extract_from_data(api: Dictionary) -> Dictionary:
 	var header: Dictionary = api.get("header", {})
 	infos["__engine_version__"] = str(header.get("version_full_name", ""))
 	return infos
+
+
+## Merges live ClassDB data into the extracted infos. The
+## --dump-extension-api output misses entries (e.g. Object.free() in
+## 4.7.2), so for every Object-inheriting native class the methods,
+## signals, properties, constants and enums reported by ClassDB and
+## missing from the dump are added (never overriding dump data, which
+## stays richer). Classes present in ClassDB but absent from the dump
+## get a minimal skeleton entry so coverage is complete (pass
+## include_new=false to only fill classes already present, useful for
+## fast unit tests). Builtin Variant types are not in ClassDB and stay
+## dump-only. Returns counts of added entries.
+func merge_classdb(infos: Dictionary, include_new: bool = true) -> Dictionary:
+	var added := {"classes": 0, "methods": 0, "signals": 0, "properties": 0, "constants": 0, "enums": 0}
+	for c in ClassDB.get_class_list():
+		var tname := str(c)
+		var info: Dictionary = infos.get(tname, {})
+		if info.is_empty():
+			if not include_new:
+				continue
+			info = _classdb_skeleton(tname)
+			if info.is_empty():
+				continue
+			infos[tname] = info
+			added["classes"] = int(added["classes"]) + 1
+		if str(info.get("kind", "")) != "class":
+			continue
+		for m in ClassDB.class_get_method_list(tname, true):
+			if not (m is Dictionary):
+				continue
+			var md: Dictionary = m
+			var mname := str(md.get("name", ""))
+			if mname == "":
+				continue
+			if _has_named(info.get("static_methods", []), mname) or _has_named(info.get("instance_methods", []), mname):
+				continue
+			var key := "instance_methods"
+			if (int(md.get("flags", 1)) & METHOD_FLAG_STATIC) != 0:
+				key = "static_methods"
+			var mlst: Array = info.get(key, [])
+			mlst.append(_classdb_method(md))
+			info[key] = mlst
+			added["methods"] = int(added["methods"]) + 1
+		for s in ClassDB.class_get_signal_list(tname, true):
+			if not (s is Dictionary):
+				continue
+			var sd: Dictionary = s
+			var sname := str(sd.get("name", ""))
+			if sname == "" or _has_named(info.get("signals", []), sname):
+				continue
+			var slst: Array = info.get("signals", [])
+			slst.append({"name": sname, "params": _classdb_params(sd.get("arguments", sd.get("args", [])), sd.get("default_args", []))})
+			info["signals"] = slst
+			added["signals"] = int(added["signals"]) + 1
+		for p in ClassDB.class_get_property_list(tname, true):
+			if not (p is Dictionary):
+				continue
+			var pd: Dictionary = p
+			var pname := str(pd.get("name", ""))
+			if pname == "" or _has_named(info.get("properties", []), pname):
+				continue
+			var plst: Array = info.get("properties", [])
+			plst.append({"name": pname, "type": _classdb_type(pd, false), "setter": "", "getter": ""})
+			info["properties"] = plst
+			added["properties"] = int(added["properties"]) + 1
+		for cv in ClassDB.class_get_integer_constant_list(tname, true):
+			var cname := str(cv)
+			if cname == "" or _has_named(info.get("constants", []), cname):
+				continue
+			var clst: Array = info.get("constants", [])
+			clst.append({"name": cname, "value": ClassDB.class_get_integer_constant(tname, cname)})
+			info["constants"] = clst
+			added["constants"] = int(added["constants"]) + 1
+		for ev in ClassDB.class_get_enum_list(tname, true):
+			var ename := str(ev)
+			if ename == "" or _has_named(info.get("enums", []), ename):
+				continue
+			var vals: Array = []
+			for cc in ClassDB.class_get_enum_constants(tname, ename, true):
+				var cn2 := str(cc)
+				vals.append({"name": cn2, "value": ClassDB.class_get_integer_constant(tname, cn2)})
+			var elst: Array = info.get("enums", [])
+			elst.append({"name": ename, "is_bitfield": false, "values": vals})
+			info["enums"] = elst
+			added["enums"] = int(added["enums"]) + 1
+	return added
+
+
+## Minimal class entry for a ClassDB class missing from the dump, with
+## the parent chain resolved live. Members merge on top of it.
+static func _classdb_skeleton(tname: String) -> Dictionary:
+	if tname == "":
+		return {}
+	var chain: Array = [tname]
+	var seen := {tname: true}
+	var p := str(ClassDB.get_parent_class(tname))
+	while p != "" and not seen.has(p):
+		chain.append(p)
+		seen[p] = true
+		if ClassDB.class_exists(p):
+			p = str(ClassDB.get_parent_class(p))
+		else:
+			break
+	chain.append(VARIANT_ROOT)
+	var parent := ""
+	if chain.size() > 1:
+		parent = str(chain[1])
+	return {
+		"name": tname, "kind": "class", "parent": parent, "inheritance_chain": chain,
+		"is_instantiable": ClassDB.can_instantiate(tname),
+		"is_refcounted": ClassDB.is_parent_class(tname, "RefCounted"),
+		"operators": [], "properties": [], "signals": [], "enums": [],
+		"constants": [], "static_methods": [], "instance_methods": [],
+	}
+
+
+static func _has_named(items: Variant, mname: String) -> bool:
+	if not (items is Array):
+		return false
+	for e in items:
+		if e is Dictionary and str((e as Dictionary).get("name", "")) == mname:
+			return true
+	return false
+
+
+## Transcribes one ClassDB method entry ({args, default_args, flags,
+## id, name, return}) into our method shape.
+static func _classdb_method(md: Dictionary) -> Dictionary:
+	var flags := int(md.get("flags", 1))
+	return {
+		"name": str(md.get("name", "")),
+		"returns": _classdb_type(md.get("return", {}), true),
+		"is_vararg": (flags & METHOD_FLAG_VARARG) != 0,
+		"is_const": (flags & METHOD_FLAG_CONST) != 0,
+		"is_virtual": (flags & METHOD_FLAG_VIRTUAL) != 0,
+		"params": _classdb_params(md.get("args", []), md.get("default_args", [])),
+	}
+
+
+## Normalizes one ClassDB parameter list. Defaults are trailing
+## (default_args aligns to the end of args); only JSON-safe scalar
+## defaults are kept.
+static func _classdb_params(api_arguments: Variant, api_defaults: Variant) -> Array:
+	var out: Array = []
+	if not (api_arguments is Array):
+		return out
+	var defs: Array = []
+	if api_defaults is Array:
+		defs = api_defaults
+	var first_default := (api_arguments as Array).size() - defs.size()
+	for i in range((api_arguments as Array).size()):
+		var a: Variant = (api_arguments as Array)[i]
+		if not (a is Dictionary):
+			continue
+		var ad: Dictionary = a
+		var has_default := i >= first_default and defs.size() > 0
+		var def: Variant = null
+		if has_default:
+			def = _classdb_json_value(defs[i - first_default])
+		out.append({
+			"name": str(ad.get("name", "")),
+			"type": _classdb_type(ad, false),
+			"has_default": has_default,
+			"default": def,
+		})
+	return out
+
+
+## Translates a ClassDB type Dictionary ({type int, class_name}) to a
+## type name. OBJECT with a plain class_name uses it (dotted names are
+## enum references: plain int, like the dump normalizer); return
+## position maps absent results to void.
+static func _classdb_type(d: Variant, is_return: bool) -> String:
+	if not (d is Dictionary):
+		return "void" if is_return else "Variant"
+	var t := int((d as Dictionary).get("type", 0))
+	if t == 24:
+		var cn := str((d as Dictionary).get("class_name", ""))
+		if cn != "" and not ("." in cn):
+			return cn
+		return "Object"
+	if t == 0:
+		return "void" if is_return else "Nil"
+	return str(VARIANT_TYPE_INT.get(t, "Variant"))
+
+
+## Keeps only JSON-safe scalar defaults (anything else becomes null so
+## one exotic default can never corrupt a whole type file).
+static func _classdb_json_value(v: Variant) -> Variant:
+	match typeof(v):
+		TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING:
+			return v
+	return null
 
 
 ## Writes one <Name>.json per type plus index.json.

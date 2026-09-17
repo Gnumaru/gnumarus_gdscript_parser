@@ -96,3 +96,4 @@ func _f_facts(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\n# @var x Control\nvar x: Node\nfunc f():\n\tx.hide()\n", "res://tests/tmp_flow_a1.gd")), "flow respects @var facts")
 	h.check(_has_missing(h.analyze_text("extends Node\nvar x: Node\nfunc f():\n\tx.hide()\n", "res://tests/tmp_flow_a2.gd"), "missing_method", "hide"), "without fact it errors")
 	h.check(_clean(h.analyze_text("extends Node\nfunc f(a: Node):\n\t# @var a Control\n\n\ta.hide()\n", "res://tests/tmp_flow_a3.gd")), "flow respects free @var facts")
+	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar v: Variant\n\tif typeof(v) == TYPE_OBJECT:\n\t\tv.free()\n", "res://tests/tmp_flow_a4.gd")), "ClassDB-merged free resolves in Object guard")
