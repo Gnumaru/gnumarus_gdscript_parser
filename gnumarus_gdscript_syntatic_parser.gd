@@ -226,6 +226,23 @@ func _flush_trivia_all() -> Array:
 	return out
 
 
+## Flushes buffered comments at a DEDENT boundary, but keeps column-0
+## comments pending: visually they sit outside the closing block (the
+## DEDENT token itself only appears at the next code line), so an
+## outer level may still attach them to a following declaration.
+func _flush_trivia_dedent() -> Array:
+	_claim_header()
+	var out: Array = []
+	var keep: Array = []
+	for c in _pending_trivia:
+		if c is Dictionary and int((c as Dictionary).get("column", 0)) == 0:
+			keep.append(c)
+		else:
+			out.append(_trivia_to_node(c))
+	_pending_trivia = keep
+	return out
+
+
 func _trivia_to_node(tok: Dictionary) -> Dictionary:
 	return {"type": tok.get("type", NODE_COMMENT), "value": tok.get("value", ""), "line": tok.get("line", 0), "column": tok.get("column", 0)}
 
@@ -243,7 +260,9 @@ func _parse_top_decl() -> Array:
 			return _finish_decl(_annotation_stmt(annotations), annotations, tail_parts)
 		return _flush_trivia_all()
 	var t := _peek_type()
-	if t == "DEDENT" or t == "EOF":
+	if t == "DEDENT":
+		return _flush_trivia_dedent()
+	if t == "EOF":
 		return _flush_trivia_all()
 	if t == "INDENT":
 		var parts := _split_trivia(_line_at())
@@ -311,7 +330,9 @@ func _parse_stmt(pre: Array = []) -> Array:
 			return _finish_decl(_annotation_stmt(annotations), annotations, tail_parts)
 		return _flush_trivia_all()
 	var t := _peek_type()
-	if t == "DEDENT" or t == "EOF":
+	if t == "DEDENT":
+		return _flush_trivia_dedent()
+	if t == "EOF":
 		return _flush_trivia_all()
 	var v := _peek_value()
 	var start_line := _node_start_line(annotations)
