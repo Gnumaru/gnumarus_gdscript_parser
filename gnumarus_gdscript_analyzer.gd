@@ -43,6 +43,9 @@ extends RefCounted
 ## "deprecated"/"private" mark on marked declaration nodes. Just before
 ## returning, the user type JSON files are updated with member flags
 ## and the analysis errors/warnings.
+## analyze() first ensures the native database (builtin/, classes/,
+## index.json), dumping it on demand; when the dump itself fails it
+## records a "native_types" error, prints it and returns early.
 ##
 ## Usage:
 ##   var sem := gnumarus_gdscript_semantic_parser.new()
@@ -56,6 +59,14 @@ const ERR_DEPRECATED_MISPLACED := "deprecated_misplaced"
 const ERR_DEPRECATED_UNSUPPORTED := "deprecated_unsupported"
 const ERR_PRIVATE_MISPLACED := "private_misplaced"
 const ERR_PRIVATE_USE := "private_use"
+const ERR_NATIVE_TYPES := "native_types"
+
+## Preloaded (not via class_name) so this script compiles standalone,
+## even before the editor/cache registers global classes.
+const SemParser = preload("res://gnumarus_gdscript_semantic_parser.gd")
+## Preloaded like SemParser so the native database can be ensured
+## without relying on the global class cache.
+const NativeDumper = preload("res://gnumaru_godot_native_types_info_dumper.gd")
 
 ## Member kinds tracked per owner. Owner "" is the script root,
 ## otherwise a dotted inner path like "Outer" or "Outer.Inner".
@@ -91,11 +102,16 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 		if child is Dictionary and str((child as Dictionary).get("type", "")) == "CLASS_NAME":
 			_script_class = str((child as Dictionary).get("name", ""))
 	var anchor = _analyzer_anchor_dir()
-	_project_root = gnumarus_gdscript_semantic_parser.find_project_root(anchor)
+	_project_root = SemParser.find_project_root(anchor)
 	if _project_root == "":
-		_project_root = gnumarus_gdscript_semantic_parser.fallback_root(anchor + "/gnumaru_godot_native_types_info_dumper.gd")
-	_script_resource_path = gnumarus_gdscript_semantic_parser.resource_path_for(script_path, _project_root)
+		_project_root = SemParser.fallback_root(anchor + "/gnumaru_godot_native_types_info_dumper.gd")
+	_script_resource_path = SemParser.resource_path_for(script_path, _project_root)
 	_write_base = _compute_write_base(_project_root)
+	if not _ensure_native_types():
+		ast["analyzer_errors"] = _errors
+		ast["analyzer_warnings"] = _warnings
+		ast["analyzer_written"] = _written
+		return {"ast": ast, "errors": _errors, "warnings": _warnings}
 	_scan_header(ast)
 	_scan_children(ast.get("children", []), "")
 	var scope = _new_scope(null)
@@ -105,6 +121,21 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_update_user_files(ast)
 	ast["analyzer_written"] = _written
 	return {"ast": ast, "errors": _errors, "warnings": _warnings}
+
+
+## Ensures the native type database (types_info/builtin, classes,
+## index.json) exists, dumping it on demand into _write_base. On failure
+## records a "native_types" error, prints it and returns false, so
+## analyze() returns early with just that error.
+func _ensure_native_types() -> bool:
+	var d = NativeDumper.new()
+	d.output_base = _write_base
+	if d.ensure_present():
+		return true
+	var msg: String = "Native type info missing and dump failed: " + str(d.last_error)
+	push_error(msg)
+	_error(ERR_NATIVE_TYPES, msg, 0, 0, "")
+	return false
 
 
 ## Directory holding this script (res:// form preferred), used as the
@@ -1137,7 +1168,7 @@ func _error(kind: String, message: String, line: int, column: int, owner: String
 ## class (dotted names). Existing files are patched (deprecated flags
 ## plus analysis lists); missing files get a minimal equivalent.
 func _update_user_files(ast: Dictionary) -> void:
-	var base_name = gnumarus_gdscript_semantic_parser.user_file_base(_script_class, _script_resource_path, "")
+	var base_name = SemParser.user_file_base(_script_class, _script_resource_path, "")
 	var root_prefix = _script_class
 	if root_prefix == "":
 		root_prefix = base_name

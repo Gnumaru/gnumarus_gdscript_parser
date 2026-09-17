@@ -19,6 +19,9 @@ extends RefCounted
 ## up first in types_info/builtin/<Name>.json, then in
 ## types_info/user/<Name>.json. Missing files mean
 ## "unknown type '<Name>'". Loaded files are cached per analyze() call.
+## analyze() first ensures the native database (builtin/, classes/,
+## index.json), dumping it on demand; when the dump itself fails it
+## records a "native_types" error, prints it and returns early.
 ##
 ## After checking, and before returning the modified AST, user type files
 ## are created or updated under types_info/user/: one per script
@@ -43,6 +46,9 @@ const KIND_CONST_ASSIGN := "const_assign"
 const KIND_UNDECLARED := "undeclared"
 const KIND_ASSIGN := "assign"
 const KIND_SUBSCRIPT := "subscript"
+const KIND_NATIVE_TYPES := "native_types"
+
+const NativeDumper = preload("res://gnumaru_godot_native_types_info_dumper.gd")
 
 const SIGNAL_METHODS := ["connect", "disconnect", "is_connected", "emit", "get_connections"]
 const NODE_SIGNALS := ["ready", "renamed", "tree_entered", "tree_entering", "tree_exited", "tree_exiting", "replacing_by"]
@@ -97,6 +103,10 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_script_resource_path = resource_path_for(script_path, _project_root)
 	_bases = _compute_bases(_project_root)
 	_write_base = _compute_write_base(_project_root)
+	if not _ensure_native_types():
+		ast["semantic_errors"] = _errors
+		ast["user_types_written"] = _written
+		return ast
 	_script_scope = _new_scope(null)
 	_script_infos = {}
 	_collect_script(ast)
@@ -105,6 +115,22 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	ast["semantic_errors"] = _errors
 	ast["user_types_written"] = _written
 	return ast
+
+
+## Ensures the native type database (types_info/builtin, classes,
+## index.json) exists, dumping it on demand into _write_base. On failure
+## records a "native_types" error, prints it and returns false, so
+## analyze() returns early with just that error instead of flooding
+## unknown-type noise for every engine type.
+func _ensure_native_types() -> bool:
+	var d = NativeDumper.new()
+	d.output_base = _write_base
+	if d.ensure_present():
+		return true
+	var msg: String = "Native type info missing and dump failed: " + str(d.last_error)
+	push_error(msg)
+	_error(KIND_NATIVE_TYPES, msg, 0, 0)
+	return false
 
 
 ## Directory holding the dumper script (res:// form preferred), used as

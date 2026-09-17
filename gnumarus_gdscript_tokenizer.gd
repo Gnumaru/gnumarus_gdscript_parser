@@ -180,6 +180,7 @@ func _pump() -> void:
 
 func _reset_state(text: String) -> void:
 	_text = text
+	last_error = ""
 	_length = text.length()
 	_pos = 0
 	_line = 1

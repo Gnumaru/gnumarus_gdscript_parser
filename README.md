@@ -384,7 +384,8 @@ class Child extends Base:
 ## types_info layout
 
 - `types_info/builtin/<Name>.json` and `types_info/classes/<Name>.json`
-  come from the dumper (plus `index.json`); the directory is gitignored.
+  come from the dumper (plus `index.json`); the whole directory is
+  gitignored and regenerated on demand (see "tests" below).
 - `types_info/user/<Name>.json` is written by the semantic parser and
   updated by the analyzer: one file per script `class_name` (or
   resource-path name like `a_b.json` for `class_name`-less scripts),
@@ -395,11 +396,37 @@ class Child extends Base:
 
 ## tests
 
-`tests/test.sh` runs `tests/test.gd` headlessly against the fixture
-`tests/ValidScript0.gd` (a large, valid GDScript file exercising the
-whole pipeline). Extra suites used during development
-(`run_analyzer_tests.gd`, `run_private_family_tests.gd`, …) live
-outside the repo in scratch projects and are re-created on demand.
+`./tests/test.sh` (from the project root) runs every
+`tests/test_*.gd` suite headlessly inside this project's own directory
+— no scratch copies needed. It exits 0 only when Godot exits 0 AND
+the `ALL TESTS PASSED` marker is printed, so crashes can never look
+green. `GODOT_BIN` overrides the engine path.
+
+- `tests/run_all.gd` loads each suite (they expose `run()`), prints a
+  per-suite `PASS`/`FAIL` line plus the grand total. A suite that
+  fails to load counts as a failure.
+- `tests/helpers.gd` holds the shared assertions: one instance per
+  suite, `check()` per expectation, failed names via printerr.
+- Suites: `test_fixture.gd` (tokenize → parse → analyze on the
+  `tests/ValidScript0.gd` fixture, must come out clean),
+  `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
+  (`@private` nested-family rule), `test_reuse.gd` (same instance
+  parsing twice must give independent results).
+- `tests/ensure_native_types.gd` runs first: if `types_info/builtin/`,
+  `types_info/classes/` and `index.json` exist with content it exits
+  immediately; otherwise it runs the dumper with the same engine
+  binary, so a deleted `types_info/` fully grows back
+  (`FORCE_NATIVE_DUMP=1` regenerates even when present).
+- The semantic parser and the analyzer enforce the same precondition
+  on every `analyze()`: when the native database is missing they dump
+  it on demand, and when the dump itself fails (e.g. no `godot`
+  binary) they print an error and return early with a single
+  `native_types` error entry instead of flooding unknown-type noise.
+- Workflow: after any change to the pipeline scripts, run
+  `./tests/test.sh`. If checks that should pass fail (or vice
+  versa), fix the code or the test — never both silently — and
+  re-run until green.
+- Test artifacts (`types_info/`, `.godot/`, `*.uid`) are gitignored.
 
 ## Documentation maintenance
 

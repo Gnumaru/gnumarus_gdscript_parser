@@ -87,6 +87,44 @@ func dump_all(godot_path: String = "") -> Dictionary:
 	return summary
 
 
+## Ensures the native database under output_base exists: index.json plus
+## non-empty builtin/ and classes/ directories. Dumps on demand with
+## dump_all() when anything is missing. Returns true when the database
+## is present (or was just dumped); false sets last_error. Never crashes.
+## The semantic parser and the analyzer call this on every analyze().
+func ensure_present(godot_path: String = "") -> bool:
+	last_error = ""
+	if is_present():
+		return true
+	var exe: String = godot_path
+	if exe == "":
+		exe = default_executable()
+	var summary: Dictionary = dump_all(exe)
+	if not bool(summary.get("ok", false)):
+		return false
+	return is_present()
+
+
+## True when output_base holds index.json plus non-empty builtin/ and
+## classes/ directories. No dumping, no writes: safe to call often.
+func is_present() -> bool:
+	if not FileAccess.file_exists(_join_path(output_base, INDEX_FILE_NAME)):
+		return false
+	return _dir_has_files(_join_path(output_base, BUILTIN_DIR_NAME)) and _dir_has_files(_join_path(output_base, CLASSES_DIR_NAME))
+
+
+## Picks the Godot executable for dumping: explicit GODOT_BIN first,
+## then the currently running engine binary, then the "godot" command.
+static func default_executable() -> String:
+	var env: String = OS.get_environment("GODOT_BIN")
+	if env != "":
+		return env
+	var exe: String = OS.get_executable_path()
+	if exe != "":
+		return exe
+	return "godot"
+
+
 ## Runs the Godot executable with --dump-extension-api and returns the
 ## path of the generated JSON file, or "" on failure (last_error set).
 func run_dump(godot_path: String = "") -> String:
@@ -450,6 +488,23 @@ func _ensure_dir(path: String) -> int:
 	if d == null:
 		return FAILED
 	return d.make_dir_recursive(path)
+
+
+## True when path is a directory holding at least one visible file.
+func _dir_has_files(path: String) -> bool:
+	var d: DirAccess = DirAccess.open(path)
+	if d == null:
+		return false
+	d.list_dir_begin()
+	var found := false
+	var f: String = d.get_next()
+	while f != "":
+		if not f.begins_with("."):
+			found = true
+			break
+		f = d.get_next()
+	d.list_dir_end()
+	return found
 
 
 ## Best-effort removal of the intermediate dump file.
