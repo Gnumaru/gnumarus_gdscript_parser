@@ -17,6 +17,7 @@ func run() -> Dictionary:
 	_f_is(h)
 	_f_instanceof(h)
 	_f_facts(h)
+	_f_script(h)
 	return h.result()
 
 
@@ -45,14 +46,17 @@ func _f_strict(h) -> void:
 	h.check(_has_missing(h.analyze_text("extends Node\nfunc f():\n\tvar n: Node\n\tn.nonexistent_xyz()\n", "res://tests/tmp_flow_s3.gd"), "missing_method", "type 'Node' has no method"), "bogus call errors")
 	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar s: String\n\ts.substr(0, 1)\n", "res://tests/tmp_flow_s4.gd")), "builtin call clean")
 	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar c: Control\n\tc.hide()\n", "res://tests/tmp_flow_s5.gd")), "inherited call clean")
-	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar n: Node\n\tprint(n.name)\n", "res://tests/tmp_flow_s6.gd")), "member read never errors")
+	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar n: Node\n\tprint(n.name)\n", "res://tests/tmp_flow_s6.gd")), "engine member read clean")
+	h.check(_has_missing(h.analyze_text("extends Node\nfunc f():\n\tvar n: Node\n\tprint(n.bogus_member)\n", "res://tests/tmp_flow_s7.gd"), "missing_member", "has no member"), "engine member read errors")
 
 
 func _f_skip(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar x = 1\n\tx.anything_goes()\n", "res://tests/tmp_flow_k1.gd")), "dynamic = skips")
 	h.check(_clean(h.analyze_text("extends Node\nfunc f(a):\n\ta.anything_goes()\n", "res://tests/tmp_flow_k2.gd")), "untyped param skips")
-	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tself.anything_goes()\n", "res://tests/tmp_flow_k3.gd")), "self skips")
-	h.check(_clean(h.analyze_text("class_name FLib\nextends Node\nclass Item:\n\tpass\nfunc f():\n\tvar it := Item.new()\n\tit.anything_goes()\n", "res://tests/tmp_flow_k4.gd")), "script class skips")
+	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tself.queue_free()\n", "res://tests/tmp_flow_k3.gd")), "self engine member clean")
+	h.check(_has_missing(h.analyze_text("extends Node\nfunc f():\n\tself.anything_goes()\n", "res://tests/tmp_flow_k3b.gd"), "missing_method", "anything_goes"), "self bogus errors")
+	h.check(_clean(h.analyze_text("class_name FLib\nextends Node\nclass Item:\n\tvar id := 0\nfunc f():\n\tvar it := Item.new()\n\tprint(it.id)\n", "res://tests/tmp_flow_k4.gd")), "script member clean")
+	h.check(_has_missing(h.analyze_text("class_name FLib\nextends Node\nclass Item:\n\tvar id := 0\nfunc f():\n\tvar it := Item.new()\n\tit.nope()\n", "res://tests/tmp_flow_k5.gd"), "missing_method", "nope"), "script member bogus errors")
 
 
 func _f_continue(h) -> void:
@@ -95,5 +99,21 @@ func _f_instanceof(h) -> void:
 func _f_facts(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\n# @var x Control\nvar x: Node\nfunc f():\n\tx.hide()\n", "res://tests/tmp_flow_a1.gd")), "flow respects @var facts")
 	h.check(_has_missing(h.analyze_text("extends Node\nvar x: Node\nfunc f():\n\tx.hide()\n", "res://tests/tmp_flow_a2.gd"), "missing_method", "hide"), "without fact it errors")
-	h.check(_clean(h.analyze_text("extends Node\nfunc f(a: Node):\n\t# @var a Control\n\n\ta.hide()\n", "res://tests/tmp_flow_a3.gd")), "flow respects free @var facts")
+	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar x: Node\n\t# @var x Control\n\n\tx.hide()\n", "res://tests/tmp_flow_a3.gd")), "flow respects free @var facts")
 	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tvar v: Variant\n\tif typeof(v) == TYPE_OBJECT:\n\t\tv.free()\n", "res://tests/tmp_flow_a4.gd")), "ClassDB-merged free resolves in Object guard")
+
+
+## Strict Objects: no dynamic script dispatch, only declared and
+## inherited members. Script members through a base type error;
+## suppressing needs a type guard.
+func _f_script(h) -> void:
+	h.check(_has_missing(h.analyze_text("extends Node\nvar health := 10\nfunc f():\n\tvar n: Node\n\tprint(n.health)\n", "res://tests/tmp_flow_d1.gd"), "missing_member", "has no member 'health'"), "script member via engine base errors")
+	h.check(_clean(h.analyze_text("extends Node\nclass Item:\n\tvar id := 0\nfunc f():\n\tvar n: Node\n\tif n is Item:\n\t\tprint(n.id)\n", "res://tests/tmp_flow_d2.gd")), "is guard suppresses script member")
+	h.check(_clean(h.analyze_text("extends Node\nclass Base:\n\tfunc b():\n\t\tpass\nclass Child extends Base\nfunc f():\n\tvar c := Child.new()\n\tc.b()\n", "res://tests/tmp_flow_d3.gd")), "inherited script member clean")
+	h.check(_clean(h.analyze_text("extends Node\nvar health := 10\nfunc f():\n\tprint(self.health)\n", "res://tests/tmp_flow_d4.gd")), "self member clean")
+	h.check(_clean(h.analyze_text("extends Node\nfunc f():\n\tself.queue_free()\n", "res://tests/tmp_flow_d5.gd")), "self inherited engine clean")
+	h.check(_has_missing(h.analyze_text("extends Node\nfunc f():\n\tself.bogus_xyz()\n", "res://tests/tmp_flow_d6.gd"), "missing_method", "bogus_xyz"), "self bogus errors")
+	h.check(_has_missing(h.analyze_text("class_name DLib\nextends Node\nclass Item:\n\tvar id := 0\nfunc f():\n\tvar it := Item.new()\n\tit.nope()\n", "res://tests/tmp_flow_d7.gd"), "missing_method", "nope"), "script method bogus errors")
+	h.check(_has_missing(h.analyze_text("extends Node\nvar health := 10\nfunc f():\n\tvar n: Node\n\tprint(n.health)\n", "res://tests/tmp_flow_a5.gd"), "missing_member", "has no member 'health'"), "script member via engine base errors")
+	h.check(_clean(h.analyze_text("extends Node\nclass Item:\n\tvar id := 0\nfunc f():\n\tvar n: Node\n\tif n is Item:\n\t\tprint(n.id)\n", "res://tests/tmp_flow_a6.gd")), "is guard suppresses script member")
+	h.check(_clean(h.analyze_text("extends Node\nclass Base:\n\tfunc b():\n\t\tpass\nclass Child extends Base\nfunc f():\n\tvar c := Child.new()\n\tc.b()\n", "res://tests/tmp_flow_a7.gd")), "inherited script member clean")

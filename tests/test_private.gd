@@ -37,7 +37,18 @@ func _f_inner_uses_root(h) -> void:
 	var src := "extends Node\n# @private\nvar _cache := 1\nclass Inner:\n\tfunc f() -> void:\n\t\tprint(_cache)\n\t\tprint(self._cache)\n"
 	var res: Dictionary = h.analyze_text(src, "res://tests/tmp_fam_in.gd")
 	h.check(h.priv_errors(res).is_empty(), "inner code may use outer privates")
-	h.check((res.get("errors", []) as Array).is_empty(), "no errors at all in family use")
+	# NOTE: `self._cache` inside Inner is invalid scoping (Godot itself
+	# rejects outer members in inner classes); the family rule governs
+	# @private visibility only, so missing_member is expected while
+	# private_use stays empty.
+	var non_missing := 0
+	var scoped := false
+	for e in res.get("errors", []):
+		if str((e as Dictionary).get("kind", "")) == "missing_member" and "_cache" in str((e as Dictionary).get("message", "")):
+			scoped = true
+		else:
+			non_missing += 1
+	h.check(non_missing == 0 and scoped, "only the scoping error besides family use")
 	var info: Dictionary = h.load_json("res://types_info/user/tests_tmp_fam_in.json")
 	h.check(h.field_flagged(info, "_cache"), "root private flag recorded in json")
 

@@ -166,7 +166,22 @@ Because the extension dump misses entries (`Object.free()` exists in
 4.7.2 but is absent from it), every `Object`-inheriting class is then
 completed with live `ClassDB` data — methods, signals, properties,
 constants, enums — adding only what the dump lacks (dump data is
-never overridden; classes missing from the dump get a minimal entry):
+  never overridden; classes missing from the dump get a minimal entry).
+  Builtin Variant types are not in `ClassDB`, so their missing enums
+  and constants (`Color.RED`, `Vector2.Axis`) come from the doc XMLs:
+  `merge_doc_data()` takes the engine `major.minor` from the dumped
+  version and fetches
+  `raw.githubusercontent.com/godotengine/godot/refs/heads/<MM>/doc/classes/<Name>.xml`
+  (short branch form as fallback) with curl, then wget. Anything
+  unfetchable — offline dumps included — is skipped and the dump
+  continues normally; only raw-file URLs are attempted (scraping the
+  github/docs HTML pages is fragile).
+- Environments with neither curl nor wget use `HTTPRequest` as a last
+  resort: `dump_all_async()` (await it — e.g. `await
+  d.dump_all_async("/path/to/godot4.x86_64", self)` from a `SceneTree`
+  script) tries curl/wget per URL first and the request node second.
+  The sync `dump_all()` keeps curl/wget only, so library and analyzer
+  paths never need awaiting.
 
 ```gdscript
 var d := gnumaru_godot_native_types_info_dumper.new()
@@ -180,7 +195,8 @@ var summary2: Dictionary = d.dump_all()  # falls back to the "godot" command
   intermediate `extension_api.json` is deleted after extraction),
   plus read-only `last_error`, `last_dump_path`, `last_summary`.
   Lower-level steps are exposed: `run_dump()`, `extract_from_file()`,
-  `extract_from_data()`, `write_infos()`. Failures never crash;
+  `extract_from_data()`, `merge_classdb()`, `merge_doc_data()`,
+  `write_infos()`. Failures never crash;
   `dump_all()` returns `{"ok": false, "error": ...}` instead.
 - Layout (created when missing):
   `<base>/builtin/<Name>.json` (`String`, `Array`, `int`, …),
@@ -287,11 +303,22 @@ func myfunc():
   (`missing_method`, `type 'X' has no method 'm()'`), walking the
   `inheritance_chain` and following known call results
   (`n.get_child(0).queue_free()` verifies end to end).
+- Objects are assumed to hold ONLY declared and inherited members
+  (no dynamic script dispatch): a script member reached through a
+  base type misses (`var n: Node` + `n.health` errors, even though a
+  script could provide it at runtime). Script classes verify through
+  their own tables, `extends` walk and engine fallback; `self`
+  verifies against the current class (root `extends`, default
+  `RefCounted`). Suppressing needs a type guard
+  (`if n is Item: n.id` is clean). Member READS on `Object`-derived
+  or script types error the same way (`missing_member`); builtin
+  reads stay lenient (`Dictionary` keys are unknowable, `Variant`
+  tops are dynamic). Enum reads carry their closed value set
+  (`WithSignal.Mode.ON` verifies, `.NOPE` errors).
 - Suppression-safe by construction: dynamic plain-`=` variables,
-  untyped parameters, unknown types, `self`/`super`, script classes
-  and member READS never error (reads only guide continuation, like
-  the semantic pass). `new` is always allowed; signals accept their
-  five methods.
+  untyped parameters, unknown types, `super` and call results without
+  known returns never error. `new` is always allowed; signals accept
+  their five methods.
 - `if typeof(x) == TYPE_Y` narrows the `then` branch, `!=` narrows
   the `else` (a leading `not`/`!` flips); `elif` restarts from the
   entry types. `@var`/`@param` facts apply in order inside the flow.
@@ -605,10 +632,12 @@ green. `GODOT_BIN` overrides the engine path.
 - Suites: `test_fixture.gd` (tokenize → parse → analyze on the
   `tests/ValidScript0.gd` fixture, must come out clean),
   `test_native_guard.gd` (native database contract),
+  `test_classdb_merge.gd` (ClassDB completion),
+  `test_doc_fetch.gd` (doc XML enums/constants, offline-safe),
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
-  `test_flow.gd` (flow member checks + `typeof` guards),
+  `test_flow.gd` (flow member checks + guards),
   `test_reuse.gd` (same instance parsing twice must give independent
   results).
 - `tests/ensure_native_types.gd` runs first: if `types_info/builtin/`,

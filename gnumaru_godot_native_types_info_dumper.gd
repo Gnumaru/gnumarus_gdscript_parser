@@ -12,8 +12,9 @@ extends RefCounted
 ## in 4.7.2), every Object-inheriting class is then completed with live
 ## ClassDB data (methods, signals, properties, constants, enums):
 ## anything ClassDB reports and the dump lacks is added, dump data is
-## never overridden. Builtin Variant types are not in ClassDB and stay
-## dump-only.
+## never overridden. Builtin Variant types are not in ClassDB; their
+## missing enums and constants come from doc XML downloads instead
+## (see merge_doc_data).
 ##
 ## Output layout (created when missing; "types_info" is ignored by the
 ## repo .gitignore):
@@ -33,7 +34,7 @@ extends RefCounted
 ## Usage relying on PATH (falls back to the "godot" command):
 ##   var summary: Dictionary = d.dump_all()
 ## Lower level steps are exposed too: run_dump(), extract_from_file(),
-## extract_from_data(), write_infos().
+## extract_from_data(), merge_classdb(), merge_doc_data_async(), write_infos().
 
 ## Default executable used when dump_all()/run_dump() get an empty path.
 var godot_executable: String = "godot"
@@ -102,6 +103,34 @@ func dump_all(godot_path: String = "") -> Dictionary:
 		last_summary = {"ok": false, "error": last_error}
 		return last_summary
 	var merged := merge_classdb(infos)
+	var docced := merge_doc_data(infos)
+	return _finish_dump(infos, merged, docced, dump_path)
+
+
+## Full pipeline with the HTTPRequest doc fallback (awaits downloads):
+## same steps as dump_all(), but doc fetches try curl/wget first and
+## HTTPRequest second. Use from async contexts (the test regen step);
+## library/analyzer paths keep the sync dump_all(). Pass a SceneTree
+## (or null for the engine loop) for the request nodes.
+func dump_all_async(godot_path: String = "", tree: SceneTree = null) -> Dictionary:
+	last_error = ""
+	last_summary = {}
+	var dump_path := run_dump(godot_path)
+	if dump_path == "":
+		last_summary = {"ok": false, "error": last_error}
+		return last_summary
+	var infos := extract_from_file(dump_path)
+	if infos.is_empty() and last_error != "":
+		last_summary = {"ok": false, "error": last_error}
+		return last_summary
+	var merged := merge_classdb(infos)
+	var docced := await merge_doc_data_async(infos, tree)
+	return _finish_dump(infos, merged, docced, dump_path)
+
+
+## Shared dump tail: writes files, builds the summary, cleans the
+## intermediate dump unless kept.
+func _finish_dump(infos: Dictionary, merged: Dictionary, docced: Dictionary, dump_path: String) -> Dictionary:
 	var written := write_infos(infos)
 	var summary := {
 		"ok": true,
@@ -111,6 +140,7 @@ func dump_all(godot_path: String = "") -> Dictionary:
 		"builtin_count": written.get("builtin_count", 0),
 		"class_count": written.get("class_count", 0),
 		"classdb_added": merged,
+		"doc_added": docced,
 		"builtin_dir": _join_path(output_base, BUILTIN_DIR_NAME),
 		"classes_dir": _join_path(output_base, CLASSES_DIR_NAME),
 		"index_path": _join_path(output_base, INDEX_FILE_NAME),
@@ -217,8 +247,7 @@ func extract_from_data(api: Dictionary) -> Dictionary:
 	return infos
 
 
-## Merges live ClassDB data into the extracted infos. The
-## --dump-extension-api output misses entries (e.g. Object.free() in
+## Merges live ClassDB data into the extracted infos. The## --dump-extension-api output misses entries (e.g. Object.free() in
 ## 4.7.2), so for every Object-inheriting native class the methods,
 ## signals, properties, constants and enums reported by ClassDB and
 ## missing from the dump are added (never overriding dump data, which
@@ -408,6 +437,232 @@ static func _classdb_json_value(v: Variant) -> Variant:
 		TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING:
 			return v
 	return null
+
+
+## First "major.minor" in an engine version string ("Godot Engine
+## v4.7.2.stable.official" -> "4.7"). "" when none is found, in which
+## case doc downloads are skipped entirely.
+static func _major_minor(version_full: String) -> String:
+	var n := version_full.length()
+	var i := 0
+	while i < n and not _is_digit(version_full.unicode_at(i)):
+		i += 1
+	var major := ""
+	while i < n and _is_digit(version_full.unicode_at(i)):
+		major += version_full.substr(i, 1)
+		i += 1
+	if i >= n or version_full.unicode_at(i) != 46:
+		return ""
+	i += 1
+	var minor := ""
+	while i < n and _is_digit(version_full.unicode_at(i)):
+		minor += version_full.substr(i, 1)
+		i += 1
+	if major == "" or minor == "":
+		return ""
+	return major + "." + minor
+
+
+static func _is_digit(c: int) -> bool:
+	return c >= 48 and c <= 57
+
+
+## Doc XML download URLs for a builtin type, most direct first. Only
+## raw file URLs are attempted: the github blob and docs pages are HTML
+## (scraping them is fragile), so anything not fetchable raw is skipped.
+static func _doc_urls(tname: String, major_minor: String) -> Array:
+	var path := "/doc/classes/" + tname + ".xml"
+	return [
+		"https://raw.githubusercontent.com/godotengine/godot/refs/heads/" + major_minor + path,
+		"https://raw.githubusercontent.com/godotengine/godot/" + major_minor + path,
+	]
+
+
+## Downloads a URL to stdout with curl, falling back to wget. "" on any
+## failure (missing tools, DNS, HTTP errors, timeouts): callers treat
+## that as "skip this class". For environments without either tool see
+## download_text_async (last resort, needs awaiting).
+func _download_text(url: String) -> String:
+	var out: Array = []
+	if OS.execute("curl", PackedStringArray(["-fsSL", "--max-time", "15", url]), out, false, false) == 0 and not out.is_empty() and str(out[0]) != "":
+		return str(out[0])
+	out = []
+	if OS.execute("wget", PackedStringArray(["-qO-", "--timeout=15", "--tries=1", url]), out, false, false) == 0 and not out.is_empty() and str(out[0]) != "":
+		return str(out[0])
+	return ""
+
+
+## Last-resort download via HTTPRequest (for environments with neither
+## curl nor wget). Needs a SceneTree (pass one, e.g. self from a
+## SceneTree script; falls back to the engine main loop): attaches the
+## request node to the tree root and awaits request_completed (15 s
+## timeout). "" when there is no tree, the request fails, or the
+## status is not 200.
+func download_text_async(url: String, tree: SceneTree = null) -> String:
+	var t: SceneTree = tree
+	if t == null:
+		t = Engine.get_main_loop() as SceneTree
+	if t == null or t.root == null:
+		return ""
+	var req := HTTPRequest.new()
+	req.timeout = 15
+	t.root.add_child(req)
+	await t.process_frame
+	if not req.is_inside_tree():
+		req.queue_free()
+		return ""
+	var body := ""
+	if req.request(url) == OK:
+		var done: Array = await req.request_completed
+		if done.size() == 4 and int(done[1]) == 200:
+			body = (done[3] as PackedByteArray).get_string_from_utf8()
+	req.queue_free()
+	return body
+
+
+## Parses a doc/classes/<Name>.xml text into constants and enums:
+## {"constants": [{name, value}], "enums": [{name, is_bitfield,
+## values: [{name, value}]}]}. Constants carrying an `enum` attribute
+## are grouped (bitfield-ness is not in the XML: always false).
+## Values are raw expression strings ("Color(1, 0, 0, 1)"): only names
+## matter for verification. Garbage in yields empty lists, never a crash.
+static func _parse_doc_data(xml_text: String) -> Dictionary:
+	var out := {"constants": [], "enums": []}
+	var parser := XMLParser.new()
+	if parser.open_buffer(xml_text.to_utf8_buffer()) != OK:
+		return out
+	var in_constants := false
+	var enums := {}
+	var order: Array = []
+	while parser.read() == OK:
+		var nt := parser.get_node_type()
+		if nt == XMLParser.NODE_ELEMENT:
+			var nm := parser.get_node_name()
+			if nm == "constants":
+				in_constants = true
+			elif nm == "constant" and in_constants:
+				var cname := ""
+				var cvalue := ""
+				var cenum := ""
+				for i in range(parser.get_attribute_count()):
+					var an := parser.get_attribute_name(i)
+					if an == "name":
+						cname = parser.get_attribute_value(i)
+					elif an == "value":
+						cvalue = parser.get_attribute_value(i)
+					elif an == "enum":
+						cenum = parser.get_attribute_value(i)
+				if cname != "":
+					(out["constants"] as Array).append({"name": cname, "value": cvalue})
+					if cenum != "":
+						if not enums.has(cenum):
+							enums[cenum] = []
+							order.append(cenum)
+						(enums[cenum] as Array).append({"name": cname, "value": cvalue})
+		elif nt == XMLParser.NODE_ELEMENT_END:
+			if parser.get_node_name() == "constants":
+				in_constants = false
+	for ename in order:
+		(out["enums"] as Array).append({"name": str(ename), "is_bitfield": false, "values": enums[ename]})
+	return out
+
+
+## Merges one downloaded doc XML into a builtin info entry. Returns
+## true when anything was added. Shared by both merge flavors.
+func _merge_doc_entry(infos: Dictionary, tname: String, body: String, added: Dictionary) -> bool:
+	var parsed := _parse_doc_data(body)
+	var info: Dictionary = infos[tname]
+	var touched := false
+	for c in (parsed as Dictionary).get("constants", []):
+		if _has_named(info.get("constants", []), str((c as Dictionary).get("name", ""))):
+			continue
+		var clst: Array = info.get("constants", [])
+		clst.append(c)
+		info["constants"] = clst
+		added["constants"] = int(added["constants"]) + 1
+		touched = true
+	for e in (parsed as Dictionary).get("enums", []):
+		if _has_named(info.get("enums", []), str((e as Dictionary).get("name", ""))):
+			continue
+		var elst: Array = info.get("enums", [])
+		elst.append(e)
+		info["enums"] = elst
+		added["enums"] = int(added["enums"]) + 1
+		touched = true
+	return touched
+
+
+## Builtin type names in infos (never classes), sorted, for doc fetching.
+func _doc_names(infos: Dictionary) -> Array:
+	var names: Array = []
+	for tname in infos.keys():
+		var key := str(tname)
+		if key == "" or key.begins_with("__"):
+			continue
+		if str((infos[key] as Dictionary).get("kind", "")) == "class":
+			continue
+		names.append(key)
+	names.sort()
+	return names
+
+
+## Sync doc merge (curl/wget only): see merge_doc_data_async for the
+## full version. Used by the sync dump_all() so library and analyzer
+## paths never need awaiting.
+func merge_doc_data(infos: Dictionary) -> Dictionary:
+	var added := {"classes": 0, "constants": 0, "enums": 0}
+	var mm := _major_minor(str(infos.get("__engine_version__", "")))
+	if mm == "":
+		return added
+	var names := _doc_names(infos)
+	var offline := false
+	for tname in names:
+		var body := ""
+		if not offline:
+			for url in _doc_urls(str(tname), mm):
+				body = _download_text(str(url))
+				if body != "":
+					break
+			if body == "":
+				if names[0] == tname:
+					offline = true
+				continue
+		if body == "":
+			continue
+		if _merge_doc_entry(infos, str(tname), body, added):
+			added["classes"] = int(added["classes"]) + 1
+	return added
+
+
+## Async doc merge: same as merge_doc_data, but each URL tries
+## curl/wget first and HTTPRequest second (last resort for tool-less
+## environments). Used by dump_all_async(); library and analyzer paths
+## keep the sync flavor so nothing else needs awaiting.
+func merge_doc_data_async(infos: Dictionary, tree: SceneTree = null) -> Dictionary:
+	var added := {"classes": 0, "constants": 0, "enums": 0}
+	var mm := _major_minor(str(infos.get("__engine_version__", "")))
+	if mm == "":
+		return added
+	var names := _doc_names(infos)
+	var offline := false
+	for tname in names:
+		var body := ""
+		if not offline:
+			for url in _doc_urls(str(tname), mm):
+				body = _download_text(str(url))
+				if body == "":
+					body = await download_text_async(str(url), tree)
+				if body != "":
+					break
+			if body == "":
+				if names[0] == tname:
+					offline = true
+				continue
+		if body == "":
+			continue
+		if _merge_doc_entry(infos, str(tname), body, added):
+			added["classes"] = int(added["classes"]) + 1
+	return added
 
 
 ## Writes one <Name>.json per type plus index.json.

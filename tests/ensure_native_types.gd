@@ -22,6 +22,12 @@ const INDEX_FILE := "res://types_info/index.json"
 
 
 func _init() -> void:
+	_run()
+
+
+## Fire-and-forget async entry (dump_all awaits doc downloads):
+## everything, including quit(), happens in here.
+func _run() -> void:
 	var forced: bool = OS.get_environment("FORCE_NATIVE_DUMP") == "1"
 	var d = Dumper.new()
 	d.output_base = BASE
@@ -30,7 +36,7 @@ func _init() -> void:
 		print("NATIVE TYPES READY (cached: ", int(counts[0]), " builtin, ", int(counts[1]), " classes)")
 		quit(0)
 		return
-	var summary: Dictionary = d.dump_all(Dumper.default_executable())
+	var summary: Dictionary = await d.dump_all_async(Dumper.default_executable(), self)
 	if not bool(summary.get("ok", false)):
 		printerr("FAIL [ensure_native_types]: ", str(summary.get("error", d.last_error)))
 		quit(1)

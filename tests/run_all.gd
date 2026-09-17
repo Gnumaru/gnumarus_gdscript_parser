@@ -13,6 +13,7 @@ func _init() -> void:
 		"res://tests/test_fixture.gd",
 		"res://tests/test_native_guard.gd",
 		"res://tests/test_classdb_merge.gd",
+		"res://tests/test_doc_fetch.gd",
 		"res://tests/test_deprecated.gd",
 		"res://tests/test_private.gd",
 		"res://tests/test_return.gd",

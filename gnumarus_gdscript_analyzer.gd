@@ -184,6 +184,7 @@ var _private: Dictionary = {}
 var _class_extends: Dictionary = {}
 var _script_deprecated: Dictionary = {}
 var _script_class = ""
+var _script_extends = ""
 var _script_resource_path = ""
 var _project_root = ""
 var _write_base = "types_info"
@@ -207,9 +208,12 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_written = []
 	_type_cache = {}
 	_script_class = ""
+	_script_extends = ""
 	for child in ast.get("children", []):
 		if child is Dictionary and str((child as Dictionary).get("type", "")) == "CLASS_NAME":
 			_script_class = str((child as Dictionary).get("name", ""))
+		elif child is Dictionary and str((child as Dictionary).get("type", "")) == "EXTENDS":
+			_script_extends = _dotted_path((child as Dictionary).get("path", []))
 	var anchor = _analyzer_anchor_dir()
 	_project_root = SemParser.find_project_root(anchor)
 	if _project_root == "":
@@ -628,7 +632,8 @@ static func _engine_call(info: Dictionary, seg: String) -> Dictionary:
 
 ## Finds a readable member by name: fields ("type"), signals
 ## ("signal"), methods-as-values ("Callable"). With static_ctx also
-## constants and enums ("int"). Returns {"type"} or {} when absent.
+## constants and enums ("int", plus "enumvals" carrying the closed
+## value set for continuation). Returns {"type", ...} or {} when absent.
 static func _engine_read(info: Dictionary, seg: String, static_ctx: bool) -> Dictionary:
 	for f in info.get("members", []):
 		if f is Dictionary and str((f as Dictionary).get("name", "")) == seg:
@@ -648,14 +653,25 @@ static func _engine_read(info: Dictionary, seg: String, static_ctx: bool) -> Dic
 	if static_ctx:
 		for e in info.get("enums", []):
 			if e is Dictionary and str((e as Dictionary).get("name", "")) == seg:
-				return {"type": "int"}
+				return {"type": "int", "enumvals": _enum_value_names(e), "enumname": str((e as Dictionary).get("name", ""))}
 			for v in (e as Dictionary).get("values", []):
 				if v is Dictionary and str((v as Dictionary).get("name", "")) == seg:
-					return {"type": "int"}
+					return {"type": "int", "enumvals": _enum_value_names(e), "enumname": str((e as Dictionary).get("name", ""))}
 		for c in info.get("constants", []):
 			if c is Dictionary and str((c as Dictionary).get("name", "")) == seg:
 				return {"type": ""}
 	return {}
+
+
+## Value names of an enum entry (engine or doc-merged shape).
+static func _enum_value_names(entry: Dictionary) -> Array:
+	var out: Array = []
+	for v in entry.get("values", []):
+		if v is Dictionary:
+			out.append(str((v as Dictionary).get("name", "")))
+		elif v is String:
+			out.append(v)
+	return out
 
 
 # ------------------------------------------------------- @return helpers
@@ -794,6 +810,17 @@ static func _base_simple(dotted: String) -> String:
 	if "." in dotted:
 		return dotted.substr(dotted.rfind(".") + 1)
 	return dotted
+
+
+## Joins an EXTENDS path (token dicts with DOT separators) into a
+## dotted name, ignoring anything else.
+static func _dotted_path(parts: Variant) -> String:
+	var out: Array = []
+	if parts is Array:
+		for p in parts:
+			if p is Dictionary and str((p as Dictionary).get("type", "")) != "DOT":
+				out.append(str((p as Dictionary).get("value", "")))
+	return ".".join(out)
 
 
 ## True when member equals declared or inherits from it: engine chain
@@ -2197,10 +2224,122 @@ func _error(kind: String, message: String, line: int, column: int, owner: String
 # env {name: [types]}: declared types outside guards, narrowed types
 # inside `if typeof(x) == T` branches, @var/@param facts in order.
 # Anything else (dynamic plain-`=` variables, uninferrable values,
-# self/super, script classes, call results without known returns,
-# member READS) skips verification: only provable absence of a CALLED
-# method errors (reads only guide continuation). The scope-aware _walk
-# pass is untouched (no signature or behavior changes there).
+# super, call results without known returns) skips verification.
+# Objects are assumed to hold ONLY declared and inherited members (no
+# dynamic script dispatch): a script member reached through a base type
+# misses, and suppressing that needs a type guard. Calls AND reads on
+# Object-derived or script types error on exhaustion (missing_method /
+# missing_member); builtin reads stay lenient (Color.RED has no JSON
+# backing problem anymore, but Dictionary keys and Variant tops do).
+# Enum reads carry their closed value set forward (WithSignal.Mode.ON
+# verifies; .NOPE errors). The scope-aware _walk pass is untouched
+# (no signature or behavior changes there).
+
+
+## Owner-table key of a script class name ("", "Outer", "Outer.Inner",
+## "MyLib.Item", ...), resolved from an owner context. "" when the
+## name is not a script class (engine types resolve to "").
+func _script_key_of(name: String, owner: String) -> String:
+	if name == "":
+		return ""
+	var key := _resolve_private_owner(name, owner)
+	if key != "" and _members.has(key):
+		return key
+	return ""
+
+
+## One script-table hit. cont carries continuation: {"types": [...]}
+## (possibly empty = opaque but found), {"script": key} for inner
+## classes (constructed or read as values), {"signal": true}.
+## Returns {"status": "found", "cont"} or {"status": "miss-sure"}
+## (existing member used wrongly: called enum/signal/constant).
+func _script_hit(rec: Dictionary, seg: String, is_call: bool) -> Dictionary:
+	var kind := str(rec.get("kind", ""))
+	if kind == "function":
+		if is_call:
+			var arrow := _arrow_name((rec.get("node", {}) as Dictionary).get("return_type", null))
+			if arrow == "":
+				return {"status": "found", "cont": {"types": []}}
+			return {"status": "found", "cont": {"types": [arrow]}}
+		return {"status": "found", "cont": {"types": ["Callable"]}}
+	if kind == "variable" or kind == "constant":
+		if not is_call:
+			var n: Variant = rec.get("node", {})
+			if n is Dictionary:
+				return {"status": "found", "cont": {"types": _flow_decl_types(n, kind == "constant", false)}}
+			return {"status": "found", "cont": {"types": []}}
+		return {"status": "found", "cont": {"types": []}}
+	if kind == "signal":
+		if is_call:
+			return {"status": "miss-sure"}
+		return {"status": "found", "cont": {"signal": true}}
+	if kind == "class":
+		var parent := str(rec.get("owner", ""))
+		var full := seg
+		if parent != "":
+			full = parent + "." + seg
+		elif _script_class != "":
+			full = _script_class + "." + seg
+		return {"status": "found", "cont": {"script": full}}
+	if kind == "enum" or kind == "enum member":
+		if is_call:
+			return {"status": "miss-sure"}
+		var vals: Array = []
+		var enode: Variant = rec.get("node", {})
+		if enode is Dictionary:
+			for m in (enode as Dictionary).get("members", []):
+				if m is Dictionary and str((m as Dictionary).get("type", "")) == "ENUM_MEMBER":
+					vals.append(str((m as Dictionary).get("name", "")))
+		var eparent := str(rec.get("owner", ""))
+		var efull := seg
+		if eparent != "":
+			efull = eparent + "." + seg
+		elif _script_class != "":
+			efull = _script_class + "." + seg
+		return {"status": "found", "cont": {"types": ["int"], "enumvals": vals, "enumname": efull}}
+	return {"status": "miss-sure"}
+
+
+## Script-side member lookup: own table, then script parents, then the
+## terminal engine base. Objects are assumed to hold ONLY declared and
+## inherited members (no dynamic script dispatch): script members found
+## out of the inheritance line still miss. Returns:
+## - {"status": "found", "cont"} (see _script_hit);
+## - {"status": "miss-skip"} (unresolvable parent: cannot prove absence);
+## - {"status": "miss-engine", "base"} (terminal engine base: caller
+##   runs the engine check, which errors on absence);
+## - {"status": "miss-sure"} (existing member misused: caller errors).
+func _script_seg(owner_key: String, seg: String, is_call: bool) -> Dictionary:
+	var key := owner_key
+	var seen := {}
+	var guard := 0
+	while guard < 64:
+		guard += 1
+		if seen.has(key):
+			return {"status": "miss-skip"}
+		seen[key] = true
+		if _members.has(key):
+			var table: Dictionary = _members[key]
+			if table.has(seg):
+				return _script_hit(table[seg], seg, is_call)
+		var base := ""
+		if key == "":
+			base = _script_extends
+		else:
+			base = str(_class_extends.get(key, ""))
+		if base == "":
+			base = "RefCounted"
+		var resolved := _resolve_private_owner(base, key)
+		if resolved != "" and _members.has(resolved):
+			key = resolved
+			continue
+		if _engine_info(base).is_empty() and _engine_info(_base_simple(base)).is_empty():
+			return {"status": "miss-skip"}
+		var ename := base
+		if _engine_info(base).is_empty():
+			ename = _base_simple(base)
+		return {"status": "miss-engine", "base": ename}
+	return {"status": "miss-skip"}
 
 
 ## Declared types of a VAR/CONST/PARAM node as a list ([] = dynamic).
@@ -2232,6 +2371,21 @@ static func _is_engine_info(info: Dictionary) -> bool:
 	return str(info.get("kind", "")) in ["builtin", "class", "root"]
 
 
+## Lenient reads: dynamic tops (Variant/root kind) and keyed
+## containers (Dictionary keys are unknowable). Everything else with
+## JSON backing verifies strictly: builtins are sealed (no script can
+## add members to String), classes walk their chain.
+static func _read_lenient(info: Dictionary, tname: String) -> bool:
+	var kind := str(info.get("kind", ""))
+	if kind != "class" and kind != "builtin":
+		return true
+	if tname == "Variant" or tname == "Dictionary":
+		return true
+	if bool(info.get("is_keyed", false)):
+		return true
+	return false
+
+
 ## Engine-backed info or {} (never script user files).
 func _engine_info(tname: String) -> Dictionary:
 	var info := _type_info(tname)
@@ -2241,10 +2395,12 @@ func _engine_info(tname: String) -> Dictionary:
 
 
 ## Resolves a chain base name to {"kind", ...}:
-## - {"kind": "skip"}: self/super/unknown/dynamic/script-backed.
+## - {"kind": "skip"}: super/unknown/dynamic.
 ## - {"kind": "signal"}: signal-typed base (SIGNAL_METHODS apply).
 ## - {"kind": "class", "tname"}: engine class (static context).
-## - {"kind": "instance", "types": [...]}: known value types.
+## - {"kind": "script", "key"}: script class or self (owner key).
+## - {"kind": "instance", "types": [...]}: known value types (engine
+##   or script names; resolved per segment).
 func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, overlay: Dictionary) -> Dictionary:
 	if vname == "" or vname == "_":
 		return {"kind": "skip"}
@@ -2255,8 +2411,10 @@ func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, en
 		if et.is_empty():
 			return {"kind": "skip"}
 		return {"kind": "instance", "types": et.duplicate()}
-	if vname == "self" or vname == "super":
+	if vname == "super":
 		return {"kind": "skip"}
+	if vname == "self":
+		return {"kind": "script", "key": owner}
 	var fnd: Dictionary = fn if fn is Dictionary else {}
 	var kind := _scope_kind(scope, vname)
 	if kind != "":
@@ -2283,11 +2441,30 @@ func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, en
 			var rec: Dictionary = (_members[key2] as Dictionary)[vname]
 			if str(rec.get("kind", "")) == "signal":
 				return {"kind": "signal"}
-	if vname == _script_class and vname != "":
-		return {"kind": "skip"}
+	var skey := _script_key_of(vname, owner)
+	if skey != "" or (vname == _script_class and vname != ""):
+		if skey == "":
+			return {"kind": "script", "key": ""}
+		return {"kind": "script", "key": skey}
 	if _engine_info(vname).is_empty():
 		return {"kind": "skip"}
 	return {"kind": "class", "tname": vname}
+
+
+## Resolves one link name to {"kind": "script", "key"} (script classes
+## win over engine names), {"kind": "engine", "name"}, or {} when
+## neither (dynamic/unknown: caller skips silently).
+func _link_kind_of(tname: String, ctx: String) -> Dictionary:
+	if tname == "":
+		return {}
+	if tname == _script_class and tname != "":
+		return {"kind": "script", "key": ""}
+	var sk := _script_key_of(tname, ctx)
+	if sk != "":
+		return {"kind": "script", "key": sk}
+	if _engine_info(tname).is_empty():
+		return {}
+	return {"kind": "engine", "name": tname}
 
 
 static func _show_types(types: Array) -> String:
@@ -2300,11 +2477,11 @@ static func _show_types(types: Array) -> String:
 ## type's inheritance_chain (methods live on ancestors: hide/show are
 ## CanvasItem's, not Control's). Ok iff ANY listed engine type has it
 ## (a non-engine or partially-dumped member means "might have it":
-## skip silently). CALLS missing everywhere error (missing_method);
-## READS never error (they only guide continuation, mirroring the
-## semantic pass). Returns {"vtype"} for continuation ("" = unknown:
+## skip silently). CALLS missing everywhere error (missing_method)
+## unless quiet; READS never error here (the chain loop decides reads
+## separately). Returns {"vtype"} for continuation ("" = unknown:
 ## rest of the chain skips).
-func _verify_seg(types: Array, seg: String, is_call: bool, static_ctx: bool, tok: Dictionary, owner: String) -> Dictionary:
+func _verify_seg(types: Array, seg: String, is_call: bool, static_ctx: bool, tok: Dictionary, owner: String, quiet := false) -> Dictionary:
 	var fully_walked := true
 	for t in types:
 		var chain := _engine_chain(str(t))
@@ -2324,10 +2501,10 @@ func _verify_seg(types: Array, seg: String, is_call: bool, static_ctx: bool, tok
 			else:
 				var hit2 := _engine_read(info, seg, static_ctx)
 				if not hit2.is_empty():
-					return {"vtype": str(hit2.get("type", ""))}
+					return {"vtype": str(hit2.get("type", "")), "enumvals": hit2.get("enumvals", []), "enumname": str(hit2.get("enumname", ""))}
 	if not fully_walked:
 		return {"vtype": ""}
-	if is_call:
+	if is_call and not quiet:
 		_error(ERR_MISSING_METHOD, "type '" + _show_types(types) + "' has no method '" + seg + "()'", int(tok.get("line", 0)), int(tok.get("column", 0)), owner)
 	return {"vtype": ""}
 
@@ -2389,7 +2566,14 @@ func _skip_chain_verify(tokens: Array, j: int, scope: Dictionary, owner: String,
 
 
 ## Verifies one DOT chain starting at tokens[i] (an IDENTIFIER).
-## Returns the index past the chain.
+## Links unify engine names and script owner keys: each segment is
+## checked against script tables (own, extends walk, terminal engine
+## base) and engine files, ok iff ANY link has it. Provable absence
+## errors (missing_method for calls; missing_member for reads on
+## Object-derived or script types only — builtin reads stay lenient:
+## Color.RED-style enum reads have no JSON backing). Anything
+## unresolvable silences the rest of the chain. Returns the index past
+## the chain.
 func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: Variant, env: Dictionary, overlay: Dictionary) -> int:
 	var base := str((tokens[i] as Dictionary).get("value", ""))
 	var fb := _flow_base(base, fn, scope, owner, env, overlay)
@@ -2398,12 +2582,25 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 	if kind == "skip":
 		return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
 	var signal_mode := kind == "signal"
-	var static_ctx := kind == "class"
-	var cur: Array = []
+	var static_ctx := kind == "class" or kind == "script"
+	var links: Array = []
+	var ctx := owner
 	if kind == "instance":
-		cur = (fb.get("types", []) as Array).duplicate()
+		for t in (fb.get("types", []) as Array):
+			var l := _link_kind_of(str(t), owner)
+			if l.is_empty():
+				return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
+			links.append(l)
 	elif kind == "class":
-		cur = [str(fb.get("tname", ""))]
+		var lc := _link_kind_of(str(fb.get("tname", "")), owner)
+		if lc.is_empty():
+			return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
+		links.append(lc)
+	elif kind == "script":
+		links = [{"kind": "script", "key": str(fb.get("key", ""))}]
+		ctx = str(fb.get("key", ""))
+	if links.is_empty():
+		return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
 	while j < tokens.size() and (tokens[j] is Dictionary) and str((tokens[j] as Dictionary).get("type", "")) == "DOT":
 		j += 1
 		if j >= tokens.size() or not (tokens[j] is Dictionary):
@@ -2413,12 +2610,11 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 			break
 		var seg := str((tokens[j] as Dictionary).get("value", ""))
 		if seg == "new":
-			if kind == "class":
-				cur = [str(fb.get("tname", ""))]
+			if links.size() == 1 and static_ctx and (str(links[0].get("kind", "")) == "script" or str(links[0].get("kind", "")) == "engine"):
 				static_ctx = false
 				signal_mode = false
 			else:
-				cur = []
+				return _skip_chain_verify(tokens, j - 1, scope, owner, fn, env, overlay)
 			j += 1
 			continue
 		var is_call := j + 1 < tokens.size() and (tokens[j + 1] is Dictionary) and str((tokens[j + 1] as Dictionary).get("type", "")) == "LPAREN"
@@ -2429,24 +2625,130 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 				j = _verify_span(tokens, j + 1, scope, owner, fn, env, overlay)
 			j += 1
 			continue
-		if cur.is_empty():
+		var found := false
+		var silent := false
+		var sure_miss := false
+		var read_strict := true
+		var engine_names: Array = []
+		var dnames: Array = []
+		var next_links: Array = []
+		var next_ctx := ctx
+		for L in links:
+			if not (L is Dictionary):
+				silent = true
+				continue
+			if str(L.get("kind", "")) == "enumvals":
+				var dname := str(L.get("dname", seg))
+				if seg in (L.get("vals", []) as Array):
+					found = true
+					next_links.append({"kind": "engine", "name": "int"})
+					dnames.append(dname)
+				else:
+					sure_miss = true
+					dnames.append(dname)
+				continue
+			if str(L.get("kind", "")) == "script":
+				var r := _script_seg(str(L.get("key", "")), seg, is_call)
+				var status := str(r.get("status", ""))
+				if status == "found":
+					found = true
+					var cont: Dictionary = r.get("cont", {})
+					if not (cont.get("enumvals", []) as Array).is_empty():
+						next_links.append({"kind": "enumvals", "vals": (cont.get("enumvals", []) as Array).duplicate(), "dname": str(cont.get("enumname", seg))})
+					elif cont.has("signal"):
+						signal_mode = true
+					elif cont.has("script"):
+						next_links.append({"kind": "script", "key": str(cont.get("script", ""))})
+						next_ctx = str(cont.get("script", ""))
+					else:
+						for cn in (cont.get("types", []) as Array):
+							var cl := _link_kind_of(str(cn), next_ctx)
+							if cl.is_empty():
+								silent = true
+							else:
+								next_links.append(cl)
+					dnames.append(_owner_display(str(L.get("key", ""))))
+				elif status == "miss-skip":
+					silent = true
+				elif status == "miss-engine":
+					engine_names.append(str(r.get("base", "")))
+					dnames.append(str(r.get("base", "")))
+				else:
+					sure_miss = true
+					dnames.append(_owner_display(str(L.get("key", ""))))
+			else:
+				var ename := str(L.get("name", ""))
+				var einfo := _engine_info(ename)
+				if einfo.is_empty():
+					silent = true
+					continue
+				if _read_lenient(einfo, ename):
+					read_strict = false
+				engine_names.append(ename)
+				dnames.append(ename)
+		if found:
+			if not engine_names.is_empty():
+				var extra := _verify_seg(engine_names, seg, is_call, static_ctx, tokens[j], owner, true)
+				var vt := str(extra.get("vtype", ""))
+				if vt != "" and vt != "signal":
+					var vl := _link_kind_of(vt, next_ctx)
+					if vl.is_empty():
+						silent = true
+					else:
+						next_links.append(vl)
+				elif vt == "signal" and next_links.is_empty():
+					signal_mode = true
+			links = next_links
+			ctx = next_ctx
+			static_ctx = false
+			if links.is_empty() and not signal_mode:
+				return _skip_chain_verify(tokens, j - 1, scope, owner, fn, env, overlay)
 			if is_call:
 				j = _verify_span(tokens, j + 1, scope, owner, fn, env, overlay)
 			j += 1
 			continue
-		var verdict := _verify_seg(cur, seg, is_call, static_ctx, tokens[j], owner)
-		var vt := str(verdict.get("vtype", ""))
-		if vt == "signal":
-			signal_mode = true
-			cur = []
-		elif vt == "":
-			cur = []
-		else:
-			cur = [vt]
-			static_ctx = false
+		if silent:
+			return _skip_chain_verify(tokens, j - 1, scope, owner, fn, env, overlay)
+		if engine_names.is_empty():
+			_error(ERR_MISSING_METHOD if is_call else ERR_MISSING_MEMBER, "type '" + _show_types(dnames) + "' has no " + ("method '" + seg + "()'" if is_call else "member '" + seg + "'"), int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)), owner)
+			return _skip_chain_verify(tokens, j - 1, scope, owner, fn, env, overlay)
 		if is_call:
+			var verdict := _verify_seg(engine_names, seg, is_call, static_ctx, tokens[j], owner)
+			var vt2 := str(verdict.get("vtype", ""))
+			links = []
+			ctx = owner
+			if vt2 == "signal":
+				signal_mode = true
+			elif vt2 != "":
+				var vl2 := _link_kind_of(vt2, ctx)
+				if vl2.is_empty():
+					return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
+				links = [vl2]
+				static_ctx = false
 			j = _verify_span(tokens, j + 1, scope, owner, fn, env, overlay)
+			j += 1
+			continue
+		var qverdict := _verify_seg(engine_names, seg, false, static_ctx, tokens[j], owner, true)
+		var qvt := str(qverdict.get("vtype", ""))
+		var qvals: Array = qverdict.get("enumvals", [])
+		if qvt == "signal":
+			signal_mode = true
+		elif not qvals.is_empty():
+			links = [{"kind": "enumvals", "vals": qvals.duplicate(), "dname": str(qverdict.get("enumname", seg))}]
+			static_ctx = false
+		elif qvt != "":
+			var ql := _link_kind_of(qvt, ctx)
+			if ql.is_empty():
+				return _skip_chain_verify(tokens, j - 1, scope, owner, fn, env, overlay)
+			links = [ql]
+			static_ctx = false
+		elif not read_strict:
+			return _skip_chain_verify(tokens, j - 1, scope, owner, fn, env, overlay)
+		else:
+			_error(ERR_MISSING_MEMBER, "type '" + _show_types(dnames) + "' has no member '" + seg + "'", int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)), owner)
+			return _skip_chain_verify(tokens, j - 1, scope, owner, fn, env, overlay)
 		j += 1
+		continue
 	return j
 
 
@@ -2498,7 +2800,7 @@ func _verify_tokens(tokens: Array, scope: Dictionary, owner: String, fn: Variant
 		if ty == "KEYWORD" and v == "func":
 			i = _flow_absorb_params(tokens, i, overlay)
 			continue
-		if ty == "IDENTIFIER":
+		if ty == "IDENTIFIER" or (ty == "KEYWORD" and (v == "self" or v == "super")):
 			var nxt_ty := ""
 			var nxt_v := ""
 			if i + 1 < tokens.size() and tokens[i + 1] is Dictionary:
