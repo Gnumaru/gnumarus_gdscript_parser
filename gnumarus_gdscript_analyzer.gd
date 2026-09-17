@@ -115,6 +115,12 @@ const ERR_PARAM_MALFORMED := "param_malformed"
 const ERR_PARAM_UNKNOWN := "param_unknown"
 const ERR_PARAM_UNKNOWN_TYPE := "param_unknown_type"
 const ERR_PARAM_MISMATCH := "param_mismatch"
+const ERR_TUPLE_MISPLACED := "tuple_misplaced"
+const ERR_TUPLE_MALFORMED := "tuple_malformed"
+const ERR_TUPLE_UNKNOWN_TYPE := "tuple_unknown_type"
+const ERR_TUPLE_CONFLICT := "tuple_conflict"
+const ERR_TUPLE_MISMATCH := "tuple_mismatch"
+const ERR_TUPLE_BOUNDS := "tuple_bounds"
 const ERR_MISSING_METHOD := "missing_method"
 const ERR_MISSING_MEMBER := "missing_member"
 
@@ -192,6 +198,10 @@ var _written: Array = []
 ## Type file lookups (builtin/classes/user JSON info or miss marker),
 ## cached per analyze() call for @return name resolution.
 var _type_cache: Dictionary = {}
+## @tuple definitions: name -> {"resolved": bool, "raws": [...],
+## "spec": {...}}. Pre-scan collects raws (order-free known-checks),
+## _resolve_tuples validates into specs before the walk.
+var _tuples: Dictionary = {}
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -207,6 +217,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_script_deprecated = {}
 	_written = []
 	_type_cache = {}
+	_tuples = {}
 	_script_class = ""
 	_script_extends = ""
 	for child in ast.get("children", []):
@@ -226,7 +237,9 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 		ast["analyzer_written"] = _written
 		return {"ast": ast, "errors": _errors, "warnings": _warnings}
 	_scan_header(ast)
+	_prescan_tuples(ast)
 	_scan_children(ast.get("children", []), "")
+	_resolve_tuples()
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
@@ -291,6 +304,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_param(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_tuple(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 
 
 # ------------------------------------------------------------- tag scan
@@ -426,6 +441,326 @@ func _has_any_param_tag(node: Dictionary) -> bool:
 		if c is Dictionary and not _has_param_tag(c).is_empty():
 			return true
 	return false
+
+
+# ------------------------------------------------------- @tuple helpers
+
+func _find_tuple(value: String) -> Dictionary:
+	return _find_tag(value, "tuple")
+
+
+func _has_tuple_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_tuple(str(tok.get("value", "")))
+
+
+func _has_any_tuple_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_tuple_tag(c).is_empty():
+			return true
+	return false
+
+
+## Parses an @tuple message ("Name COUNT item...") into {"ok","name",
+## "size","items","raw"} or {"ok": false, "error"}. COUNT is mandatory
+## and must equal the item count (checked by the caller against the
+## parsed words). Items stay raw here (unions, `*`, `variant`).
+static func _parse_tuple_spec(raw_msg: String) -> Dictionary:
+	var words := _split_words(raw_msg.strip_edges())
+	if words.size() < 2:
+		return {"ok": false, "error": "@tuple needs a name and an explicit size: '# @tuple TupleName 5 int|string float|bool object variant *'"}
+	var tname := str(words[0])
+	if not _is_type_name(tname):
+		return {"ok": false, "error": "@tuple has an invalid name '" + tname + "'"}
+	var count_word := str(words[1])
+	if count_word == "":
+		return {"ok": false, "error": "@tuple needs an explicit size after the name"}
+	for i in range(count_word.length()):
+		var ch := count_word.unicode_at(i)
+		if ch < 48 or ch > 57:
+			return {"ok": false, "error": "@tuple size must be a non-negative integer, got '" + count_word + "'"}
+	var items: Array = []
+	for w in words.slice(2):
+		items.append(str(w))
+	return {"ok": true, "name": tname, "size": int(count_word), "items": items, "raw": raw_msg.strip_edges()}
+
+
+## Pre-scan (before _scan): collects @tuple raw definitions from
+## top-level standalone comments and top-level leadings so name
+## lookups stay order-free. Full validation happens in _resolve_tuples.
+func _prescan_tuples(ast: Dictionary) -> void:
+	for child in ast.get("children", []):
+		if not (child is Dictionary):
+			continue
+		if str((child as Dictionary).get("type", "")) == "TYPE_INFO":
+			_collect_tuple_node(child as Dictionary)
+			continue
+		for c in (child as Dictionary).get("leading_comments", []):
+			if c is Dictionary:
+				_collect_tuple_node(c)
+
+
+## Records every @tuple tag in one comment value as raw material.
+## Malformed tags error immediately and are dropped; valid ones queue
+## under their name (duplicates resolved in _resolve_tuples).
+func _collect_tuple_node(tok: Dictionary) -> void:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return
+	var tok_line := int(tok.get("line", 0))
+	var li := 0
+	for line in str(tok.get("value", "")).split("\n"):
+		var tag := _find_tag(line, "tuple")
+		if not tag.is_empty():
+			var spec := _parse_tuple_spec(str(tag.get("message", "")))
+			if not bool(spec.get("ok", false)):
+				_error(ERR_TUPLE_MALFORMED, str(spec.get("error", "")), tok_line + li, 0, "")
+			else:
+				var tname := str(spec.get("name", ""))
+				var raw := {"spec": spec, "line": tok_line + li}
+				if not _tuples.has(tname):
+					_tuples[tname] = {"resolved": false, "raws": [raw]}
+				else:
+					((_tuples[tname] as Dictionary).get("raws", []) as Array).append(raw)
+		li += 1
+
+
+## Second pass (after _scan, before _walk): validates definitions
+## (counts, duplicates, conflicts, item types incl. forward tuple
+## refs) and writes their JSON files.
+func _resolve_tuples() -> void:
+	_ensure_user_dir()
+	for tname in _tuples.keys():
+		var entry: Dictionary = _tuples[tname]
+		if bool(entry.get("resolved", false)):
+			continue
+		var raws: Array = entry.get("raws", [])
+		if raws.is_empty():
+			continue
+		var first: Dictionary = raws[0]
+		var spec: Dictionary = first.get("spec", {})
+		if raws.size() > 1:
+			_error(ERR_TUPLE_CONFLICT, "@tuple '" + tname + "' is defined more than once", int(first.get("line", 0)), 0, "")
+			continue
+		var clash := _tuple_conflict(tname)
+		if clash != "":
+			_error(ERR_TUPLE_CONFLICT, "@tuple '" + tname + "' conflicts with " + clash, int(first.get("line", 0)), 0, "")
+			continue
+		var items: Array = []
+		var ok := true
+		if (spec.get("items", []) as Array).size() != int(spec.get("size", -1)):
+			_error(ERR_TUPLE_MALFORMED, "@tuple '" + tname + "' declares size " + str(spec.get("size", 0)) + " but lists " + str((spec.get("items", []) as Array).size()) + " items", int(first.get("line", 0)), 0, "")
+			ok = false
+		else:
+			for w in spec.get("items", []):
+				var item := _parse_tuple_item(str(w), int(first.get("line", 0)))
+				if item.is_empty():
+					ok = false
+					break
+				items.append(item)
+		if not ok:
+			continue
+		entry["resolved"] = true
+		entry["spec"] = {"ok": true, "name": tname, "size": int(spec.get("size", 0)), "items": items, "raw": str(spec.get("raw", "")), "line": int(first.get("line", 0))}
+		_write_tuple_file(tname)
+
+
+## Parses one tuple item word: `*` (any), `variant` (unknown marker,
+## normalized to Variant), or a |-union of known names (tuple refs
+## allowed: all names were pre-scanned). {} + error on failure.
+func _parse_tuple_item(word: String, line: int) -> Dictionary:
+	if word == "*":
+		return {"types": [], "any": true}
+	var raw := word
+	if word == "variant":
+		raw = "Variant"
+	var types: Array = []
+	for arm in raw.split("|"):
+		var aname := str(arm).strip_edges()
+		if aname == "" or aname == "void" or not _is_type_name(aname):
+			_error(ERR_TUPLE_MALFORMED, "@tuple has an invalid type '" + str(arm) + "'", line, 0, "")
+			return {}
+		if not _type_known(aname) and not _tuples.has(aname):
+			_error(ERR_TUPLE_UNKNOWN_TYPE, "@tuple has unknown type '" + aname + "'", line, 0, "")
+			return {}
+		types.append(aname)
+	if types.is_empty():
+		_error(ERR_TUPLE_MALFORMED, "@tuple has an empty type", line, 0, "")
+		return {}
+	return {"types": types, "any": false}
+
+
+## Why a tuple name cannot be defined ("" when free). Existing tuple
+## JSONs (same kind) are fine: idempotent rewrites. NOTE: not via
+## _type_known (the name itself is already registered there).
+func _tuple_conflict(tname: String) -> String:
+	for key in _members.keys():
+		var table: Dictionary = _members[key]
+		if table.has(tname):
+			return "script member '" + tname + "' (" + str((table[tname] as Dictionary).get("kind", "")) + ")"
+	if _members.has(tname):
+		return "script class '" + tname + "'"
+	if tname == _script_class and tname != "":
+		return "the script class name"
+	if _type_file_exists(tname):
+		var info := _read_json(_write_base + "/user/" + tname + ".json")
+		if not info.is_empty() and str(info.get("kind", "")) == "tuple":
+			return ""
+		return "an existing type '" + tname + "'"
+	return ""
+
+
+## Resolved tuple definition {size, items} or {} (in-memory first,
+## then same-kind JSON files, both cached).
+func _tuple_def(tname: String) -> Dictionary:
+	if _tuples.has(tname):
+		var entry: Dictionary = _tuples[tname]
+		if bool(entry.get("resolved", false)):
+			var spec: Dictionary = entry.get("spec", {})
+			if bool(spec.get("ok", false)) and spec.has("items"):
+				return {"size": int(spec.get("size", 0)), "items": spec.get("items", [])}
+	var info := _type_info(tname)
+	if not info.is_empty() and str(info.get("kind", "")) == "tuple":
+		return {"size": int(info.get("size", 0)), "items": info.get("tuple_items", [])}
+	return {}
+
+
+## Splits an array literal value into top-level element token arrays.
+## Returns {"literal", "elements"} (elements may be empty for `[]`;
+## non-literals report literal=false).
+func _tuple_lit_split(value: Variant) -> Dictionary:
+	var toks := _as_tokens(value)
+	if toks.is_empty():
+		return {"literal": false, "elements": []}
+	if not (toks[0] is Dictionary) or str((toks[0] as Dictionary).get("type", "")) != "LBRACKET":
+		return {"literal": false, "elements": []}
+	if toks.size() == 2:
+		if (toks[1] is Dictionary) and str((toks[1] as Dictionary).get("type", "")) == "RBRACKET":
+			return {"literal": true, "elements": []}
+		return {"literal": false, "elements": []}
+	if _match_close(toks, 0) != toks.size() - 1:
+		return {"literal": false, "elements": []}
+	var out: Array = []
+	var cur: Array = []
+	var depth := 0
+	var seen := false
+	var i := 1
+	while i < toks.size() - 1:
+		var t: Variant = toks[i]
+		var ty := ""
+		if t is Dictionary:
+			ty = str((t as Dictionary).get("type", ""))
+		if ty == "LPAREN" or ty == "LBRACKET" or ty == "LBRACE":
+			depth += 1
+			cur.append(t)
+		elif ty == "RPAREN" or ty == "RBRACKET" or ty == "RBRACE":
+			depth -= 1
+			cur.append(t)
+		elif ty == "COMMA" and depth == 0:
+			out.append(cur)
+			cur = []
+			seen = true
+		else:
+			cur.append(t)
+		i += 1
+	if not cur.is_empty() or not seen:
+		out.append(cur)
+	return {"literal": true, "elements": out}
+
+
+## Infers a single literal token ("" when not a plain literal).
+static func _infer_lit_token(tok: Variant) -> String:
+	if not (tok is Dictionary):
+		return ""
+	match str((tok as Dictionary).get("type", "")):
+		"INT":
+			return "int"
+		"FLOAT":
+			return "float"
+		"STRING":
+			return "String"
+		"BOOL":
+			return "bool"
+	return ""
+
+
+## Infers an element token array when it is a single plain literal.
+static func _infer_lit_elem(elem: Variant) -> String:
+	if elem is Array and (elem as Array).size() == 1:
+		return _infer_lit_token((elem as Array)[0])
+	return ""
+
+
+## Literal-ish compatibility for tuple elements (mirrors the semantic
+## numeric/string families; NULL and complex elements skip).
+func _lit_compatible(et: String, mname: String) -> bool:
+	if et == mname:
+		return true
+	if et in ["int", "float"] and mname in ["int", "float"]:
+		return true
+	if et in ["String", "StringName", "NodePath"] and mname in ["String", "StringName", "NodePath"]:
+		return true
+	return _derives_from(et, mname)
+
+
+## Checks an initializer value against a tuple vartype (length +
+## per-index literal elements). Non-literals skip (unprovable).
+func _check_tuple_value(tname: String, value: Variant, line: int, owner: String) -> void:
+	var def := _tuple_def(tname)
+	if def.is_empty():
+		return
+	var lit := _tuple_lit_split(value)
+	if not bool(lit.get("literal", false)):
+		return
+	_check_tuple_elements(tname, def, lit.get("elements", []), line, owner)
+
+
+## Element-wise check of a literal element list against a definition.
+func _check_tuple_elements(tname: String, def: Dictionary, elems: Array, line: int, owner: String) -> void:
+	var items: Array = def.get("items", [])
+	if elems.size() != int(def.get("size", -1)):
+		_error(ERR_TUPLE_MISMATCH, "tuple '" + tname + "' expects " + str(def.get("size", 0)) + " elements, got " + str(elems.size()), line, 0, owner)
+		return
+	for idx in range(elems.size()):
+		var et := _infer_lit_elem(elems[idx])
+		if et == "":
+			continue
+		var item: Dictionary = items[idx]
+		if bool(item.get("any", false)):
+			continue
+		var ok := false
+		for m in item.get("types", []):
+			if _lit_compatible(et, str(m)):
+				ok = true
+				break
+		if not ok:
+			_error(ERR_TUPLE_MISMATCH, "tuple '" + tname + "' element " + str(idx) + " expects '" + _show_types(item.get("types", [])) + "', got '" + et + "'", line, 0, owner)
+
+
+## Writes one user/<Name>.json per resolved tuple (minimal, class
+## compatible: shared keys plus size/tuple_items).
+func _write_tuple_file(tname: String) -> void:
+	var entry: Dictionary = _tuples[tname]
+	var spec: Dictionary = entry.get("spec", {})
+	var info := {
+		"name": tname,
+		"kind": "tuple",
+		"class_name": "",
+		"resource_path": _script_resource_path,
+		"parent": "",
+		"inheritance_chain": [tname],
+		"size": int(spec.get("size", 0)),
+		"tuple_items": spec.get("items", []),
+		"enums": [],
+		"constants": [],
+		"signals": [],
+		"fields": [],
+		"static_methods": [],
+		"instance_methods": [],
+		"inner_classes": [],
+	}
+	_write_json(_write_base + "/user/" + tname + ".json", info)
+	_written.append(_write_base + "/user/" + tname + ".json")
 
 
 ## Extracts every @tagname pair from one TYPE_INFO token into
@@ -798,6 +1133,8 @@ func _engine_chain(tname: String) -> Array:
 ## or enum member, or a types_info file exists for it.
 func _type_known(tname: String) -> bool:
 	if tname != "" and tname == _script_class:
+		return true
+	if _tuples.has(tname):
 		return true
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
@@ -1257,6 +1594,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 				_mark_param_carrier(d, _pv, owner)
 			else:
 				_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_tuple_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -1275,6 +1614,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_param_tag(d):
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_tuple_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "PARAM":
 		var ptag = _leading_tag(d)
@@ -1288,6 +1629,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_param_tag(d):
 			_apply_param_single(_extract_param_tags(d, owner), d, owner)
+		if _has_any_tuple_tag(d):
+			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "LAMBDA" or t == "ACCESSOR":
 		if _has_any_deprecated_tag(d):
@@ -1311,6 +1654,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			else:
 				_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 				return
+		if _has_any_tuple_tag(d):
+			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
 		_scan(d.get("params", []), owner, false)
 		_scan(d.get("body", null), owner, false)
 		_scan(d.get("detail", null), owner, false)
@@ -1323,7 +1669,14 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_VAR_MISPLACED, "@var redefinition is only allowed inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not _has_param_tag(d).is_empty():
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not member_pos and not _has_tuple_tag(d).is_empty():
+			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
+	if _has_any_tuple_tag(d):
+		if not (member_pos and owner == ""):
+			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
+		# Top level: already collected by _prescan_tuples; falls through.
 	if _has_any_param_tag(d):
 		if t == "EXPR_STMT":
 			var _pe: Variant = d.get("expr", null)
@@ -1483,6 +1836,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_param_tag(child):
 					_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_tuple_tag(child):
+					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				_scan_class_body(child, full)
 			elif child is Dictionary and str((child as Dictionary).get("type", "")) in DECL_TYPES:
 				_mark_decl(child, full)
@@ -1503,6 +1858,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 						_mark_param_carrier(child, _cpv, full)
 					else:
 						_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_tuple_tag(child):
+					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				elif _has_any_return_tag(child):
 					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 						_mark_return_stmt(child, (child as Dictionary).get("value", null), full)
@@ -1614,6 +1971,7 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 		_scope_add(scope, str(d.get("name", "")), "local")
 		_check_return_ann(d.get("value", null), owner)
 		_check_value_lambda(d.get("value", null), scope, owner)
+		_check_tuple_value(_vartype_name(d), d.get("value", null), int(d.get("line", 0)), owner)
 		var acc: Variant = d.get("accessors", null)
 		if acc is Dictionary:
 			_walk(acc, scope, owner)
@@ -1713,6 +2071,7 @@ func _walk_members(children: Variant, scope: Dictionary, owner: String) -> void:
 			_check_type_ref((child as Dictionary).get("vartype", null), scope, owner)
 			_check_return_ann((child as Dictionary).get("value", null), owner)
 			_check_value_lambda((child as Dictionary).get("value", null), scope, owner)
+			_check_tuple_value(_vartype_name(child as Dictionary), (child as Dictionary).get("value", null), int((child as Dictionary).get("line", 0)), owner)
 			var acc: Variant = (child as Dictionary).get("accessors", null)
 			if acc is Dictionary:
 				_walk(acc, scope, owner)
@@ -2446,6 +2805,8 @@ func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, en
 		if skey == "":
 			return {"kind": "script", "key": ""}
 		return {"kind": "script", "key": skey}
+	if not _tuple_def(vname).is_empty():
+		return {"kind": "tuple", "name": vname}
 	if _engine_info(vname).is_empty():
 		return {"kind": "skip"}
 	return {"kind": "class", "tname": vname}
@@ -2462,6 +2823,8 @@ func _link_kind_of(tname: String, ctx: String) -> Dictionary:
 	var sk := _script_key_of(tname, ctx)
 	if sk != "":
 		return {"kind": "script", "key": sk}
+	if not _tuple_def(tname).is_empty():
+		return {"kind": "tuple", "name": tname}
 	if _engine_info(tname).is_empty():
 		return {}
 	return {"kind": "engine", "name": tname}
@@ -2599,6 +2962,8 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 	elif kind == "script":
 		links = [{"kind": "script", "key": str(fb.get("key", ""))}]
 		ctx = str(fb.get("key", ""))
+	elif kind == "tuple":
+		links = [{"kind": "tuple", "name": str(fb.get("name", ""))}]
 	if links.is_empty():
 		return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
 	while j < tokens.size() and (tokens[j] is Dictionary) and str((tokens[j] as Dictionary).get("type", "")) == "DOT":
@@ -2646,6 +3011,21 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 				else:
 					sure_miss = true
 					dnames.append(dname)
+				continue
+			if str(L.get("kind", "")) == "tuple":
+				var tname := str(L.get("name", ""))
+				var av := _verify_seg(["Array"], seg, is_call, false, tokens[j], owner, true)
+				var avt := str(av.get("vtype", ""))
+				if avt != "":
+					found = true
+					var al := _link_kind_of(avt, next_ctx)
+					if al.is_empty():
+						silent = true
+					else:
+						next_links.append(al)
+				else:
+					sure_miss = true
+				dnames.append(tname)
 				continue
 			if str(L.get("kind", "")) == "script":
 				var r := _script_seg(str(L.get("key", "")), seg, is_call)
@@ -2812,6 +3192,9 @@ func _verify_tokens(tokens: Array, scope: Dictionary, owner: String, fn: Variant
 			if nxt_ty == "LPAREN" and nxt_v == "(":
 				i = _verify_span(tokens, i + 1, scope, owner, fn, env, overlay) + 1
 				continue
+			if nxt_ty == "LBRACKET":
+				i = _verify_subscript(tokens, i, scope, owner, fn, env, overlay)
+				continue
 			i += 1
 			continue
 		if ty == "LPAREN" or ty == "LBRACKET" or ty == "LBRACE":
@@ -2824,6 +3207,64 @@ static func _vt_type(tokens: Array, i: int) -> String:
 	if i < 0 or i >= tokens.size() or not (tokens[i] is Dictionary):
 		return ""
 	return str((tokens[i] as Dictionary).get("type", ""))
+
+
+## Verifies tuple index access `base[...]` starting at tokens[i] (an
+## IDENTIFIER base). The inner span always verifies for nested chains.
+## A single int literal index bounds-checks (leading `-` wraps from
+## the end); a single non-int literal errors (tuples are positional);
+## anything else skips (dynamic index yields Variant). Returns the
+## index past `]`.
+func _verify_subscript(tokens: Array, i: int, scope: Dictionary, owner: String, fn: Variant, env: Dictionary, overlay: Dictionary) -> int:
+	var base := str((tokens[i] as Dictionary).get("value", ""))
+	var close := _match_close(tokens, i + 1)
+	if close < 0:
+		return i + 1
+	if close > i + 2:
+		_verify_tokens(tokens.slice(i + 2, close), scope, owner, fn, env, overlay)
+	var def := _tuple_base_def(base, fn, scope, owner, env, overlay)
+	if def.is_empty():
+		return close + 1
+	var inner: Array = []
+	if close > i + 2:
+		inner = tokens.slice(i + 2, close)
+	if inner.is_empty():
+		return close + 1
+	if inner.size() == 1 and (inner[0] is Dictionary):
+		var itt := str((inner[0] as Dictionary).get("type", ""))
+		if itt == "INT":
+			_check_tuple_index(str(def.get("name", "")), int(def.get("size", 0)), int(str((inner[0] as Dictionary).get("value", "0"))), int((inner[0] as Dictionary).get("line", 0)), owner)
+			return close + 1
+		if itt == "IDENTIFIER":
+			return close + 1
+		_error(ERR_TUPLE_BOUNDS, "tuple '" + str(def.get("name", "")) + "' is indexed by int, got '" + str((inner[0] as Dictionary).get("value", "")) + "'", int((inner[0] as Dictionary).get("line", 0)), int((inner[0] as Dictionary).get("column", 0)), owner)
+		return close + 1
+	if inner.size() == 2 and (inner[0] is Dictionary) and str((inner[0] as Dictionary).get("type", "")) == "OPERATOR" and str((inner[0] as Dictionary).get("value", "")) == "-" and (inner[1] is Dictionary) and str((inner[1] as Dictionary).get("type", "")) == "INT":
+		_check_tuple_index(str(def.get("name", "")), int(def.get("size", 0)), -int(str((inner[1] as Dictionary).get("value", "0"))), int((inner[1] as Dictionary).get("line", 0)), owner)
+		return close + 1
+	return close + 1
+
+
+## Bounds-checks one tuple index (negative wraps from the end).
+func _check_tuple_index(tname: String, size: int, idx: int, line: int, owner: String) -> void:
+	if idx >= 0 and idx < size:
+		return
+	if idx < 0 and idx >= -size:
+		return
+	_error(ERR_TUPLE_BOUNDS, "index " + str(idx) + " out of bounds for tuple '" + tname + "' of size " + str(size), line, 0, owner)
+
+
+## Tuple definition {name, size} for a chain base, or {} when the base
+## is not tuple-typed (then subscripts verify inner chains only).
+func _tuple_base_def(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, overlay: Dictionary) -> Dictionary:
+	var fb := _flow_base(base, fn, scope, owner, env, overlay)
+	if str(fb.get("kind", "")) != "instance":
+		return {}
+	for t in (fb.get("types", []) as Array):
+		var def := _tuple_def(str(t))
+		if not def.is_empty():
+			return {"name": str(t), "size": int(def.get("size", 0))}
+	return {}
 
 
 static func _vt_val(tokens: Array, i: int) -> String:

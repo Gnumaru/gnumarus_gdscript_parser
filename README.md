@@ -603,6 +603,45 @@ func myfunc1(myparam1):
   the very first comment of the file is the file header, never a
   member annotation.
 
+### `@tuple`
+
+Defines a fixed-shape tuple type: `# @tuple TupleName 5 int|string
+float|bool Object Variant *` — name, **mandatory** size, then exactly
+that many items. Items are `|`-unions of known names; `*` means
+dynamic (`any`), `variant` means unknown (normalized to `Variant`).
+Nested templates must exist (two-pass: definition order is free).
+
+```gdscript
+extends Node
+
+# @tuple Pair 2 int String
+var x: Pair = [1, "a"]      # OK: length and elements conform
+var y: Pair = [1, 2, 3]     # ERROR: expects 2 elements, got 3
+var z: Pair = ["a", "b"]    # ERROR: element 0 expects 'int', got 'String'
+
+func f():
+    print(x[0])             # OK: int
+    print(x[5])             # ERROR: index out of bounds
+    print(x[i])             # OK: dynamic index yields Variant
+    print(x.size())         # OK: tuples verify methods through Array
+    x.bogus()               # ERROR: Array has no such method
+```
+
+- A tuple flows into `Array`/`Variant`/untyped positions; an `Array`
+  flows in only as a conforming literal (checked at `var`/`const`
+  declarations); different tuple names never mix (nominal typing).
+  Definitions live top-level only (`tuple_misplaced` elsewhere);
+  duplicates and name clashes with script/engine types error
+  (`tuple_conflict`); bad shapes error (`tuple_malformed`,
+  `tuple_unknown_type`, `tuple_mismatch`, `tuple_bounds`).
+- Templates share `user/` with classes (one global type namespace)
+  as `kind: "tuple"` JSONs (compatible keys plus `size` and
+  `tuple_items`).
+- Gaps (documented): call arguments, parameter defaults and function
+  return values with tuple literals are unchecked; `is`/`as` accept
+  tuple names without misuse checking; no subscript continuation
+  (`t[0].foo()` skips the rest); `Tuple.new()` silently skipped.
+
 ## types_info layout
 
 - `types_info/builtin/<Name>.json` and `types_info/classes/<Name>.json`
@@ -637,6 +676,7 @@ green. `GODOT_BIN` overrides the engine path.
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
+  `test_tuple.gd` (`@tuple` rule),
   `test_flow.gd` (flow member checks + guards),
   `test_reuse.gd` (same instance parsing twice must give independent
   results).

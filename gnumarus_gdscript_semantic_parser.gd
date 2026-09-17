@@ -81,6 +81,10 @@ var _script_resource_path: String = ""
 var _script_class: String = ""
 var _script_extends: String = ""
 var _script_types: Dictionary = {}
+## @tuple names collected pre-check (top-level only). Full definitions
+## (counts, items) live analyzer-side; duplicates and conflicts are
+## reported there too.
+var _tuple_names: Dictionary = {}
 var _script_scope: Dictionary = {}
 var _script_infos: Dictionary = {}
 var _written: Array = []
@@ -96,6 +100,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_type_miss = {}
 	_written = []
 	_script_types = {}
+	_tuple_names = {}
 	var anchor = _dumper_anchor_dir()
 	_project_root = find_project_root(anchor)
 	if _project_root == "":
@@ -298,9 +303,77 @@ func _collect_script(ast: Dictionary) -> void:
 			_script_extends = _dotted_name((child as Dictionary).get("path", []))
 	for child in ast.get("children", []):
 		_register_top(child)
+	_collect_tuple_names(ast)
 	if _script_class != "":
 		_script_types[_script_class] = {"kind": "class", "full": _script_class}
 	_build_script_infos(ast)
+
+
+## Collects @tuple names (top-level standalone comments and leading
+## comments alike) so tuple annotations resolve. Shapes, duplicates
+## and conflicts are validated analyzer-side.
+func _collect_tuple_names(ast: Dictionary) -> void:
+	for child in ast.get("children", []):
+		if not (child is Dictionary):
+			continue
+		if str((child as Dictionary).get("type", "")) == "TYPE_INFO":
+			_register_tuple_node(child)
+			continue
+		for c in (child as Dictionary).get("leading_comments", []):
+			if c is Dictionary:
+				_register_tuple_node(c)
+
+
+## Registers every @tuple name in one comment value (one line each).
+func _register_tuple_node(tok: Dictionary) -> void:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return
+	for w in _tuple_tag_names(str(tok.get("value", ""))):
+		_tuple_names[w] = true
+
+
+## First words after each @tuple tag in a comment value. Mirrors the
+## analyzer's tag rules (exact word, @ at start or after #/space/tab).
+static func _tuple_tag_names(value: String) -> Array:
+	var out: Array = []
+	for line in value.split("\n"):
+		var at := line.find("@tuple")
+		while at >= 0:
+			var ok := at == 0
+			if not ok:
+				var left := line.unicode_at(at - 1)
+				ok = left == 35 or left == 32 or left == 9
+			var end := at + 6
+			if ok and end < line.length():
+				var nx := line.unicode_at(end)
+				if (nx >= 65 and nx <= 90) or (nx >= 97 and nx <= 122) or (nx >= 48 and nx <= 57) or nx == 95:
+					ok = false
+			if ok:
+				var rest := ""
+				if end < line.length():
+					rest = line.substr(end).strip_edges()
+				var word := ""
+				for i in range(rest.length()):
+					var ch := rest.unicode_at(i)
+					if ch == 32 or ch == 9 or ch == 10:
+						break
+					word += rest.substr(i, 1)
+				if word != "" and _is_tuple_name(word) and not word in out:
+					out.append(word)
+				break
+			at = line.find("@tuple", at + 1)
+	return out
+
+
+## Plausible tuple names (letter/underscore start; full validation is
+## analyzer-side).
+static func _is_tuple_name(word: String) -> bool:
+	if word == "":
+		return false
+	var first := word.unicode_at(0)
+	if not ((first >= 65 and first <= 90) or (first >= 97 and first <= 122) or first == 95):
+		return false
+	return true
 
 
 ## Builds method tables for the script itself and every inner class so
@@ -597,8 +670,11 @@ func _check_decl(node: Dictionary, scope: Dictionary, self_type: String) -> void
 		_check_expr_tokens(_expr_like_tokens(value), scope, self_type)
 	var declared = _declared_type_of(node)
 	if declared != "" and value != null and vkind != "LAMBDA":
-		var inferred = _infer_tokens(_expr_like_tokens(value), scope, self_type)
-		_check_assignable(declared, inferred, int(node.get("line", 0)), int(node.get("column", 0)))
+		if _type_kind_of(declared) == "tuple" and _is_array_literal(_expr_like_tokens(value)):
+			pass
+		else:
+			var inferred = _infer_tokens(_expr_like_tokens(value), scope, self_type)
+			_check_assignable(declared, inferred, int(node.get("line", 0)), int(node.get("column", 0)))
 	var accessors: Variant = node.get("accessors", null)
 	if accessors is Dictionary:
 		_walk_block(accessors, scope, self_type)
@@ -654,9 +730,12 @@ func _check_lambda(node: Dictionary, scope: Dictionary, self_type: String) -> vo
 		_collect_bindings(body, lscope)
 		_walk_block(body, lscope, self_type)
 		if declared != "" and declared != "void":
+			var dtuple := _type_kind_of(declared) == "tuple"
 			for ret in _collect_nodes(body, "RETURN_STMT"):
 				var rv: Variant = (ret as Dictionary).get("value", null)
 				if rv != null:
+					if dtuple and _is_array_literal(_expr_like_tokens(rv)):
+						continue
 					_check_assignable(declared, _infer_tokens(_expr_like_tokens(rv), lscope, self_type), int((ret as Dictionary).get("line", 0)), int((ret as Dictionary).get("column", 0)))
 
 
@@ -864,6 +943,8 @@ func _resolve_type(name: String, line: int, column: int) -> Dictionary:
 		return {"name": name}
 	if _script_types.has(name):
 		return {"name": name, "kind": "script"}
+	if _tuple_names.has(name):
+		return {"name": name, "kind": "tuple"}
 	if _type_cache.has(name):
 		return _type_cache[name]
 	if _type_miss.has(name):
@@ -1841,6 +1922,8 @@ func _check_assignment(tokens: Array, i: int, scope: Dictionary, self_type: Stri
 	var declared = str(entry.get("type", ""))
 	if declared == "" or declared == "Variant":
 		return
+	if _type_kind_of(declared) == "tuple" and _is_array_literal(tokens.slice(i + 1)):
+		return
 	var rhs = _infer_slice(tokens, i + 1, scope, self_type)
 	if rhs == "" or rhs == "Variant":
 		return
@@ -1960,6 +2043,11 @@ func _check_assignable(declared: String, value: String, line: int, column: int) 
 		return
 	if declared == value:
 		return
+	var dkind := _type_kind_of(declared)
+	var vkind := _type_kind_of(value)
+	if dkind == "tuple" or vkind == "tuple":
+		_check_tuple_assignable(declared, dkind, value, vkind, line, column)
+		return
 	if _is_enum_type(declared) or _is_enum_type(value):
 		if _is_enum_type(declared) and _is_enum_type(value) and declared == value:
 			return
@@ -1979,6 +2067,49 @@ func _check_assignable(declared: String, value: String, line: int, column: int) 
 	if _base_type(declared) == _base_type(value):
 		return
 	_error(KIND_ASSIGN, "cannot assign '" + value + "' to '" + declared + "'", line, column)
+
+
+## Kind of a type name for tuple compatibility: "tuple" for @tuple
+## names, the script/file kind otherwise, "" when unknown.
+func _type_kind_of(name: String) -> String:
+	if name == "":
+		return ""
+	if _tuple_names.has(name):
+		return "tuple"
+	if _script_types.has(name):
+		return str((_script_types[name] as Dictionary).get("kind", ""))
+	var info := _resolve_type_quiet(name)
+	if info.is_empty():
+		return ""
+	return str(info.get("kind", ""))
+
+
+## Tuple assignment compatibility (nominal: same name only). A tuple
+## flows into Array/Variant/untyped positions; an Array flows into a
+## tuple only as a literal (shape-checked by the analyzer, so literal
+## sources must be skipped by callers, never rejected here).
+func _check_tuple_assignable(declared: String, dkind: String, value: String, vkind: String, line: int, column: int) -> void:
+	if dkind == "tuple" and vkind == "tuple":
+		if declared != value:
+			_error(KIND_ASSIGN, "cannot assign '" + value + "' to '" + declared + "' (different tuple types)", line, column)
+		return
+	if vkind == "tuple" and declared == "Array":
+		return
+	if dkind == "tuple" and value == "Array":
+		_error(KIND_ASSIGN, "cannot assign Array to '" + declared + "' (tuple shape not provable; assign a conforming literal)", line, column)
+		return
+	if dkind == "tuple" or vkind == "tuple":
+		_error(KIND_ASSIGN, "cannot assign '" + value + "' to '" + declared + "'", line, column)
+		return
+
+
+## True when tokens form exactly one [...] array literal.
+func _is_array_literal(toks: Array) -> bool:
+	if toks.is_empty():
+		return false
+	if not (toks[0] is Dictionary) or str((toks[0] as Dictionary).get("type", "")) != "LBRACKET":
+		return false
+	return _match_forward(toks, 0) == toks.size() - 1
 
 
 # ------------------------------------------------------- type inference
