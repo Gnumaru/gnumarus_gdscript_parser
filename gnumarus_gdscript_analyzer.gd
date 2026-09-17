@@ -115,6 +115,56 @@ const ERR_PARAM_MALFORMED := "param_malformed"
 const ERR_PARAM_UNKNOWN := "param_unknown"
 const ERR_PARAM_UNKNOWN_TYPE := "param_unknown_type"
 const ERR_PARAM_MISMATCH := "param_mismatch"
+const ERR_MISSING_METHOD := "missing_method"
+const ERR_MISSING_MEMBER := "missing_member"
+
+## Signal methods accepted on signal-typed bases (mirrors the semantic
+## parser's SIGNAL_METHODS).
+const SIGNAL_METHODS := ["connect", "disconnect", "is_connected", "emit", "get_connections"]
+
+## Variant.Type enum value -> narrowed type name ("" = not a real type).
+const VARIANT_TYPE_MAP := {
+	"TYPE_NIL": "Nil",
+	"TYPE_BOOL": "bool",
+	"TYPE_INT": "int",
+	"TYPE_FLOAT": "float",
+	"TYPE_STRING": "String",
+	"TYPE_VECTOR2": "Vector2",
+	"TYPE_VECTOR2I": "Vector2i",
+	"TYPE_RECT2": "Rect2",
+	"TYPE_RECT2I": "Rect2i",
+	"TYPE_VECTOR3": "Vector3",
+	"TYPE_VECTOR3I": "Vector3i",
+	"TYPE_TRANSFORM2D": "Transform2D",
+	"TYPE_VECTOR4": "Vector4",
+	"TYPE_VECTOR4I": "Vector4i",
+	"TYPE_PLANE": "Plane",
+	"TYPE_QUATERNION": "Quaternion",
+	"TYPE_AABB": "AABB",
+	"TYPE_BASIS": "Basis",
+	"TYPE_TRANSFORM3D": "Transform3D",
+	"TYPE_PROJECTION": "Projection",
+	"TYPE_COLOR": "Color",
+	"TYPE_STRING_NAME": "StringName",
+	"TYPE_NODE_PATH": "NodePath",
+	"TYPE_RID": "RID",
+	"TYPE_OBJECT": "Object",
+	"TYPE_CALLABLE": "Callable",
+	"TYPE_SIGNAL": "Signal",
+	"TYPE_DICTIONARY": "Dictionary",
+	"TYPE_ARRAY": "Array",
+	"TYPE_PACKED_BYTE_ARRAY": "PackedByteArray",
+	"TYPE_PACKED_INT32_ARRAY": "PackedInt32Array",
+	"TYPE_PACKED_INT64_ARRAY": "PackedInt64Array",
+	"TYPE_PACKED_FLOAT32_ARRAY": "PackedFloat32Array",
+	"TYPE_PACKED_FLOAT64_ARRAY": "PackedFloat64Array",
+	"TYPE_PACKED_STRING_ARRAY": "PackedStringArray",
+	"TYPE_PACKED_VECTOR2_ARRAY": "PackedVector2Array",
+	"TYPE_PACKED_VECTOR3_ARRAY": "PackedVector3Array",
+	"TYPE_PACKED_COLOR_ARRAY": "PackedColorArray",
+	"TYPE_PACKED_VECTOR4_ARRAY": "PackedVector4Array",
+	"TYPE_MAX": "",
+}
 
 ## Preloaded (not via class_name) so this script compiles standalone,
 ## even before the editor/cache registers global classes.
@@ -175,6 +225,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_scan_children(ast.get("children", []), "")
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
+	_flow_members(ast.get("children", []), _new_scope(null), "")
 	ast["analyzer_errors"] = _errors
 	ast["analyzer_warnings"] = _warnings
 	_update_user_files(ast)
@@ -347,17 +398,6 @@ func _has_var_tag(tok: Dictionary) -> Dictionary:
 	return _find_var(str(tok.get("value", "")))
 
 
-## Looks for @var in a node's leading_comments (first hit wins).
-func _leading_var(node: Dictionary) -> Dictionary:
-	for c in node.get("leading_comments", []):
-		if c is Dictionary:
-			var tag = _has_var_tag(c)
-			if not tag.is_empty():
-				tag["line"] = int((c as Dictionary).get("line", 0))
-				return tag
-	return {}
-
-
 func _has_any_var_tag(node: Dictionary) -> bool:
 	for c in node.get("leading_comments", []):
 		if c is Dictionary and not _has_var_tag(c).is_empty():
@@ -384,28 +424,46 @@ func _has_any_param_tag(node: Dictionary) -> bool:
 	return false
 
 
+## Extracts every @tagname pair from one TYPE_INFO token into
+## [{name,types,raw,line}] (consecutive lines merge into one token, so
+## each line is scanned independently). Malformed pairs error out and
+## are skipped. Shared by @var and @param.
+func _extract_tok_tags(tok: Dictionary, owner: String, tagname: String, what: String, malformed_kind: String) -> Array:
+	var out: Array = []
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return out
+	var tok_line := int(tok.get("line", 0))
+	var li := 0
+	for line in str(tok.get("value", "")).split("\n"):
+		var tag := _find_tag(line, tagname)
+		if not tag.is_empty():
+			var spec := _parse_var_spec(str(tag.get("message", "")), what)
+			if not bool(spec.get("ok", false)):
+				_error(malformed_kind, str(spec.get("error", "")), tok_line + li, 0, owner)
+			else:
+				out.append({"name": str(spec.get("name", "")), "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "line": tok_line + li})
+		li += 1
+	return out
+
+
+## Extracts every @var pair from a node's leading_comments.
+func _extract_var_tags(node: Dictionary, owner: String) -> Array:
+	var out: Array = []
+	for c in node.get("leading_comments", []):
+		if c is Dictionary:
+			for spec in _extract_tok_tags(c, owner, "var", "@var", ERR_VAR_MALFORMED):
+				out.append(spec)
+	return out
+
+
 ## Extracts every @param pair from a node's leading_comments into
-## [{name,types,raw,line}]. Consecutive @param lines merge into one
-## token, so each line is scanned independently. Malformed pairs error
-## out (param_malformed) and are skipped.
+## [{name,types,raw,line}].
 func _extract_param_tags(node: Dictionary, owner: String) -> Array:
 	var out: Array = []
 	for c in node.get("leading_comments", []):
-		if not (c is Dictionary):
-			continue
-		if str((c as Dictionary).get("type", "")) != "TYPE_INFO":
-			continue
-		var tok_line := int((c as Dictionary).get("line", 0))
-		var li := 0
-		for line in str((c as Dictionary).get("value", "")).split("\n"):
-			var tag := _find_tag(line, "param")
-			if not tag.is_empty():
-				var spec := _parse_var_spec(str(tag.get("message", "")), "@param")
-				if not bool(spec.get("ok", false)):
-					_error(ERR_PARAM_MALFORMED, str(spec.get("error", "")), tok_line + li, 0, owner)
-				else:
-					out.append({"name": str(spec.get("name", "")), "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "line": tok_line + li})
-			li += 1
+		if c is Dictionary:
+			for spec in _extract_tok_tags(c, owner, "param", "@param", ERR_PARAM_MALFORMED):
+				out.append(spec)
 	return out
 
 
@@ -430,7 +488,7 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 			_error(ERR_PARAM_UNKNOWN_TYPE, "@param has unknown type '" + str(m) + "'", line, 0, owner)
 			return
 	var ref := _vartype_name(pnode)
-	if ref != "" and ref != "Variant":
+	if ref != "" and ref != "Variant" and ref != "dynamic":
 		for m in pair.get("types", []):
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + str(m) + "' for parameter '" + str(pair.get("name", "")) + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
@@ -544,15 +602,60 @@ func _infer_var_value(value: Variant) -> String:
 
 ## Reference type of a VAR/CONST declaration node for @var narrowing:
 ## explicit vartype first; then `:=`/const inference from the value;
-## plain `=` (or missing value) means Variant. "" only when inference
-## fails (check skipped).
+## plain `=` (or missing value) means "dynamic" (no promises: checks
+## that need a type skip it, unlike explicit "Variant" which is strict).
+## "" only when inference fails (check skipped).
 func _var_reference(node: Dictionary, is_const: bool) -> String:
 	var vt := _vartype_name(node)
 	if vt != "":
 		return vt
 	if is_const or str(node.get("op", "")) == ":=":
 		return _infer_var_value(node.get("value", null))
-	return "Variant"
+	return "dynamic"
+
+
+## Finds a method entry by name in static or instance lists.
+## Returns {"returns"} or {}.
+static func _engine_call(info: Dictionary, seg: String) -> Dictionary:
+	for m in info.get("instance_methods", []):
+		if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
+			return {"returns": str((m as Dictionary).get("returns", ""))}
+	for m in info.get("static_methods", []):
+		if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
+			return {"returns": str((m as Dictionary).get("returns", ""))}
+	return {}
+
+
+## Finds a readable member by name: fields ("type"), signals
+## ("signal"), methods-as-values ("Callable"). With static_ctx also
+## constants and enums ("int"). Returns {"type"} or {} when absent.
+static func _engine_read(info: Dictionary, seg: String, static_ctx: bool) -> Dictionary:
+	for f in info.get("members", []):
+		if f is Dictionary and str((f as Dictionary).get("name", "")) == seg:
+			return {"type": str((f as Dictionary).get("type", ""))}
+	for p in info.get("properties", []):
+		if p is Dictionary and str((p as Dictionary).get("name", "")) == seg:
+			return {"type": str((p as Dictionary).get("type", ""))}
+	for s in info.get("signals", []):
+		if s is Dictionary and str((s as Dictionary).get("name", "")) == seg:
+			return {"type": "signal"}
+	for m in info.get("instance_methods", []):
+		if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
+			return {"type": "Callable"}
+	for m in info.get("static_methods", []):
+		if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
+			return {"type": "Callable"}
+	if static_ctx:
+		for e in info.get("enums", []):
+			if e is Dictionary and str((e as Dictionary).get("name", "")) == seg:
+				return {"type": "int"}
+			for v in (e as Dictionary).get("values", []):
+				if v is Dictionary and str((v as Dictionary).get("name", "")) == seg:
+					return {"type": "int"}
+		for c in info.get("constants", []):
+			if c is Dictionary and str((c as Dictionary).get("name", "")) == seg:
+				return {"type": ""}
+	return {}
 
 
 # ------------------------------------------------------- @return helpers
@@ -649,34 +752,30 @@ static func _parse_var_spec(raw_msg: String, what := "@var") -> Dictionary:
 	return {"ok": true, "name": vname, "types": spec.get("types", []), "raw": str(spec.get("raw", ""))}
 
 
-## True when a types_info file exists for the name (builtin, classes or
-## user under _write_base). Results are cached per analyze() call.
-func _type_file_exists(tname: String) -> bool:
+## Full info Dictionary of a type from its JSON file (builtin, classes
+## or user under _write_base), cached per analyze() call. {} when missing.
+func _type_info(tname: String) -> Dictionary:
 	if _type_cache.has(tname):
-		return not (_type_cache[tname] as Dictionary).is_empty()
+		return _type_cache[tname]
 	for sub in ["builtin", "classes", "user"]:
 		var info := _read_json(_write_base + "/" + sub + "/" + tname + ".json")
 		if not info.is_empty():
 			_type_cache[tname] = info
-			return true
+			return info
 	_type_cache[tname] = {}
-	return false
+	return {}
+
+
+## True when a types_info file exists for the name (builtin, classes or
+## user under _write_base). Results are cached per analyze() call.
+func _type_file_exists(tname: String) -> bool:
+	return not _type_info(tname).is_empty()
 
 
 ## inheritance_chain of a type from its JSON file ([] when unknown).
 func _engine_chain(tname: String) -> Array:
-	if _type_cache.has(tname):
-		var hit: Dictionary = _type_cache[tname]
-		var chain: Array = hit.get("inheritance_chain", [])
-		return chain
-	for sub in ["builtin", "classes", "user"]:
-		var info := _read_json(_write_base + "/" + sub + "/" + tname + ".json")
-		if not info.is_empty():
-			_type_cache[tname] = info
-			var chain2: Array = info.get("inheritance_chain", [])
-			return chain2
-	_type_cache[tname] = {}
-	return []
+	var chain: Array = _type_info(tname).get("inheritance_chain", [])
+	return chain
 
 
 ## A @return member is known when it is the script class, a script class
@@ -782,13 +881,9 @@ func _mark_return_stmt(stmt_node: Dictionary, value: Variant, owner: String) -> 
 ## Validates one @var tag against a VAR/CONST declaration node and
 ## stamps decl_node["var_ann"]. Name must equal the declared one; every
 ## type member must be known and narrow the declared/inferred type.
-func _attach_var_decl(decl_node: Dictionary, tag: Dictionary, owner: String, is_const: bool) -> void:
-	var spec := _parse_var_spec(str(tag.get("message", "")))
-	var line := int(tag.get("line", int(decl_node.get("line", 0))))
+func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is_const: bool) -> void:
+	var line := int(spec.get("line", int(decl_node.get("line", 0))))
 	var col := int(decl_node.get("column", 0))
-	if not bool(spec.get("ok", false)):
-		_error(ERR_VAR_MALFORMED, str(spec.get("error", "")), line, col, owner)
-		return
 	var vname := str(spec.get("name", ""))
 	if vname != str(decl_node.get("name", "")):
 		_error(ERR_VAR_UNKNOWN, "@var '" + vname + "' does not match declared variable '" + str(decl_node.get("name", "")) + "'", line, col, owner)
@@ -798,7 +893,7 @@ func _attach_var_decl(decl_node: Dictionary, tag: Dictionary, owner: String, is_
 			_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(m) + "'", line, col, owner)
 			return
 	var ref := _var_reference(decl_node, is_const)
-	if ref != "" and ref != "Variant":
+	if ref != "" and ref != "Variant" and ref != "dynamic":
 		for m in spec.get("types", []):
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, col, owner)
@@ -806,11 +901,12 @@ func _attach_var_decl(decl_node: Dictionary, tag: Dictionary, owner: String, is_
 
 
 ## Marks a VAR_DECL/CONST_DECL node (@var allowed in any position).
+## Every pair in the leading block is validated (pairs for other
+## variables error against this declaration).
 func _mark_var_decl(decl_node: Dictionary, owner: String) -> void:
-	var tag := _leading_var(decl_node)
-	if tag.is_empty():
-		return
-	_attach_var_decl(decl_node, tag, owner, str(decl_node.get("type", "")) == "CONST_DECL")
+	for spec in _extract_var_tags(decl_node, owner):
+		if spec is Dictionary:
+			_attach_var_decl(decl_node, spec, owner, str(decl_node.get("type", "")) == "CONST_DECL")
 
 
 ## Kind string of a name in scope (walks parents), "" when absent.
@@ -900,13 +996,9 @@ func _free_var_target(vname: String, fn_node: Dictionary, scope: Dictionary, own
 	return {}
 
 
-## Runs one free-@var tag against the visible variables.
-func _check_free_var(tag: Dictionary, scope: Dictionary, owner: String, fn_node: Dictionary) -> void:
-	var spec := _parse_var_spec(str(tag.get("message", "")))
-	var line := int(tag.get("line", 0))
-	if not bool(spec.get("ok", false)):
-		_error(ERR_VAR_MALFORMED, str(spec.get("error", "")), line, 0, owner)
-		return
+## Runs one free-@var spec against the visible variables.
+func _check_free_var(spec: Dictionary, scope: Dictionary, owner: String, fn_node: Dictionary) -> void:
+	var line := int(spec.get("line", 0))
 	var vname := str(spec.get("name", ""))
 	var target := _free_var_target(vname, fn_node, scope, owner)
 	if target.is_empty():
@@ -925,62 +1017,56 @@ func _check_free_var(tag: Dictionary, scope: Dictionary, owner: String, fn_node:
 		ref = _vartype_name(tnode)
 	elif not tnode.is_empty():
 		ref = _var_reference(tnode, bool(target.get("is_const", false)))
-	if ref != "" and ref != "Variant":
+	if ref != "" and ref != "Variant" and ref != "dynamic":
 		for m in spec.get("types", []):
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
 
 
-## Collects free-@var tags under a function body: standalone TYPE_INFO
-## nodes plus leading tags on non-declaration statements. Never crosses
+## Collects free-@var specs under a function body: standalone TYPE_INFO
+## nodes plus leading specs on non-declaration statements. Never crosses
 ## a nested function/class/accessor boundary (separate contexts) and
-## never takes VAR/CONST leading tags (before-decl use, handled in
-## _scan) nor lambda-statement leading tags (they belong to the lambda).
-func _free_vars_into(node: Variant, out: Array) -> void:
+## never takes VAR/CONST leading specs (before-decl use, handled in
+## _scan). Leading specs on any other statement (including a bare
+## lambda statement) are free uses for the enclosing function.
+func _free_vars_into(node: Variant, out: Array, owner: String) -> void:
 	if node is Array:
 		for e in node:
-			_free_vars_into(e, out)
+			_free_vars_into(e, out, owner)
 		return
 	if not (node is Dictionary):
 		return
 	var d: Dictionary = node
 	var t := str(d.get("type", ""))
 	if t == "TYPE_INFO":
-		var stag := _has_var_tag(d)
-		if not stag.is_empty():
-			stag["line"] = int(d.get("line", 0))
-			out.append(stag)
+		for spec in _extract_tok_tags(d, owner, "var", "@var", ERR_VAR_MALFORMED):
+			out.append(spec)
 		return
 	if t == "FUNC_DECL" or t == "LAMBDA" or t == "CLASS_DECL" or t == "ACCESSOR":
 		return
 	if t == "VAR_DECL" or t == "CONST_DECL":
 		return
-	if t == "EXPR_STMT":
-		var e: Variant = d.get("expr", null)
-		if e is Dictionary and str((e as Dictionary).get("type", "")) == "LAMBDA":
-			return
-	var lt := _leading_var(d)
-	if not lt.is_empty():
-		out.append(lt)
+	for spec in _extract_var_tags(d, owner):
+		out.append(spec)
 	for k in d.keys():
 		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written", "value", "expr"]:
 			continue
-		_free_vars_into(d[k], out)
+		_free_vars_into(d[k], out, owner)
 
 
 ## Runs the free-@var checks over a function body with its scope.
-## fn_node null means "not a function" (accessor bodies): every tag
+## fn_node null means "not a function" (accessor bodies): every spec
 ## found is misplaced.
 func _process_free_vars(body: Variant, scope: Dictionary, owner: String, fn_node: Variant) -> void:
 	var found: Array = []
-	_free_vars_into(body, found)
-	for tag in found:
-		if not (tag is Dictionary):
+	_free_vars_into(body, found, owner)
+	for spec in found:
+		if not (spec is Dictionary):
 			continue
 		if fn_node == null:
-			_error(ERR_VAR_MISPLACED, "@var redefinition is only allowed inside a function body", int((tag as Dictionary).get("line", 0)), 0, owner)
+			_error(ERR_VAR_MISPLACED, "@var redefinition is only allowed inside a function body", int((spec as Dictionary).get("line", 0)), 0, owner)
 			continue
-		_check_free_var(tag, scope, owner, fn_node)
+		_check_free_var(spec, scope, owner, fn_node)
 
 
 ## Scope + free-@var pass for a lambda value reached through a
@@ -2102,6 +2188,742 @@ func _warn_use(kind: String, qname: String, hit: Dictionary, tok: Dictionary, ow
 
 func _error(kind: String, message: String, line: int, column: int, owner: String) -> void:
 	_errors.append({"kind": kind, "message": message, "line": line, "column": column, "owner": owner})
+
+
+# ------------------------------------------------- flow analysis
+#
+# Flow-sensitive member verification (Phase 1) with typeof type guards
+# (Phase 2). A dedicated pass walks function bodies in order carrying
+# env {name: [types]}: declared types outside guards, narrowed types
+# inside `if typeof(x) == T` branches, @var/@param facts in order.
+# Anything else (dynamic plain-`=` variables, uninferrable values,
+# self/super, script classes, call results without known returns,
+# member READS) skips verification: only provable absence of a CALLED
+# method errors (reads only guide continuation). The scope-aware _walk
+# pass is untouched (no signature or behavior changes there).
+
+
+## Declared types of a VAR/CONST/PARAM node as a list ([] = dynamic).
+## Before-decl @var / @param facts win, then explicit vartype, then
+## `:=`/const inference. Plain `=` stays dynamic on purpose.
+func _flow_decl_types(node: Dictionary, is_const: bool, is_param: bool) -> Array:
+	if node.has("var_ann"):
+		var va: Dictionary = node["var_ann"]
+		return (va.get("types", []) as Array).duplicate()
+	if node.has("param_ann"):
+		var pa: Dictionary = node["param_ann"]
+		return (pa.get("types", []) as Array).duplicate()
+	var vt := _vartype_name(node)
+	if vt != "":
+		return [vt]
+	if is_param:
+		return []
+	if is_const or str(node.get("op", "")) == ":=":
+		var inf := _infer_var_value(node.get("value", null))
+		if inf != "":
+			return [inf]
+	return []
+
+
+## True for engine-backed type info (builtin/class/root kinds).
+## Script user files ("script") never verify: their methods are
+## collected without inheritance, so misses would false-positive.
+static func _is_engine_info(info: Dictionary) -> bool:
+	return str(info.get("kind", "")) in ["builtin", "class", "root"]
+
+
+## Engine-backed info or {} (never script user files).
+func _engine_info(tname: String) -> Dictionary:
+	var info := _type_info(tname)
+	if _is_engine_info(info):
+		return info
+	return {}
+
+
+## Resolves a chain base name to {"kind", ...}:
+## - {"kind": "skip"}: self/super/unknown/dynamic/script-backed.
+## - {"kind": "signal"}: signal-typed base (SIGNAL_METHODS apply).
+## - {"kind": "class", "tname"}: engine class (static context).
+## - {"kind": "instance", "types": [...]}: known value types.
+func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, overlay: Dictionary) -> Dictionary:
+	if vname == "" or vname == "_":
+		return {"kind": "skip"}
+	if (overlay as Dictionary).has(vname):
+		return {"kind": "skip"}
+	if (env as Dictionary).has(vname):
+		var et: Array = (env as Dictionary)[vname]
+		if et.is_empty():
+			return {"kind": "skip"}
+		return {"kind": "instance", "types": et.duplicate()}
+	if vname == "self" or vname == "super":
+		return {"kind": "skip"}
+	var fnd: Dictionary = fn if fn is Dictionary else {}
+	var kind := _scope_kind(scope, vname)
+	if kind != "":
+		if kind == "param":
+			var pnode := _find_param_node(fnd.get("params", []), vname)
+			if pnode.is_empty():
+				return {"kind": "skip"}
+			return {"kind": "instance", "types": _flow_decl_types(pnode, false, true)}
+		if kind == "local" or kind == "const":
+			var decl := _find_body_decl(fnd.get("body", null), vname)
+			if decl.is_empty():
+				return {"kind": "skip"}
+			return {"kind": "instance", "types": _flow_decl_types(decl, str(decl.get("type", "")) == "CONST_DECL", false)}
+		if kind == "signal":
+			return {"kind": "signal"}
+		return {"kind": "skip"}
+	for o in [owner, ""]:
+		var n := _member_var_node(str(o), vname)
+		if not n.is_empty():
+			return {"kind": "instance", "types": _flow_decl_types(n, str(n.get("type", "")) == "CONST_DECL", false)}
+	for o2 in [owner, ""]:
+		var key2 := str(o2)
+		if _members.has(key2) and (_members[key2] as Dictionary).has(vname):
+			var rec: Dictionary = (_members[key2] as Dictionary)[vname]
+			if str(rec.get("kind", "")) == "signal":
+				return {"kind": "signal"}
+	if vname == _script_class and vname != "":
+		return {"kind": "skip"}
+	if _engine_info(vname).is_empty():
+		return {"kind": "skip"}
+	return {"kind": "class", "tname": vname}
+
+
+static func _show_types(types: Array) -> String:
+	if types.size() == 1:
+		return str(types[0])
+	return "|".join(types)
+
+
+## Verifies one chain segment against a union type list, walking each
+## type's inheritance_chain (methods live on ancestors: hide/show are
+## CanvasItem's, not Control's). Ok iff ANY listed engine type has it
+## (a non-engine or partially-dumped member means "might have it":
+## skip silently). CALLS missing everywhere error (missing_method);
+## READS never error (they only guide continuation, mirroring the
+## semantic pass). Returns {"vtype"} for continuation ("" = unknown:
+## rest of the chain skips).
+func _verify_seg(types: Array, seg: String, is_call: bool, static_ctx: bool, tok: Dictionary, owner: String) -> Dictionary:
+	var fully_walked := true
+	for t in types:
+		var chain := _engine_chain(str(t))
+		if chain.is_empty():
+			if _engine_info(str(t)).is_empty():
+				fully_walked = false
+			continue
+		for link in chain:
+			var info := _engine_info(str(link))
+			if info.is_empty():
+				fully_walked = false
+				continue
+			if is_call:
+				var hit := _engine_call(info, seg)
+				if not hit.is_empty():
+					return {"vtype": str(hit.get("returns", ""))}
+			else:
+				var hit2 := _engine_read(info, seg, static_ctx)
+				if not hit2.is_empty():
+					return {"vtype": str(hit2.get("type", ""))}
+	if not fully_walked:
+		return {"vtype": ""}
+	if is_call:
+		_error(ERR_MISSING_METHOD, "type '" + _show_types(types) + "' has no method '" + seg + "()'", int(tok.get("line", 0)), int(tok.get("column", 0)), owner)
+	return {"vtype": ""}
+
+
+## Index of the bracket matching tokens[open_idx], or -1.
+static func _match_close(tokens: Array, open_idx: int) -> int:
+	if open_idx < 0 or open_idx >= tokens.size() or not (tokens[open_idx] is Dictionary):
+		return -1
+	var o := str((tokens[open_idx] as Dictionary).get("type", ""))
+	var want := ""
+	if o == "LPAREN":
+		want = "RPAREN"
+	elif o == "LBRACKET":
+		want = "RBRACKET"
+	elif o == "LBRACE":
+		want = "RBRACE"
+	else:
+		return -1
+	var depth := 0
+	var i := open_idx
+	while i < tokens.size():
+		if tokens[i] is Dictionary:
+			var ty := str((tokens[i] as Dictionary).get("type", ""))
+			if ty == o:
+				depth += 1
+			elif ty == want:
+				depth -= 1
+				if depth == 0:
+					return i
+		i += 1
+	return -1
+
+
+## Verifies an argument/group span (tokens between open_idx and its
+## match) and returns the match index (tokens.size() when unbalanced).
+func _verify_span(tokens: Array, open_idx: int, scope: Dictionary, owner: String, fn: Variant, env: Dictionary, overlay: Dictionary) -> int:
+	var close := _match_close(tokens, open_idx)
+	if close < 0:
+		return tokens.size()
+	if close > open_idx + 1:
+		_verify_tokens(tokens.slice(open_idx + 1, close), scope, owner, fn, env, overlay)
+	return close
+
+
+## Advances past DOT-name pairs without checks (unknown base), still
+## verifying nested argument spans. Returns the index past the chain.
+func _skip_chain_verify(tokens: Array, j: int, scope: Dictionary, owner: String, fn: Variant, env: Dictionary, overlay: Dictionary) -> int:
+	while j < tokens.size() and (tokens[j] is Dictionary) and str((tokens[j] as Dictionary).get("type", "")) == "DOT":
+		j += 1
+		if j >= tokens.size() or not (tokens[j] is Dictionary):
+			break
+		var nt := str((tokens[j] as Dictionary).get("type", ""))
+		if nt != "IDENTIFIER" and nt != "BUILTIN_TYPE" and nt != "KEYWORD":
+			break
+		j += 1
+		if j < tokens.size() and (tokens[j] is Dictionary) and str((tokens[j] as Dictionary).get("type", "")) == "LPAREN":
+			j = _verify_span(tokens, j, scope, owner, fn, env, overlay) + 1
+	return j
+
+
+## Verifies one DOT chain starting at tokens[i] (an IDENTIFIER).
+## Returns the index past the chain.
+func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: Variant, env: Dictionary, overlay: Dictionary) -> int:
+	var base := str((tokens[i] as Dictionary).get("value", ""))
+	var fb := _flow_base(base, fn, scope, owner, env, overlay)
+	var j := i + 1
+	var kind := str(fb.get("kind", ""))
+	if kind == "skip":
+		return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
+	var signal_mode := kind == "signal"
+	var static_ctx := kind == "class"
+	var cur: Array = []
+	if kind == "instance":
+		cur = (fb.get("types", []) as Array).duplicate()
+	elif kind == "class":
+		cur = [str(fb.get("tname", ""))]
+	while j < tokens.size() and (tokens[j] is Dictionary) and str((tokens[j] as Dictionary).get("type", "")) == "DOT":
+		j += 1
+		if j >= tokens.size() or not (tokens[j] is Dictionary):
+			break
+		var nt := str((tokens[j] as Dictionary).get("type", ""))
+		if nt != "IDENTIFIER" and nt != "BUILTIN_TYPE" and nt != "KEYWORD":
+			break
+		var seg := str((tokens[j] as Dictionary).get("value", ""))
+		if seg == "new":
+			if kind == "class":
+				cur = [str(fb.get("tname", ""))]
+				static_ctx = false
+				signal_mode = false
+			else:
+				cur = []
+			j += 1
+			continue
+		var is_call := j + 1 < tokens.size() and (tokens[j + 1] is Dictionary) and str((tokens[j + 1] as Dictionary).get("type", "")) == "LPAREN"
+		if signal_mode:
+			if not (seg in SIGNAL_METHODS):
+				_error(ERR_MISSING_METHOD, "signal has no method '" + seg + "'", int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)), owner)
+			if is_call:
+				j = _verify_span(tokens, j + 1, scope, owner, fn, env, overlay)
+			j += 1
+			continue
+		if cur.is_empty():
+			if is_call:
+				j = _verify_span(tokens, j + 1, scope, owner, fn, env, overlay)
+			j += 1
+			continue
+		var verdict := _verify_seg(cur, seg, is_call, static_ctx, tokens[j], owner)
+		var vt := str(verdict.get("vtype", ""))
+		if vt == "signal":
+			signal_mode = true
+			cur = []
+		elif vt == "":
+			cur = []
+		else:
+			cur = [vt]
+			static_ctx = false
+		if is_call:
+			j = _verify_span(tokens, j + 1, scope, owner, fn, env, overlay)
+		j += 1
+	return j
+
+
+## Collects raw-soup lambda parameter names into overlay. Returns the
+## index of the closing RPAREN (or nearby on garbage).
+static func _flow_absorb_params(tokens: Array, at: int, overlay: Dictionary) -> int:
+	var i := at + 1
+	if i >= tokens.size() or not (tokens[i] is Dictionary) or str((tokens[i] as Dictionary).get("type", "")) != "LPAREN":
+		return at + 1
+	var depth := 0
+	i += 1
+	while i < tokens.size():
+		if not (tokens[i] is Dictionary):
+			i += 1
+			continue
+		var ty := str((tokens[i] as Dictionary).get("type", ""))
+		if ty == "LPAREN":
+			depth += 1
+		elif ty == "RPAREN":
+			if depth == 0:
+				return i
+			depth -= 1
+		elif ty == "IDENTIFIER" and depth == 0:
+			(overlay as Dictionary)[str((tokens[i] as Dictionary).get("value", ""))] = true
+		i += 1
+	return i
+
+
+## Verifies member accesses in a flat token array with the flow env.
+## Bare names/calls are untouched (other rules own them); DOT chains,
+## argument spans and grouping spans recurse.
+func _verify_tokens(tokens: Array, scope: Dictionary, owner: String, fn: Variant, env: Dictionary, overlay: Dictionary) -> void:
+	var i := 0
+	while i < tokens.size():
+		if not (tokens[i] is Dictionary):
+			i += 1
+			continue
+		var t: Dictionary = tokens[i]
+		var ty := str(t.get("type", ""))
+		var v := str(t.get("value", ""))
+		if ty == "LAMBDA_MARKER" and t.get("value", null) is Dictionary:
+			_flow_lambda_node(t.get("value", {}), scope, owner)
+			i += 1
+			continue
+		if ty == "LAMBDA":
+			_flow_lambda_node(t, scope, owner)
+			i += 1
+			continue
+		if ty == "KEYWORD" and v == "func":
+			i = _flow_absorb_params(tokens, i, overlay)
+			continue
+		if ty == "IDENTIFIER":
+			var nxt_ty := ""
+			var nxt_v := ""
+			if i + 1 < tokens.size() and tokens[i + 1] is Dictionary:
+				nxt_ty = str((tokens[i + 1] as Dictionary).get("type", ""))
+				nxt_v = str((tokens[i + 1] as Dictionary).get("value", ""))
+			if nxt_ty == "DOT":
+				i = _verify_chain(tokens, i, scope, owner, fn, env, overlay)
+				continue
+			if nxt_ty == "LPAREN" and nxt_v == "(":
+				i = _verify_span(tokens, i + 1, scope, owner, fn, env, overlay) + 1
+				continue
+			i += 1
+			continue
+		if ty == "LPAREN" or ty == "LBRACKET" or ty == "LBRACE":
+			i = _verify_span(tokens, i, scope, owner, fn, env, overlay) + 1
+			continue
+		i += 1
+
+
+static func _vt_type(tokens: Array, i: int) -> String:
+	if i < 0 or i >= tokens.size() or not (tokens[i] is Dictionary):
+		return ""
+	return str((tokens[i] as Dictionary).get("type", ""))
+
+
+static func _vt_val(tokens: Array, i: int) -> String:
+	if i < 0 or i >= tokens.size() or not (tokens[i] is Dictionary):
+		return ""
+	return str((tokens[i] as Dictionary).get("value", ""))
+
+
+## [start, end) bounds of a guard condition, stripping outer balanced
+## parens. Operates on the token array as given (slices welcome).
+static func _guard_bounds(tokens: Array) -> Array:
+	var s := 0
+	var e := tokens.size()
+	while e - s >= 2 and _vt_type(tokens, s) == "LPAREN" and _match_close(tokens, s) == e - 1:
+		s += 1
+		e -= 1
+	return [s, e]
+
+
+## Recognizes `typeof(x) == TYPE_Y` / `!=` (outer parens and a leading
+## not/! flip polarity). Returns {name, types, eq} or {}.
+func _guard_typeof(tokens: Array) -> Dictionary:
+	var be := _guard_bounds(tokens)
+	var s := int(be[0])
+	var e := int(be[1])
+	var neg := false
+	if s < e and ((_vt_type(tokens, s) == "KEYWORD" and _vt_val(tokens, s) == "not") or (_vt_type(tokens, s) == "OPERATOR" and _vt_val(tokens, s) == "!")):
+		neg = true
+		s += 1
+	if e - s < 6:
+		return {}
+	if not (_vt_type(tokens, s) == "IDENTIFIER" and _vt_val(tokens, s) == "typeof"):
+		return {}
+	if _vt_type(tokens, s + 1) != "LPAREN":
+		return {}
+	if _vt_type(tokens, s + 2) != "IDENTIFIER":
+		return {}
+	if _match_close(tokens, s + 1) != s + 3:
+		return {}
+	if _vt_type(tokens, s + 4) != "OPERATOR":
+		return {}
+	var op := _vt_val(tokens, s + 4)
+	if op != "==" and op != "!=":
+		return {}
+	var parts := _dotted_parts(tokens, s + 5, e)
+	if parts.is_empty():
+		return {}
+	var last := str(parts[parts.size() - 1])
+	if not VARIANT_TYPE_MAP.has(last):
+		return {}
+	var tname := str(VARIANT_TYPE_MAP[last])
+	if tname == "" or not _type_known(tname):
+		return {}
+	var eq := op == "=="
+	if neg:
+		eq = not eq
+	return {"name": _vt_val(tokens, s + 2), "types": [tname], "eq": eq}
+
+
+## Dotted (or bare) value tokens shaped like a type reference: single
+## IDENTIFIER/BUILTIN_TYPE or DOT-joined parts. Returns the dotted
+## name or "" on any other shape.
+static func _dotted_parts(tokens: Array, s: int, e: int) -> Array:
+	var parts: Array = []
+	var k := s
+	while k < e:
+		var kt := _vt_type(tokens, k)
+		if kt == "DOT":
+			k += 1
+			continue
+		if kt != "IDENTIFIER" and kt != "BUILTIN_TYPE":
+			return []
+		parts.append(_vt_val(tokens, k))
+		k += 1
+	return parts
+
+
+## Recognizes `x is Y` / `x is not Y` (leading not/! flips). Y must be
+## a single known type name (dotted paths are skipped: without engine
+## backing they could not verify anything anyway). Returns
+## {name, types, eq} or {}.
+func _guard_is(tokens: Array) -> Dictionary:
+	var be := _guard_bounds(tokens)
+	var s := int(be[0])
+	var e := int(be[1])
+	var neg := false
+	if s < e and ((_vt_type(tokens, s) == "KEYWORD" and _vt_val(tokens, s) == "not") or (_vt_type(tokens, s) == "OPERATOR" and _vt_val(tokens, s) == "!")):
+		neg = true
+		s += 1
+	if e - s != 3 and e - s != 4:
+		return {}
+	if _vt_type(tokens, s) != "IDENTIFIER":
+		return {}
+	if not (_vt_type(tokens, s + 1) == "KEYWORD" and _vt_val(tokens, s + 1) == "is"):
+		return {}
+	var idx := s + 2
+	var positive := true
+	if e - s == 4:
+		if not (_vt_type(tokens, s + 2) == "KEYWORD" and _vt_val(tokens, s + 2) == "not"):
+			return {}
+		positive = false
+		idx = s + 3
+	var ytype := _vt_type(tokens, idx)
+	if ytype != "IDENTIFIER" and ytype != "BUILTIN_TYPE":
+		return {}
+	var yname := _vt_val(tokens, idx)
+	if yname == "" or not _type_known(yname):
+		return {}
+	var eq := positive
+	if neg:
+		eq = not eq
+	return {"name": _vt_val(tokens, s), "types": [yname], "eq": eq}
+
+
+## Maps value tokens shaped like a Variant.Type constant (bare
+## `TYPE_X` or dotted `Variant.Type.TYPE_X`) to the narrowed type
+## name, or "" when the shape does not match.
+func _const_type_tokens(tokens: Array) -> String:
+	var parts := _dotted_parts(tokens, 0, tokens.size())
+	if parts.is_empty():
+		return ""
+	var last := str(parts[parts.size() - 1])
+	if not VARIANT_TYPE_MAP.has(last):
+		return ""
+	var tname := str(VARIANT_TYPE_MAP[last])
+	if tname == "" or not _type_known(tname):
+		return ""
+	return tname
+
+
+## Resolves a name holding a Variant.Type constant (a local/const
+## initialized with one, a member, or a parameter default) to the
+## narrowed type name, or "". Reassignments are not tracked: the
+## initializer shape alone decides.
+func _guard_const_type(vname: String, fn: Variant, scope: Dictionary, owner: String) -> String:
+	var fnd: Dictionary = fn if fn is Dictionary else {}
+	if _scope_kind(scope, vname) == "param":
+		var pnode := _find_param_node(fnd.get("params", []), vname)
+		if not pnode.is_empty():
+			return _const_type_tokens(_as_tokens((pnode as Dictionary).get("default", null)))
+	var decl := _find_body_decl(fnd.get("body", null), vname)
+	if not decl.is_empty():
+		return _const_type_tokens(_as_tokens(decl.get("value", null)))
+	for o in [owner, ""]:
+		var n := _member_var_node(str(o), vname)
+		if not n.is_empty():
+			return _const_type_tokens(_as_tokens(n.get("value", null)))
+	return ""
+
+
+## Recognizes `is_instance_of(x, T)` (leading not/! flips). T is a
+## known type name, a Variant.Type constant (`TYPE_X` or
+## `Variant.Type.TYPE_X`), or a variable holding one. `is` demands a
+## constant, but is_instance_of resolves at runtime, so variables work
+## here. Returns {name, types, eq} or {}.
+func _guard_instanceof(tokens: Array, fn: Variant, scope: Dictionary, owner: String) -> Dictionary:
+	var be := _guard_bounds(tokens)
+	var s := int(be[0])
+	var e := int(be[1])
+	var neg := false
+	if s < e and ((_vt_type(tokens, s) == "KEYWORD" and _vt_val(tokens, s) == "not") or (_vt_type(tokens, s) == "OPERATOR" and _vt_val(tokens, s) == "!")):
+		neg = true
+		s += 1
+	if e - s < 6:
+		return {}
+	if not (_vt_type(tokens, s) == "IDENTIFIER" and _vt_val(tokens, s) == "is_instance_of"):
+		return {}
+	if _vt_type(tokens, s + 1) != "LPAREN" or _match_close(tokens, s + 1) != e - 1:
+		return {}
+	if _vt_type(tokens, s + 2) != "IDENTIFIER":
+		return {}
+	if _vt_type(tokens, s + 3) != "COMMA":
+		return {}
+	var tstart := s + 4
+	var tend := e - 1
+	if tstart >= tend:
+		return {}
+	var tfirst := _vt_type(tokens, tstart)
+	var resolved := ""
+	if tfirst == "IDENTIFIER" or tfirst == "BUILTIN_TYPE":
+		var tname := _vt_val(tokens, tstart)
+		if tstart + 1 >= tend:
+			if _type_known(tname):
+				resolved = tname
+			elif VARIANT_TYPE_MAP.has(tname):
+				var mapped := str(VARIANT_TYPE_MAP[tname])
+				if mapped != "" and _type_known(mapped):
+					resolved = mapped
+			else:
+				resolved = _guard_const_type(tname, fn, scope, owner)
+		else:
+			var parts := _dotted_parts(tokens, tstart, tend)
+			if not parts.is_empty():
+				var last := str(parts[parts.size() - 1])
+				if VARIANT_TYPE_MAP.has(last):
+					var mapped2 := str(VARIANT_TYPE_MAP[last])
+					if mapped2 != "" and _type_known(mapped2):
+						resolved = mapped2
+	if resolved == "":
+		return {}
+	var eq := not neg
+	return {"name": _vt_val(tokens, s + 2), "types": [resolved], "eq": eq}
+
+
+## Any recognized guard: typeof first, then `is`, then
+## is_instance_of. Shapes are mutually exclusive; first hit wins.
+func _flow_guard(tokens: Array, fn: Variant, scope: Dictionary, owner: String) -> Dictionary:
+	var g := _guard_typeof(tokens)
+	if not g.is_empty():
+		return g
+	g = _guard_is(tokens)
+	if not g.is_empty():
+		return g
+	return _guard_instanceof(tokens, fn, scope, owner)
+
+
+## Builds a function scope for the flow pass (params + collected
+## bindings, chained to the incoming scope). Mirrors _walk_func.
+func _flow_fn_scope(fn: Dictionary, scope: Dictionary) -> Dictionary:
+	var fs = _new_scope(scope)
+	for p in fn.get("params", []):
+		if p is Dictionary:
+			_scope_add(fs, str((p as Dictionary).get("name", "")), "param")
+	_collect_func_bindings(fn.get("body", null), fs)
+	return fs
+
+
+## Applies free-@var facts from one statement: leading specs on
+## non-declaration statements plus the statement itself when it is a
+## standalone @var TYPE_INFO. Before-decl VAR/CONST leading is skipped
+## (already the initial reference via var_ann). Malformed or
+## unresolvable specs are skipped (the walk pass already reported).
+func _flow_facts(node: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
+	if str(node.get("type", "")) == "VAR_DECL" or str(node.get("type", "")) == "CONST_DECL":
+		return
+	var specs: Array = []
+	if str(node.get("type", "")) == "TYPE_INFO":
+		for spec in _extract_tok_tags(node, owner, "var", "@var", ERR_VAR_MALFORMED):
+			specs.append(spec)
+	else:
+		for spec in _extract_var_tags(node, owner):
+			specs.append(spec)
+	var fnd: Dictionary = fn if fn is Dictionary else {}
+	for spec in specs:
+		if not (spec is Dictionary):
+			continue
+		var vname := str((spec as Dictionary).get("name", ""))
+		var target := _free_var_target(vname, fnd, scope, owner)
+		if target.is_empty() or target.has("bad"):
+			continue
+		(env as Dictionary)[vname] = ((spec as Dictionary).get("types", []) as Array).duplicate()
+
+
+## Flow pass over one statement with the current env (mutated by
+## facts, branched by guards). fn is the enclosing function/lambda.
+func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
+	var t := str(node.get("type", ""))
+	if t == "FUNC_DECL":
+		_flow_func(node, scope, owner)
+		return
+	if t == "CLASS_DECL":
+		var full := _full_name(owner, str(node.get("name", "")))
+		var cscope = _new_scope(scope)
+		var ext: Variant = node.get("extends_type", null)
+		if ext is Dictionary:
+			_verify_tokens(_as_tokens(ext), cscope, full, null, {}, {})
+		var cbody: Variant = node.get("body", null)
+		if cbody is Dictionary:
+			_flow_members((cbody as Dictionary).get("children", []), cscope, full)
+		return
+	if t == "VAR_DECL" or t == "CONST_DECL":
+		_verify_tokens(_as_tokens(node.get("value", null)), scope, owner, fn, env, {})
+		_flow_lambda_value(node.get("value", null), scope, owner)
+		var acc: Variant = node.get("accessors", null)
+		if acc is Dictionary:
+			_flow_accessor(acc, scope, owner)
+		return
+	if t == "EXPR_STMT":
+		_flow_facts(node, scope, owner, fn, env)
+		_verify_tokens(_as_tokens(node.get("expr", null)), scope, owner, fn, env, {})
+		_flow_lambda_value(node.get("expr", null), scope, owner)
+		return
+	if t == "TYPE_INFO":
+		_flow_facts(node, scope, owner, fn, env)
+		return
+	if t == "IF_STMT":
+		var cond := _as_tokens(node.get("condition", null))
+		_verify_tokens(cond, scope, owner, fn, env, {})
+		var g := _flow_guard(cond, fn, scope, owner)
+		var then_env := env.duplicate()
+		var else_env := env.duplicate()
+		if not g.is_empty():
+			var fnd: Dictionary = fn if fn is Dictionary else {}
+			var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
+			if not target.is_empty() and not target.has("bad"):
+				if bool(g.get("eq", true)):
+					then_env[str(g.get("name", ""))] = (g.get("types", []) as Array).duplicate()
+				else:
+					else_env[str(g.get("name", ""))] = (g.get("types", []) as Array).duplicate()
+		_flow_block(node.get("then", null), scope, owner, fn, then_env)
+		for e in node.get("elifs", []):
+			if e is Dictionary:
+				_verify_tokens(_as_tokens((e as Dictionary).get("condition", null)), scope, owner, fn, env, {})
+				_flow_block((e as Dictionary).get("body", null), scope, owner, fn, env.duplicate())
+		if node.get("else_body", null) is Dictionary:
+			_flow_block(node.get("else_body", null), scope, owner, fn, else_env)
+		return
+	if t == "FOR_STMT":
+		_verify_tokens(_as_tokens(node.get("iter", null)), scope, owner, fn, env, {})
+		_flow_block(node.get("body", null), scope, owner, fn, env.duplicate())
+		return
+	if t == "WHILE_STMT":
+		_verify_tokens(_as_tokens(node.get("condition", null)), scope, owner, fn, env, {})
+		_flow_block(node.get("body", null), scope, owner, fn, env.duplicate())
+		return
+	if t == "MATCH_STMT":
+		_verify_tokens(_as_tokens(node.get("subject", null)), scope, owner, fn, env, {})
+		for b in node.get("branches", []):
+			if b is Dictionary and str((b as Dictionary).get("type", "")) == "MATCH_BRANCH":
+				_verify_tokens(_as_tokens((b as Dictionary).get("pattern", null)), scope, owner, fn, env, {})
+				_flow_block((b as Dictionary).get("body", null), scope, owner, fn, env.duplicate())
+		return
+	if t == "RETURN_STMT":
+		_verify_tokens(_as_tokens(node.get("value", null)), scope, owner, fn, env, {})
+		return
+	if t == "ASSERT_STMT":
+		_verify_tokens(_flat_tokens(node.get("args", [])), scope, owner, fn, env, {})
+		return
+	if t == "ACCESSOR":
+		_flow_accessor(node, scope, owner)
+		return
+	if t == "LAMBDA":
+		_flow_lambda_node(node, scope, owner)
+		return
+	if t == "BLOCK":
+		_flow_block(node.get("children", []), scope, owner, fn, env)
+		return
+	if t == "ENUM_DECL":
+		for m in node.get("members", []):
+			if m is Dictionary and str((m as Dictionary).get("type", "")) == "ENUM_MEMBER":
+				_verify_tokens(_as_tokens((m as Dictionary).get("value", null)), scope, owner, fn, env, {})
+		return
+	if t == "EXTENDS":
+		_verify_tokens(_flat_tokens(node.get("path", [])), scope, owner, fn, env, {})
+		return
+	_flow_facts(node, scope, owner, fn, env)
+
+
+## Flow pass over a BLOCK node or statement array.
+func _flow_block(node: Variant, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
+	if node is Array:
+		for e in node:
+			if e is Dictionary:
+				_flow_stmt(e, scope, owner, fn, env)
+		return
+	if not (node is Dictionary):
+		return
+	var d: Dictionary = node
+	if str(d.get("type", "")) == "BLOCK":
+		_flow_block(d.get("children", []), scope, owner, fn, env)
+		return
+	_flow_stmt(d, scope, owner, fn, env)
+
+
+## Flow pass over member-level children (script top or class body).
+func _flow_members(children: Variant, scope: Dictionary, owner: String) -> void:
+	if not (children is Array):
+		return
+	for child in children:
+		if not (child is Dictionary):
+			continue
+		_flow_stmt(child, scope, owner, null, {})
+
+
+## Fresh-env flow for a named function (its own guards/facts).
+func _flow_func(node: Dictionary, scope: Dictionary, owner: String) -> void:
+	var fs = _flow_fn_scope(node, scope)
+	_flow_block(node.get("body", null), fs, owner, node, {})
+
+
+## Fresh-env flow for a lambda node with the incoming scope chained.
+func _flow_lambda_node(node: Dictionary, scope: Dictionary, owner: String) -> void:
+	var fs = _flow_fn_scope(node, scope)
+	_flow_block(node.get("body", null), fs, owner, node, {})
+
+
+## Runs fresh-env flow when a statement value/expression is a LAMBDA
+## node. No-op otherwise.
+func _flow_lambda_value(v: Variant, scope: Dictionary, owner: String) -> void:
+	if v is Dictionary and str((v as Dictionary).get("type", "")) == "LAMBDA":
+		_flow_lambda_node(v, scope, owner)
+
+
+## Accessor bodies are not functions: fresh env, no free-@var facts
+## (misplaced tags already errored in the scan pass).
+func _flow_accessor(node: Dictionary, scope: Dictionary, owner: String) -> void:
+	var ascope = _new_scope(scope)
+	for p in node.get("params", []):
+		if p is Dictionary:
+			_scope_add(ascope, str((p as Dictionary).get("name", "")), "param")
+	_collect_func_bindings(node.get("body", null), ascope)
+	_flow_block(node.get("body", null), ascope, owner, null, {})
 
 
 # ------------------------------------------------------- user JSON files

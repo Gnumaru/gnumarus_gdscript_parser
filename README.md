@@ -245,8 +245,9 @@ print(ast["semantic_errors"], ast["user_types_written"])
 Interprets the `TYPE_INFO` comments of a semantic-parser AST and
 checks the annotation rules, one rule at a time. The walk is
 scope-aware (locals/parameters shadow members) and threads an explicit
-owner (`""`, `"Outer"`, `"Outer.Inner"`) so future rules can grow flow
-analysis and type narrowing on top.
+owner (`""`, `"Outer"`, `"Outer.Inner"`). A separate flow pass then
+walks function bodies in order carrying a type environment for
+member verification and `typeof` guards (see below).
 
 ```gdscript
 var result: Dictionary = ana.analyze(ast, "res://script.gd")
@@ -260,6 +261,57 @@ print(result["warnings"], result["errors"])  # result["ast"] is the modified AST
 - Just before returning, the `types_info/user/*.json` files are
   updated with member flags plus per-file `analysis_errors` /
   `analysis_warnings`.
+
+### Flow analysis (member calls + `typeof` guards)
+
+After the annotation walk, a dedicated pass verifies method calls
+against known types and narrows `Variant`s inside `typeof` guards:
+
+```gdscript
+extends Node
+
+func myfunc():
+    var myvar: Variant
+    myvar.free()                    # ERROR: type 'Variant' has no method 'free()'
+    if typeof(myvar) == TYPE_OBJECT:
+        myvar.get_class()           # OK: narrowed to Object (which has get_class)
+    myvar.free()                    # ERROR again: outside the guard, no guarantee
+```
+
+- Calls on a provably-known type missing the method error
+  (`missing_method`, `type 'X' has no method 'm()'`), walking the
+  `inheritance_chain` and following known call results
+  (`n.get_child(0).queue_free()` verifies end to end).
+- Suppression-safe by construction: dynamic plain-`=` variables,
+  untyped parameters, unknown types, `self`/`super`, script classes
+  and member READS never error (reads only guide continuation, like
+  the semantic pass). `new` is always allowed; signals accept their
+  five methods.
+- `if typeof(x) == TYPE_Y` narrows the `then` branch, `!=` narrows
+  the `else` (a leading `not`/`!` flips); `elif` restarts from the
+  entry types. `@var`/`@param` facts apply in order inside the flow.
+- `x is Y` / `x is not Y` narrow the same way (single known type
+  names). `is_instance_of(x, T)` accepts a type name, a
+  `Variant.Type` constant (`TYPE_OBJECT`,
+  `Variant.Type.TYPE_OBJECT`) or a variable holding one — locals,
+  consts, members and parameter defaults initialized with such a
+  constant are constant-folded (reassignments are not tracked):
+
+```gdscript
+extends Node
+
+func myfunc():
+    var myvar: Variant
+    var typecode: Variant.Type = Variant.Type.TYPE_OBJECT
+    if is_instance_of(myvar, typecode):
+        myvar.get_class()       # OK: typecode proves Object
+    if myvar is Node:
+        myvar.queue_free()      # OK: narrowed to Node
+```
+
+- Not yet: assignment tracking, `and`/`or` compounds, loop-carried
+  narrowing, unreachable detection, subscript result types, operator
+  checking (the semantic pass owns operators).
 
 ## Annotations
 
@@ -551,6 +603,7 @@ green. `GODOT_BIN` overrides the engine path.
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
+  `test_flow.gd` (flow member checks + `typeof` guards),
   `test_reuse.gd` (same instance parsing twice must give independent
   results).
 - `tests/ensure_native_types.gd` runs first: if `types_info/builtin/`,
