@@ -484,6 +484,41 @@ func f(a: Node):
   from a nested lambda checks existence but skips the type check;
   lambdas inside default values or call arguments are not scanned.
 
+### `@param`
+
+Declares a parameter type. It takes a name and a type
+(`# @param myparam int|Object`, unions with `|`): directly before a
+parameter (multiline parameter lists) or before the function/lambda
+declaration using the parameters — possibly on nearby lines together
+with `@return` and friends (consecutive lines merge into one token,
+each pair is matched by name).
+
+```gdscript
+extends Node
+
+# @param myparam1 int|Object
+func myfunc1(myparam1):
+
+    var mylambda = func(
+        # @param myparam2 String|Object
+        myparam2: Variant
+    ):
+        return
+
+    return
+```
+
+- Same checks as `@var`: known members narrowing the declared
+  vartype (untyped parameters accept anything). Error kinds:
+  `param_misplaced` (anything that is not a parameter or its
+  function/lambda — including floating uses mid-body),
+  `param_malformed`, `param_unknown` (no parameter with that name),
+  `param_unknown_type`, `param_mismatch`. Parameters gain a
+  `param_ann` stamp.
+- Like all member annotations, the block needs a first line above it:
+  the very first comment of the file is the file header, never a
+  member annotation.
+
 ## types_info layout
 
 - `types_info/builtin/<Name>.json` and `types_info/classes/<Name>.json`
@@ -515,8 +550,9 @@ green. `GODOT_BIN` overrides the engine path.
   `test_native_guard.gd` (native database contract),
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
-  `test_var.gd` (`@var` rule), `test_reuse.gd` (same instance
-  parsing twice must give independent results).
+  `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
+  `test_reuse.gd` (same instance parsing twice must give independent
+  results).
 - `tests/ensure_native_types.gd` runs first: if `types_info/builtin/`,
   `types_info/classes/` and `index.json` exist with content it exits
   immediately; otherwise it runs the dumper with the same engine

@@ -16,6 +16,7 @@ func _init() -> void:
 		"res://tests/test_private.gd",
 		"res://tests/test_return.gd",
 		"res://tests/test_var.gd",
+		"res://tests/test_param.gd",
 		"res://tests/test_reuse.gd",
 	]
 	var total_p := 0

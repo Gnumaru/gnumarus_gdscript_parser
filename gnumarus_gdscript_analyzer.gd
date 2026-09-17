@@ -60,6 +60,18 @@ extends RefCounted
 ##   "var_unknown", "var_unknown_type", "var_mismatch"). Declarations
 ##   gain a `var_ann` stamp; free uses only check.
 ##
+## The fifth rule is "@param":
+## - It takes a parameter name and a type ("# @param myparam int"):
+##   directly before a parameter (multiline parameter lists) or before
+##   the function/lambda declaration using the parameters (alongside
+##   @return and friends, on other lines). Several pairs may share one
+##   merged comment token; each must match a parameter by name.
+## - Same checks as @var: known members narrowing the declared vartype
+##   (untyped parameters accept anything). Violations generate ERRORS
+##   ("param_misplaced", "param_malformed", "param_unknown",
+##   "param_unknown_type", "param_mismatch"). Parameters gain a
+##   `param_ann` stamp.
+##
 ## The walk is scope-aware (locals and parameters shadow members) and
 ## threads an explicit owner ("", "Outer", "Outer.Inner") so later
 ## rules can grow flow analysis and type narrowing on top of it.
@@ -98,6 +110,11 @@ const ERR_VAR_MALFORMED := "var_malformed"
 const ERR_VAR_UNKNOWN := "var_unknown"
 const ERR_VAR_UNKNOWN_TYPE := "var_unknown_type"
 const ERR_VAR_MISMATCH := "var_mismatch"
+const ERR_PARAM_MISPLACED := "param_misplaced"
+const ERR_PARAM_MALFORMED := "param_malformed"
+const ERR_PARAM_UNKNOWN := "param_unknown"
+const ERR_PARAM_UNKNOWN_TYPE := "param_unknown_type"
+const ERR_PARAM_MISMATCH := "param_mismatch"
 
 ## Preloaded (not via class_name) so this script compiles standalone,
 ## even before the editor/cache registers global classes.
@@ -217,6 +234,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_var(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_param(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 
 
 # ------------------------------------------------------------- tag scan
@@ -346,6 +365,112 @@ func _has_any_var_tag(node: Dictionary) -> bool:
 	return false
 
 
+# ------------------------------------------------------- @param helpers
+
+func _find_param(value: String) -> Dictionary:
+	return _find_tag(value, "param")
+
+
+func _has_param_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_param(str(tok.get("value", "")))
+
+
+func _has_any_param_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_param_tag(c).is_empty():
+			return true
+	return false
+
+
+## Extracts every @param pair from a node's leading_comments into
+## [{name,types,raw,line}]. Consecutive @param lines merge into one
+## token, so each line is scanned independently. Malformed pairs error
+## out (param_malformed) and are skipped.
+func _extract_param_tags(node: Dictionary, owner: String) -> Array:
+	var out: Array = []
+	for c in node.get("leading_comments", []):
+		if not (c is Dictionary):
+			continue
+		if str((c as Dictionary).get("type", "")) != "TYPE_INFO":
+			continue
+		var tok_line := int((c as Dictionary).get("line", 0))
+		var li := 0
+		for line in str((c as Dictionary).get("value", "")).split("\n"):
+			var tag := _find_tag(line, "param")
+			if not tag.is_empty():
+				var spec := _parse_var_spec(str(tag.get("message", "")), "@param")
+				if not bool(spec.get("ok", false)):
+					_error(ERR_PARAM_MALFORMED, str(spec.get("error", "")), tok_line + li, 0, owner)
+				else:
+					out.append({"name": str(spec.get("name", "")), "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "line": tok_line + li})
+			li += 1
+	return out
+
+
+## Finds a PARAM node by name. {} when absent.
+static func _find_param_node(params: Variant, pname: String) -> Dictionary:
+	if params is Array:
+		for p in params:
+			if p is Dictionary:
+				var pd: Dictionary = p
+				if str(pd.get("type", "")) == "PARAM" and str(pd.get("name", "")) == pname:
+					return pd
+	return {}
+
+
+## Narrows one @param pair against a PARAM node: known members
+## narrowing the declared vartype (untyped params accept anything).
+## Stamps pnode["param_ann"].
+func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> void:
+	var line := int(pair.get("line", int(pnode.get("line", 0))))
+	for m in pair.get("types", []):
+		if not _type_known(str(m)):
+			_error(ERR_PARAM_UNKNOWN_TYPE, "@param has unknown type '" + str(m) + "'", line, 0, owner)
+			return
+	var ref := _vartype_name(pnode)
+	if ref != "" and ref != "Variant":
+		for m in pair.get("types", []):
+			if str(m) != ref and not _derives_from(str(m), ref):
+				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + str(m) + "' for parameter '" + str(pair.get("name", "")) + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
+	pnode["param_ann"] = {"name": str(pair.get("name", "")), "types": pair.get("types", []), "raw": str(pair.get("raw", "")), "line": line}
+
+
+## Applies @param pairs to a whole parameter list (before-func/lambda
+## use). Each pair must name one of the params.
+func _apply_param_pairs(pairs: Array, params: Variant, fn_display: String, owner: String) -> void:
+	for pair in pairs:
+		if not (pair is Dictionary):
+			continue
+		var pnode := _find_param_node(params, str((pair as Dictionary).get("name", "")))
+		if pnode.is_empty():
+			_error(ERR_PARAM_UNKNOWN, "@param '" + str((pair as Dictionary).get("name", "")) + "' does not match any parameter of function " + fn_display, int((pair as Dictionary).get("line", 0)), 0, owner)
+			continue
+		_check_param_pair(pair, pnode, owner)
+
+
+## Applies @param pairs to a single PARAM node (multiline-list use).
+## Each pair must name this parameter.
+func _apply_param_single(pairs: Array, pnode: Dictionary, owner: String) -> void:
+	for pair in pairs:
+		if not (pair is Dictionary):
+			continue
+		if str((pair as Dictionary).get("name", "")) != str(pnode.get("name", "")):
+			_error(ERR_PARAM_UNKNOWN, "@param '" + str((pair as Dictionary).get("name", "")) + "' does not match parameter '" + str(pnode.get("name", "")) + "'", int((pair as Dictionary).get("line", 0)), 0, owner)
+			continue
+		_check_param_pair(pair, pnode, owner)
+
+
+## @param on a function/lambda carrier: FUNC_DECL, LAMBDA node, or a
+## statement whose value is a lambda (VAR/CONST/EXPR_STMT).
+func _mark_param_carrier(stmt_node: Dictionary, fn_node: Dictionary, owner: String) -> void:
+	var pairs := _extract_param_tags(stmt_node, owner)
+	if pairs.is_empty():
+		return
+	_apply_param_pairs(pairs, fn_node.get("params", []), _fn_display(fn_node), owner)
+
+
 # ------------------------------------------------------- @var helpers
 
 ## Single type name behind a vartype TYPE_REF, or "" when absent or
@@ -404,7 +529,7 @@ func _infer_var_value(value: Variant) -> String:
 		var t0t := str(t0.get("type", ""))
 		if (t0t == "IDENTIFIER" or t0t == "BUILTIN_TYPE") and str(t1.get("type", "")) == "LPAREN":
 			var cname := str(t0.get("value", ""))
-			if _return_type_known(cname):
+			if _type_known(cname):
 				return cname
 	if toks.size() >= 3 and toks[0] is Dictionary and toks[1] is Dictionary and toks[2] is Dictionary:
 		var n0: Dictionary = toks[0]
@@ -412,7 +537,7 @@ func _infer_var_value(value: Variant) -> String:
 		var n2: Dictionary = toks[2]
 		if str(n0.get("type", "")) == "IDENTIFIER" and str(n1.get("type", "")) == "DOT" and str(n2.get("value", "")) == "new":
 			var nname := str(n0.get("value", ""))
-			if _return_type_known(nname):
+			if _type_known(nname):
 				return nname
 	return ""
 
@@ -502,25 +627,25 @@ static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary
 	return {"ok": true, "types": types, "void": false, "raw": raw}
 
 
-## Parses an @var message ("name Type|Union") into
+## Parses an @var/@param message ("name Type|Union") into
 ## {"ok","name","types","raw"} or {"ok": false, "error"}.
-## "void" is rejected: variables cannot be void.
-static func _parse_var_spec(raw_msg: String) -> Dictionary:
+## "void" is rejected: neither variables nor parameters can be void.
+static func _parse_var_spec(raw_msg: String, what := "@var") -> Dictionary:
 	var raw := raw_msg.strip_edges()
 	if raw == "":
-		return {"ok": false, "error": "@var needs a name and a type: '# @var myvar int|float'"}
+		return {"ok": false, "error": what + " needs a name and a type: '# " + what + " myvar int|float'"}
 	var words := _split_words(raw)
 	if words.size() < 2:
-		return {"ok": false, "error": "@var needs a name and a type: '# @var myvar int|float'"}
+		return {"ok": false, "error": what + " needs a name and a type: '# " + what + " myvar int|float'"}
 	var vname := str(words[0])
 	if not _is_type_name(vname):
-		return {"ok": false, "error": "@var has an invalid variable name '" + vname + "'"}
+		return {"ok": false, "error": what + " has an invalid name '" + vname + "'"}
 	var rest := raw.substr(vname.length()).strip_edges()
-	var spec := _parse_return_spec(rest, "@var")
+	var spec := _parse_return_spec(rest, what)
 	if not bool(spec.get("ok", false)):
 		return spec
 	if bool(spec.get("void", false)):
-		return {"ok": false, "error": "@var 'void' is not a valid variable type"}
+		return {"ok": false, "error": what + " 'void' is not a valid variable type"}
 	return {"ok": true, "name": vname, "types": spec.get("types", []), "raw": str(spec.get("raw", ""))}
 
 
@@ -556,7 +681,7 @@ func _engine_chain(tname: String) -> Array:
 
 ## A @return member is known when it is the script class, a script class
 ## or enum member, or a types_info file exists for it.
-func _return_type_known(tname: String) -> bool:
+func _type_known(tname: String) -> bool:
 	if tname != "" and tname == _script_class:
 		return true
 	for key in _members.keys():
@@ -630,7 +755,7 @@ func _attach_return(fn_node: Dictionary, tag: Dictionary, owner: String) -> void
 		return
 	if not bool(spec.get("void", false)):
 		for m in spec.get("types", []):
-			if not _return_type_known(str(m)):
+			if not _type_known(str(m)):
 				_error(ERR_RETURN_UNKNOWN, "@return has unknown type '" + str(m) + "'", line, col, owner)
 				return
 	fn_node["return_ann"] = {"types": spec.get("types", []), "void": bool(spec.get("void", false)), "raw": str(spec.get("raw", "")), "line": line}
@@ -669,7 +794,7 @@ func _attach_var_decl(decl_node: Dictionary, tag: Dictionary, owner: String, is_
 		_error(ERR_VAR_UNKNOWN, "@var '" + vname + "' does not match declared variable '" + str(decl_node.get("name", "")) + "'", line, col, owner)
 		return
 	for m in spec.get("types", []):
-		if not _return_type_known(str(m)):
+		if not _type_known(str(m)):
 			_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(m) + "'", line, col, owner)
 			return
 	var ref := _var_reference(decl_node, is_const)
@@ -717,7 +842,7 @@ func _find_body_decl(body: Variant, name: String) -> Dictionary:
 	if (t == "VAR_DECL" or t == "CONST_DECL") and str(d.get("name", "")) == name:
 		return d
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
 			continue
 		var hit2 := _find_body_decl(d[k], name)
 		if not hit2.is_empty():
@@ -791,7 +916,7 @@ func _check_free_var(tag: Dictionary, scope: Dictionary, owner: String, fn_node:
 		_error(ERR_VAR_UNKNOWN, "'" + vname + "' is a " + str(target.get("bad", "")) + ", not a variable", line, 0, owner)
 		return
 	for m in spec.get("types", []):
-		if not _return_type_known(str(m)):
+		if not _type_known(str(m)):
 			_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(m) + "'", line, 0, owner)
 			return
 	var ref := ""
@@ -838,7 +963,7 @@ func _free_vars_into(node: Variant, out: Array) -> void:
 	if not lt.is_empty():
 		out.append(lt)
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written", "value", "expr"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written", "value", "expr"]:
 			continue
 		_free_vars_into(d[k], out)
 
@@ -901,7 +1026,7 @@ func _collect_returns_into(node: Variant, out: Array) -> void:
 	if t == "FUNC_DECL" or t == "LAMBDA":
 		return
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
 			continue
 		_collect_returns_into(d[k], out)
 
@@ -1009,6 +1134,16 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_mark_var_decl(d, owner)
 		elif _has_any_var_tag(d):
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "FUNC_DECL":
+			_mark_param_carrier(d, d, owner)
+		elif _has_any_param_tag(d):
+			var _pv: Variant = null
+			if t == "VAR_DECL" or t == "CONST_DECL":
+				_pv = d.get("value", null)
+			if _pv is Dictionary and str((_pv as Dictionary).get("type", "")) == "LAMBDA":
+				_mark_param_carrier(d, _pv, owner)
+			else:
+				_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -1025,6 +1160,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_var_tag(d):
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_param_tag(d):
+			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "PARAM":
 		var ptag = _leading_tag(d)
@@ -1036,6 +1173,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_var_tag(d):
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_param_tag(d):
+			_apply_param_single(_extract_param_tags(d, owner), d, owner)
 		return
 	if t == "LAMBDA" or t == "ACCESSOR":
 		if _has_any_deprecated_tag(d):
@@ -1053,6 +1192,12 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_var_tag(d):
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_param_tag(d):
+			if t == "LAMBDA":
+				_mark_param_carrier(d, d, owner)
+			else:
+				_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+				return
 		_scan(d.get("params", []), owner, false)
 		_scan(d.get("body", null), owner, false)
 		_scan(d.get("detail", null), owner, false)
@@ -1063,6 +1208,18 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 	if t == "COMMENT" or t == "DOC_COMMENT" or t == "TYPE_INFO" or t == "ANNOTATION_DECL":
 		if t == "TYPE_INFO" and member_pos and not _has_var_tag(d).is_empty():
 			_error(ERR_VAR_MISPLACED, "@var redefinition is only allowed inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not _has_param_tag(d).is_empty():
+			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		return
+	if _has_any_param_tag(d):
+		if t == "EXPR_STMT":
+			var _pe: Variant = d.get("expr", null)
+			if _pe is Dictionary and str((_pe as Dictionary).get("type", "")) == "LAMBDA":
+				_mark_param_carrier(d, _pe, owner)
+			else:
+				_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		else:
+			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if _has_any_return_tag(d):
 		if t == "EXPR_STMT":
@@ -1097,7 +1254,7 @@ func _scan_children(children: Variant, owner: String, member_pos: bool = true) -
 
 func _scan_generic_children(d: Dictionary, owner: String, member_pos: bool = true) -> void:
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "analyzer_errors", "analyzer_warnings"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings"]:
 			continue
 		_scan(d[k], owner, member_pos)
 
@@ -1211,17 +1368,28 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_var_tag(child):
 					_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_param_tag(child):
+					_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				_scan_class_body(child, full)
 			elif child is Dictionary and str((child as Dictionary).get("type", "")) in DECL_TYPES:
 				_mark_decl(child, full)
 				_mark_private(child, full)
 				if str((child as Dictionary).get("type", "")) == "FUNC_DECL":
 					_mark_return_func(child, full)
+					_mark_param_carrier(child, child, full)
 					_scan((child as Dictionary).get("body", null), full)
 				if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 					_mark_var_decl(child, full)
 				elif _has_any_var_tag(child):
 					_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if str((child as Dictionary).get("type", "")) != "FUNC_DECL" and _has_any_param_tag(child):
+					var _cpv: Variant = null
+					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
+						_cpv = (child as Dictionary).get("value", null)
+					if _cpv is Dictionary and str((_cpv as Dictionary).get("type", "")) == "LAMBDA":
+						_mark_param_carrier(child, _cpv, full)
+					else:
+						_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				elif _has_any_return_tag(child):
 					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 						_mark_return_stmt(child, (child as Dictionary).get("value", null), full)
@@ -1412,7 +1580,7 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 
 func _walk_generic(d: Dictionary, scope: Dictionary, owner: String) -> void:
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
 			continue
 		_walk(d[k], scope, owner)
 
@@ -1517,7 +1685,7 @@ func _collect_func_bindings(node: Variant, scope: Dictionary) -> void:
 	elif t == "CLASS_DECL":
 		return
 	for k in d.keys():
-		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann"]:
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann"]:
 			continue
 		_collect_func_bindings(d[k], scope)
 
