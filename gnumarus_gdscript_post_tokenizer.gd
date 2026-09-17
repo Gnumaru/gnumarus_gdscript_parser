@@ -30,6 +30,7 @@ extends RefCounted
 ##   for token in post:
 ##       print(token)
 
+const gnumarus_gdscript_tokenizer = preload('gnumarus_gdscript_tokenizer.gd')
 const TOKEN_TYPE_INFO := "TYPE_INFO"
 
 ## Raw tokens staged for iteration. Only one iteration may be active

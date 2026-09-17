@@ -38,6 +38,9 @@ extends RefCounted
 ##   var ast: Dictionary = gnumarus_gdscript_syntatic_parser.new().parse_text("var x := 1\n")
 ##   var ast: Dictionary = gnumarus_gdscript_syntatic_parser.new().parse("res://script.gd")
 
+const gnumarus_gdscript_tokenizer = preload('gnumarus_gdscript_tokenizer.gd')
+const gnumarus_gdscript_post_tokenizer = preload('gnumarus_gdscript_post_tokenizer.gd')
+
 const NODE_SCRIPT := "SCRIPT"
 const NODE_ANNOTATION_DECL := "ANNOTATION_DECL"
 const NODE_CLASS_NAME := "CLASS_NAME"
@@ -111,6 +114,8 @@ func parse_tokens(tokens: Array) -> Dictionary:
 	return {"type": NODE_SCRIPT, "children": children, "errors": _error_count, "header_comment": _header_comment, "line": 1, "column": 0}
 
 
+
+
 ## Parses raw GDScript source code passed as a string.
 func parse_text(text: String) -> Dictionary:
 	var tok := gnumarus_gdscript_tokenizer.new()
@@ -172,9 +177,10 @@ func _node_start_line(annotations: Array) -> int:
 ## Splits buffered trivia for a node starting at node_line.
 ## Returns [standalone_nodes, attached_tokens]: only the last buffered
 ## comment attaches, and only when it sits directly above the node
-## (comment.line + 1 == node_line). Earlier comments precede other
-## comments, so they become standalone siblings. Claims the file header
-## on first use: the very first buffered comment goes to the SCRIPT root.
+## (comment end line + 1 == node_line; merged multi-line comments end
+## on their last line). Earlier comments precede other comments, so
+## they become standalone siblings. Claims the file header on first
+## use: the very first buffered comment goes to the SCRIPT root.
 func _split_trivia(node_line: int) -> Array:
 	_claim_header()
 	var standalone: Array = []
@@ -183,11 +189,21 @@ func _split_trivia(node_line: int) -> Array:
 	var attached: Array = []
 	if _pending_trivia.size() > 0:
 		var last: Dictionary = _pending_trivia[_pending_trivia.size() - 1]
-		if int(last.get("line", 0)) + 1 == node_line:
+		if _trivia_end_line(last) + 1 == node_line:
 			attached = [last]
 			standalone = standalone.slice(0, standalone.size() - 1)
 	_pending_trivia.clear()
 	return [standalone, attached]
+
+
+## Last line covered by a trivia token (merged comment blocks span
+## several lines joined by "\n"; plain tokens end on their own line).
+func _trivia_end_line(tok: Dictionary) -> int:
+	var start := int(tok.get("line", 0))
+	var value := str(tok.get("value", ""))
+	if value == "":
+		return start
+	return start + value.count("\n")
 
 
 ## Moves the very first buffered comment to the SCRIPT root, once.

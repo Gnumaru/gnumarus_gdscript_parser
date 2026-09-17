@@ -10,6 +10,11 @@ extends RefCounted
 ## Token values keep the exact source text (lossless for literals).
 ## Comments are preserved as COMMENT / DOC_COMMENT tokens on purpose:
 ## the future parser will use them, so they are never discarded.
+## Consecutive full-line comments of the same kind (only `#` or only
+## `##`), back to back with a single newline between them, are merged
+## into ONE token whose value joins the lines with "\n". A blank line,
+## a code line or a kind switch (`#` vs `##`) starts a new token.
+## Trailing comments after code (`var x := 1 # note`) never merge.
 ## INDENT value holds the indent whitespace, NEWLINE value is "\n",
 ## DEDENT and EOF values are "".
 ##
@@ -216,7 +221,7 @@ func _begin_line() -> void:
 		_consume_newline()
 		return
 	if _peek() == 35:
-		_scan_comment()
+		_scan_comment_run()
 		_add_token(TOKEN_NEWLINE, "\n", _line, _column)
 		_line_has_tokens = false
 		_consume_newline()
@@ -632,12 +637,47 @@ func _scan_annotation() -> void:
 func _scan_comment() -> void:
 	var sline := _line
 	var scol := _column
+	var doc := _peek_at(1) == 35
+	var text := _read_comment_text()
+	if doc:
+		_add_token(TOKEN_DOC_COMMENT, text, sline, scol)
+	else:
+		_add_token(TOKEN_COMMENT, text, sline, scol)
+
+
+## Reads one comment line starting at `#`, stopping before the newline.
+## Leaves the position at the end of the line (on `\n` or at EOF).
+func _read_comment_text() -> String:
 	var start := _pos
-	var doc := false
-	if _peek_at(1) == 35:
-		doc = true
 	_skip_to_eol()
-	var text := _text.substr(start, _pos - start)
+	return _text.substr(start, _pos - start)
+
+
+## Scans a run of consecutive full-line comments of the same kind as ONE
+## token. Lines join with "\n"; the token starts at the first `#`. Only
+## lines separated by exactly one newline merge: a blank line, a code
+## line or a `#` vs `##` switch ends the run. The newline and indent of
+## continuation lines are consumed, never stored.
+func _scan_comment_run() -> void:
+	var sline := _line
+	var scol := _column
+	var doc := _peek_at(1) == 35
+	var first := _read_comment_text()
+	var text := first
+	while _peek() == 10:
+		var j := _pos + 1
+		while j < _length and (_text.unicode_at(j) == 32 or _text.unicode_at(j) == 9):
+			j += 1
+		if j >= _length:
+			break
+		if _text.unicode_at(j) != 35:
+			break
+		var next_doc := j + 1 < _length and _text.unicode_at(j + 1) == 35
+		if next_doc != doc:
+			break
+		while _pos < j:
+			_advance()
+		text += "\n" + _read_comment_text()
 	if doc:
 		_add_token(TOKEN_DOC_COMMENT, text, sline, scol)
 	else:
