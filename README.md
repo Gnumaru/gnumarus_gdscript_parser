@@ -357,6 +357,9 @@ Only same-line text is read for now; multi-line struct/tuple
 definitions with dictionaries and arrays are future work. A comment
 counts as an annotation only under the post-tokenizer rule
 (`@` glued to `#` or after whitespace, followed by a letter).
+Type names in annotations are case-corrected silently: a lowercase
+`string` resolves as `String` (in type position it can only mean the
+type).
 
 ### `@deprecated`
 
@@ -642,6 +645,38 @@ func f():
   tuple names without misuse checking; no subscript continuation
   (`t[0].foo()` skips the rest); `Tuple.new()` silently skipped.
 
+### `@struct`
+
+Defines a fixed-shape struct type: `# @struct Point 2 x:int y:int`
+— name, **mandatory** size, then exactly that many fields. A field is
+`name` (dynamic, `any`), `name:Type` or `name:A|B`; `void` and
+duplicates are rejected. Nested templates must exist (two-pass).
+Structs reuse the class `fields` shape (`{name, type, types, any}`)
+so every reader keeps working.
+
+```gdscript
+extends Node
+
+# @struct Point 2 x:int y:int
+var p: Point = {"x": 1, "y": 2}   # OK: exact keys, conforming values
+var q: Point = {"x": 1}           # ERROR: missing field 'y'
+var r: Point = {"x": 1, "y": 2, "z": 3}  # ERROR: expects 2 fields, got 3
+
+func f():
+    print(p.x)                    # OK: int
+    print(p.nope)                 # ERROR: has no member 'nope'
+    print(p["x"])                 # OK: literal keys resolve
+    print(p.keys())               # OK: Dictionary methods work
+```
+
+- A struct flows into `Dictionary`/`Variant`/untyped positions; a
+  `Dictionary` flows in only as a conforming literal (checked at
+  `var`/`const` declarations); different struct names never mix.
+  Definitions live top-level only; duplicates and clashes error
+  (`struct_conflict`); bad shapes error (`struct_malformed`,
+  `struct_unknown_type`, `struct_mismatch`). Same documented gaps as
+  tuples (call args, defaults, returns, `is`/`as`, no continuation).
+
 ## types_info layout
 
 - `types_info/builtin/<Name>.json` and `types_info/classes/<Name>.json`
@@ -676,7 +711,7 @@ green. `GODOT_BIN` overrides the engine path.
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
-  `test_tuple.gd` (`@tuple` rule),
+  `test_tuple.gd` (`@tuple` rule), `test_struct.gd` (`@struct` rule),
   `test_flow.gd` (flow member checks + guards),
   `test_reuse.gd` (same instance parsing twice must give independent
   results).

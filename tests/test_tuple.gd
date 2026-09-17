@@ -65,7 +65,7 @@ func _t_def_errors(h) -> void:
 	h.check(_kinds(h.analyze_text("extends Node\n# @tuple T int String\nvar x: T\n", "res://tests/tmp_tup_e2.gd")).has("tuple_malformed"), "missing count malformed")
 	h.check(_kinds(h.analyze_text("extends Node\n# @tuple\nvar x := 1\n", "res://tests/tmp_tup_e3.gd")).has("tuple_malformed"), "empty malformed")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T 1 void\nvar x: T\n", "res://tests/tmp_tup_e4.gd"), "tuple_malformed", "invalid type"), "void malformed")
-	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T 1 object\nvar x: T\n", "res://tests/tmp_tup_e5.gd"), "tuple_unknown_type", "'object'"), "lowercase object unknown")
+	h.check(_clean(h.analyze_text("extends Node\n# @tuple T 1 object\nvar x: T\n", "res://tests/tmp_tup_e5b.gd")), "lowercase object corrected")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T 1 Nope\nvar x: T\n", "res://tests/tmp_tup_e6.gd"), "tuple_unknown_type", "'Nope'"), "unknown item errors")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T 1 int\n# @tuple T 1 int\nvar x: T\n", "res://tests/tmp_tup_e7.gd"), "tuple_conflict", "more than once"), "duplicate conflicts")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple Item 1 int\nclass Item:\n\tpass\n", "res://tests/tmp_tup_e8.gd"), "tuple_conflict", "script member"), "class conflict")

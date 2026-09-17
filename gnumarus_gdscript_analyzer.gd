@@ -121,6 +121,11 @@ const ERR_TUPLE_UNKNOWN_TYPE := "tuple_unknown_type"
 const ERR_TUPLE_CONFLICT := "tuple_conflict"
 const ERR_TUPLE_MISMATCH := "tuple_mismatch"
 const ERR_TUPLE_BOUNDS := "tuple_bounds"
+const ERR_STRUCT_MISPLACED := "struct_misplaced"
+const ERR_STRUCT_MALFORMED := "struct_malformed"
+const ERR_STRUCT_UNKNOWN_TYPE := "struct_unknown_type"
+const ERR_STRUCT_CONFLICT := "struct_conflict"
+const ERR_STRUCT_MISMATCH := "struct_mismatch"
 const ERR_MISSING_METHOD := "missing_method"
 const ERR_MISSING_MEMBER := "missing_member"
 
@@ -202,6 +207,8 @@ var _type_cache: Dictionary = {}
 ## "spec": {...}}. Pre-scan collects raws (order-free known-checks),
 ## _resolve_tuples validates into specs before the walk.
 var _tuples: Dictionary = {}
+## @struct definitions, same two-pass split as tuples.
+var _structs: Dictionary = {}
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -218,6 +225,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_written = []
 	_type_cache = {}
 	_tuples = {}
+	_structs = {}
 	_script_class = ""
 	_script_extends = ""
 	for child in ast.get("children", []):
@@ -238,8 +246,10 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 		return {"ast": ast, "errors": _errors, "warnings": _warnings}
 	_scan_header(ast)
 	_prescan_tuples(ast)
+	_prescan_structs(ast)
 	_scan_children(ast.get("children", []), "")
 	_resolve_tuples()
+	_resolve_structs()
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
@@ -306,6 +316,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_tuple(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_struct(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 
 
 # ------------------------------------------------------------- tag scan
@@ -455,6 +467,23 @@ func _has_tuple_tag(tok: Dictionary) -> Dictionary:
 	return _find_tuple(str(tok.get("value", "")))
 
 
+func _find_struct(value: String) -> Dictionary:
+	return _find_tag(value, "struct")
+
+
+func _has_struct_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_struct(str(tok.get("value", "")))
+
+
+func _has_any_struct_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_struct_tag(c).is_empty():
+			return true
+	return false
+
+
 func _has_any_tuple_tag(node: Dictionary) -> bool:
 	for c in node.get("leading_comments", []):
 		if c is Dictionary and not _has_tuple_tag(c).is_empty():
@@ -565,6 +594,31 @@ func _resolve_tuples() -> void:
 		_write_tuple_file(tname)
 
 
+## Canonical type name: exact match first (user definitions win),
+## then first-letter-uppercased fallback (`string` -> `String`).
+## Typo-correction is silent by design: in type position a lowercase
+## name can only mean the type. "" when unresolvable.
+func _canon_type(tname: String) -> String:
+	if _type_known(tname):
+		return tname
+	if tname != "":
+		var first := tname.unicode_at(0)
+		if first >= 97 and first <= 122:
+			var up := tname.substr(0, 1).to_upper() + tname.substr(1)
+			if _type_known(up):
+				return up
+	return ""
+
+
+## Splits a struct field word on the first colon: {"name", "spec"}
+## (spec "" when bare). Name validity is checked by callers.
+static func _split_struct_field(word: String) -> Dictionary:
+	var ci := word.find(":")
+	if ci < 0:
+		return {"name": word, "spec": ""}
+	return {"name": word.substr(0, ci), "spec": word.substr(ci + 1)}
+
+
 ## Parses one tuple item word: `*` (any), `variant` (unknown marker,
 ## normalized to Variant), or a |-union of known names (tuple refs
 ## allowed: all names were pre-scanned). {} + error on failure.
@@ -580,10 +634,11 @@ func _parse_tuple_item(word: String, line: int) -> Dictionary:
 		if aname == "" or aname == "void" or not _is_type_name(aname):
 			_error(ERR_TUPLE_MALFORMED, "@tuple has an invalid type '" + str(arm) + "'", line, 0, "")
 			return {}
-		if not _type_known(aname) and not _tuples.has(aname):
+		var cm := _canon_type(aname)
+		if cm == "":
 			_error(ERR_TUPLE_UNKNOWN_TYPE, "@tuple has unknown type '" + aname + "'", line, 0, "")
 			return {}
-		types.append(aname)
+		types.append(cm)
 	if types.is_empty():
 		_error(ERR_TUPLE_MALFORMED, "@tuple has an empty type", line, 0, "")
 		return {}
@@ -668,6 +723,130 @@ func _tuple_lit_split(value: Variant) -> Dictionary:
 	return {"literal": true, "elements": out}
 
 
+## Splits a dictionary literal value into [{key, value}] pairs (key
+## "" when not a single STRING/IDENT literal). Returns {"literal",
+## "pairs"} (non-literals report literal=false).
+func _struct_lit_split(value: Variant) -> Dictionary:
+	var toks := _as_tokens(value)
+	if toks.is_empty():
+		return {"literal": false, "pairs": []}
+	if not (toks[0] is Dictionary) or str((toks[0] as Dictionary).get("type", "")) != "LBRACE":
+		return {"literal": false, "pairs": []}
+	if toks.size() == 2:
+		if (toks[1] is Dictionary) and str((toks[1] as Dictionary).get("type", "")) == "RBRACE":
+			return {"literal": true, "pairs": []}
+		return {"literal": false, "pairs": []}
+	if _match_close(toks, 0) != toks.size() - 1:
+		return {"literal": false, "pairs": []}
+	var out: Array = []
+	var cur: Array = []
+	var depth := 0
+	var seen := false
+	var i := 1
+	while i < toks.size() - 1:
+		var t: Variant = toks[i]
+		var ty := ""
+		if t is Dictionary:
+			ty = str((t as Dictionary).get("type", ""))
+		if ty == "LPAREN" or ty == "LBRACKET" or ty == "LBRACE":
+			depth += 1
+			cur.append(t)
+		elif ty == "RPAREN" or ty == "RBRACKET" or ty == "RBRACE":
+			depth -= 1
+			cur.append(t)
+		elif ty == "COMMA" and depth == 0:
+			out.append(cur)
+			cur = []
+			seen = true
+		else:
+			cur.append(t)
+		i += 1
+	if not cur.is_empty() or not seen:
+		out.append(cur)
+	var pairs: Array = []
+	for p in out:
+		var pa: Array = p
+		var ki := -1
+		var kd := 0
+		var k := 0
+		while k < pa.size():
+			var pt: Variant = pa[k]
+			var pty := ""
+			if pt is Dictionary:
+				pty = str((pt as Dictionary).get("type", ""))
+			if pty == "LPAREN" or pty == "LBRACKET" or pty == "LBRACE":
+				kd += 1
+			elif pty == "RPAREN" or pty == "RBRACKET" or pty == "RBRACE":
+				kd -= 1
+			elif kd == 0 and ((pty == "COLON") or (pty == "OPERATOR" and str((pt as Dictionary).get("value", "")) == "=")):
+				ki = k
+				break
+			k += 1
+		if ki <= 0:
+			return {"literal": false, "pairs": []}
+		var key := ""
+		if pa.size() > 0 and ki == 1 and (pa[0] is Dictionary):
+			var kt := str((pa[0] as Dictionary).get("type", ""))
+			var kv := str((pa[0] as Dictionary).get("value", ""))
+			if kt == "STRING":
+				key = kv.substr(1, kv.length() - 2) if kv.length() >= 2 else ""
+			elif kt == "IDENTIFIER":
+				key = kv
+		if key == "":
+			return {"literal": false, "pairs": []}
+		pairs.append({"key": key, "value": pa.slice(ki + 1)})
+	return {"literal": true, "pairs": pairs}
+
+
+## Checks an initializer value against a struct vartype (exact keys +
+## per-key literal values). Non-literals skip (unprovable).
+func _check_struct_value(tname: String, value: Variant, line: int, owner: String) -> void:
+	var def := _struct_def(tname)
+	if def.is_empty():
+		return
+	var lit := _struct_lit_split(value)
+	if not bool(lit.get("literal", false)):
+		return
+	_check_struct_elements(tname, def, lit.get("pairs", []), line, owner)
+
+
+## Key-set and value check of a literal pair list against a definition.
+func _check_struct_elements(tname: String, def: Dictionary, pairs: Array, line: int, owner: String) -> void:
+	var fields: Array = def.get("fields", [])
+	if pairs.size() != int(def.get("size", -1)):
+		_error(ERR_STRUCT_MISMATCH, "struct '" + tname + "' expects " + str(def.get("size", 0)) + " fields, got " + str(pairs.size()), line, 0, owner)
+		return
+	var by_name := {}
+	for f in fields:
+		by_name[str((f as Dictionary).get("name", ""))] = f
+	for p in pairs:
+		var pd: Dictionary = p
+		var key := str(pd.get("key", ""))
+		if not by_name.has(key):
+			_error(ERR_STRUCT_MISMATCH, "struct '" + tname + "' has no field '" + key + "'", line, 0, owner)
+			continue
+		var field: Dictionary = by_name[key]
+		if bool(field.get("any", false)):
+			continue
+		var et := _infer_lit_elem(pd.get("value", []))
+		if et == "":
+			continue
+		var ok := false
+		for m in field.get("types", []):
+			if _lit_compatible(et, str(m)):
+				ok = true
+				break
+		if not ok:
+			_error(ERR_STRUCT_MISMATCH, "struct '" + tname + "' field '" + key + "' expects '" + _show_types(field.get("types", [])) + "', got '" + et + "'", line, 0, owner)
+	for f in fields:
+		var fname := str((f as Dictionary).get("name", ""))
+		var present := false
+		for p in pairs:
+			if str((p as Dictionary).get("key", "")) == fname:
+				present = true
+				break
+		if not present:
+			_error(ERR_STRUCT_MISMATCH, "struct '" + tname + "' is missing field '" + fname + "'", line, 0, owner)
 ## Infers a single literal token ("" when not a plain literal).
 static func _infer_lit_token(tok: Variant) -> String:
 	if not (tok is Dictionary):
@@ -763,6 +942,212 @@ func _write_tuple_file(tname: String) -> void:
 	_written.append(_write_base + "/user/" + tname + ".json")
 
 
+# ------------------------------------------------------- @struct helpers
+
+## Parses an @struct message ("Name COUNT field...") into {"ok",
+## "name", "size", "fields", "raw"} or {"ok": false, "error"}. COUNT
+## is mandatory and must equal the field count (checked by the
+## caller). Fields stay raw words here.
+static func _parse_struct_spec(raw_msg: String) -> Dictionary:
+	var words := _split_words(raw_msg.strip_edges())
+	if words.size() < 2:
+		return {"ok": false, "error": "@struct needs a name and an explicit size: '# @struct Point 2 x:int y:int'"}
+	var tname := str(words[0])
+	if not _is_type_name(tname):
+		return {"ok": false, "error": "@struct has an invalid name '" + tname + "'"}
+	var count_word := str(words[1])
+	for i in range(count_word.length()):
+		var ch := count_word.unicode_at(i)
+		if ch < 48 or ch > 57:
+			return {"ok": false, "error": "@struct size must be a non-negative integer, got '" + count_word + "'"}
+	var fields: Array = []
+	for w in words.slice(2):
+		fields.append(str(w))
+	return {"ok": true, "name": tname, "size": int(count_word), "fields": fields, "raw": raw_msg.strip_edges()}
+
+
+## Parses one struct field word: bare `name` (dynamic/any),
+## `name:Type|Union`, `name:void` rejected. {} + error on failure.
+func _parse_struct_field(word: String, line: int) -> Dictionary:
+	var parts := _split_struct_field(word)
+	var fname := str(parts.get("name", ""))
+	if not _is_type_name(fname):
+		_error(ERR_STRUCT_MALFORMED, "@struct has an invalid field name '" + fname + "'", line, 0, "")
+		return {}
+	var fspec := str(parts.get("spec", ""))
+	if fspec == "" and word.find(":") >= 0:
+		_error(ERR_STRUCT_MALFORMED, "@struct field '" + fname + "' needs a type after ':' (or nothing for dynamic)", line, 0, "")
+		return {}
+	if fspec == "":
+		return {"name": fname, "types": [], "any": true}
+	var spec := _parse_return_spec(fspec, "@struct")
+	if not bool(spec.get("ok", false)):
+		_error(ERR_STRUCT_MALFORMED, str(spec.get("error", "")), line, 0, "")
+		return {}
+	if bool(spec.get("void", false)):
+		_error(ERR_STRUCT_MALFORMED, "@struct 'void' is not a valid field type", line, 0, "")
+		return {}
+	var types: Array = []
+	for m in spec.get("types", []):
+		var cm := _canon_type(str(m))
+		if cm == "":
+			_error(ERR_STRUCT_UNKNOWN_TYPE, "@struct has unknown type '" + str(m) + "'", line, 0, "")
+			return {}
+		types.append(cm)
+	return {"name": fname, "types": types, "any": false}
+
+
+## Pre-scan (before _scan): collects @struct raw definitions from
+## top-level standalone comments and top-level leadings.
+func _prescan_structs(ast: Dictionary) -> void:
+	for child in ast.get("children", []):
+		if not (child is Dictionary):
+			continue
+		if str((child as Dictionary).get("type", "")) == "TYPE_INFO":
+			_collect_struct_node(child as Dictionary)
+			continue
+		for c in (child as Dictionary).get("leading_comments", []):
+			if c is Dictionary:
+				_collect_struct_node(c)
+
+
+## Records every @struct tag in one comment value as raw material.
+## Malformed tags error immediately and are dropped.
+func _collect_struct_node(tok: Dictionary) -> void:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return
+	var tok_line := int(tok.get("line", 0))
+	var li := 0
+	for line in str(tok.get("value", "")).split("\n"):
+		var tag := _find_tag(line, "struct")
+		if not tag.is_empty():
+			var spec := _parse_struct_spec(str(tag.get("message", "")))
+			if not bool(spec.get("ok", false)):
+				_error(ERR_STRUCT_MALFORMED, str(spec.get("error", "")), tok_line + li, 0, "")
+			else:
+				var tname := str(spec.get("name", ""))
+				var raw := {"spec": spec, "line": tok_line + li}
+				if not _structs.has(tname):
+					_structs[tname] = {"resolved": false, "raws": [raw]}
+				else:
+					((_structs[tname] as Dictionary).get("raws", []) as Array).append(raw)
+		li += 1
+
+
+## Second pass (after _scan, before _walk): validates definitions
+## (counts, duplicates, conflicts, field types incl. forward refs).
+func _resolve_structs() -> void:
+	_ensure_user_dir()
+	for tname in _structs.keys():
+		var entry: Dictionary = _structs[tname]
+		if bool(entry.get("resolved", false)):
+			continue
+		var raws: Array = entry.get("raws", [])
+		if raws.is_empty():
+			continue
+		var first: Dictionary = raws[0]
+		var spec: Dictionary = first.get("spec", {})
+		if raws.size() > 1:
+			_error(ERR_STRUCT_CONFLICT, "@struct '" + tname + "' is defined more than once", int(first.get("line", 0)), 0, "")
+			continue
+		var clash := _struct_conflict(tname)
+		if clash != "":
+			_error(ERR_STRUCT_CONFLICT, "@struct '" + tname + "' conflicts with " + clash, int(first.get("line", 0)), 0, "")
+			continue
+		var fields: Array = []
+		var ok := true
+		var seen := {}
+		if (spec.get("fields", []) as Array).size() != int(spec.get("size", -1)):
+			_error(ERR_STRUCT_MALFORMED, "@struct '" + tname + "' declares size " + str(spec.get("size", 0)) + " but lists " + str((spec.get("fields", []) as Array).size()) + " fields", int(first.get("line", 0)), 0, "")
+			ok = false
+		else:
+			for w in spec.get("fields", []):
+				var field := _parse_struct_field(str(w), int(first.get("line", 0)))
+				if field.is_empty():
+					ok = false
+					break
+				if seen.has(str(field.get("name", ""))):
+					_error(ERR_STRUCT_MALFORMED, "@struct '" + tname + "' repeats field '" + str(field.get("name", "")) + "'", int(first.get("line", 0)), 0, "")
+					ok = false
+					break
+				seen[str(field.get("name", ""))] = true
+				fields.append(field)
+		if not ok:
+			continue
+		entry["resolved"] = true
+		entry["spec"] = {"ok": true, "name": tname, "size": int(spec.get("size", 0)), "fields": fields, "raw": str(spec.get("raw", "")), "line": int(first.get("line", 0))}
+		_write_struct_file(tname)
+
+
+## Why a struct name cannot be defined ("" when free). Same rules as
+## tuples: script members/classes, engine/builtin types, existing
+## non-struct files all conflict; same-kind JSON rewrites are fine.
+func _struct_conflict(tname: String) -> String:
+	for key in _members.keys():
+		var table: Dictionary = _members[key]
+		if table.has(tname):
+			return "script member '" + tname + "' (" + str((table[tname] as Dictionary).get("kind", "")) + ")"
+	if _members.has(tname):
+		return "script class '" + tname + "'"
+	if tname == _script_class and tname != "":
+		return "the script class name"
+	if _type_file_exists(tname):
+		var info := _read_json(_write_base + "/user/" + tname + ".json")
+		if not info.is_empty() and str(info.get("kind", "")) == "struct":
+			return ""
+		return "an existing type '" + tname + "'"
+	return ""
+
+
+## Resolved struct definition {size, fields} or {} (in-memory first,
+## then same-kind JSON files, both cached).
+func _struct_def(tname: String) -> Dictionary:
+	if _structs.has(tname):
+		var entry: Dictionary = _structs[tname]
+		if bool(entry.get("resolved", false)):
+			var spec: Dictionary = entry.get("spec", {})
+			if bool(spec.get("ok", false)) and spec.has("fields"):
+				return {"size": int(spec.get("size", 0)), "fields": spec.get("fields", [])}
+	var info := _type_info(tname)
+	if not info.is_empty() and str(info.get("kind", "")) == "struct":
+		return {"size": int(info.get("size", 0)), "fields": info.get("fields", [])}
+	return {}
+
+
+## Writes one user/<Name>.json per resolved struct. Fields reuse the
+## class `fields` shape ({name, type, types, any}) so every reader
+## keeps working; kind "struct" distinguishes the closed key set.
+func _write_struct_file(tname: String) -> void:
+	var entry: Dictionary = _structs[tname]
+	var spec: Dictionary = entry.get("spec", {})
+	var fields: Array = []
+	for f in spec.get("fields", []):
+		var fd: Dictionary = f
+		var ftypes: Array = (fd.get("types", []) as Array).duplicate()
+		var ftype := ""
+		if not bool(fd.get("any", false)):
+			ftype = "|".join(ftypes)
+		fields.append({"name": str(fd.get("name", "")), "type": ftype, "types": ftypes, "any": bool(fd.get("any", false))})
+	var info := {
+		"name": tname,
+		"kind": "struct",
+		"class_name": "",
+		"resource_path": _script_resource_path,
+		"parent": "",
+		"inheritance_chain": [tname],
+		"size": int(spec.get("size", 0)),
+		"enums": [],
+		"constants": [],
+		"signals": [],
+		"fields": fields,
+		"static_methods": [],
+		"instance_methods": [],
+		"inner_classes": [],
+	}
+	_write_json(_write_base + "/user/" + tname + ".json", info)
+	_written.append(_write_base + "/user/" + tname + ".json")
+
+
 ## Extracts every @tagname pair from one TYPE_INFO token into
 ## [{name,types,raw,line}] (consecutive lines merge into one token, so
 ## each line is scanned independently). Malformed pairs error out and
@@ -817,21 +1202,35 @@ static func _find_param_node(params: Variant, pname: String) -> Dictionary:
 	return {}
 
 
+## Canonicalizes a spec member list (case-correcting typos):
+## {"ok", "types", "bad"}. On unknown, callers error with their own
+## kind using "bad" (the as-written name).
+func _canon_members(spec: Dictionary) -> Dictionary:
+	var out: Array = []
+	for m in spec.get("types", []):
+		var cm := _canon_type(str(m))
+		if cm == "":
+			return {"ok": false, "types": [], "bad": str(m)}
+		out.append(cm)
+	return {"ok": true, "types": out, "bad": ""}
+
+
 ## Narrows one @param pair against a PARAM node: known members
 ## narrowing the declared vartype (untyped params accept anything).
 ## Stamps pnode["param_ann"].
 func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> void:
 	var line := int(pair.get("line", int(pnode.get("line", 0))))
-	for m in pair.get("types", []):
-		if not _type_known(str(m)):
-			_error(ERR_PARAM_UNKNOWN_TYPE, "@param has unknown type '" + str(m) + "'", line, 0, owner)
-			return
+	var cm := _canon_members(pair)
+	if not bool(cm.get("ok", false)):
+		_error(ERR_PARAM_UNKNOWN_TYPE, "@param has unknown type '" + str(cm.get("bad", "")) + "'", line, 0, owner)
+		return
+	var members: Array = cm.get("types", [])
 	var ref := _vartype_name(pnode)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
-		for m in pair.get("types", []):
+		for m in members:
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + str(m) + "' for parameter '" + str(pair.get("name", "")) + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
-	pnode["param_ann"] = {"name": str(pair.get("name", "")), "types": pair.get("types", []), "raw": str(pair.get("raw", "")), "line": line}
+	pnode["param_ann"] = {"name": str(pair.get("name", "")), "types": members, "raw": str(pair.get("raw", "")), "line": line}
 
 
 ## Applies @param pairs to a whole parameter list (before-func/lambda
@@ -1136,6 +1535,8 @@ func _type_known(tname: String) -> bool:
 		return true
 	if _tuples.has(tname):
 		return true
+	if _structs.has(tname):
+		return true
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
 		if table.has(tname) and str((table[tname] as Dictionary).get("kind", "")) in ["class", "enum"]:
@@ -1217,10 +1618,11 @@ func _attach_return(fn_node: Dictionary, tag: Dictionary, owner: String) -> void
 		_error(ERR_RETURN_MALFORMED, str(spec.get("error", "")), line, col, owner)
 		return
 	if not bool(spec.get("void", false)):
-		for m in spec.get("types", []):
-			if not _type_known(str(m)):
-				_error(ERR_RETURN_UNKNOWN, "@return has unknown type '" + str(m) + "'", line, col, owner)
-				return
+		var cm := _canon_members(spec)
+		if not bool(cm.get("ok", false)):
+			_error(ERR_RETURN_UNKNOWN, "@return has unknown type '" + str(cm.get("bad", "")) + "'", line, col, owner)
+			return
+		spec = {"ok": true, "types": cm.get("types", []), "void": false, "raw": str(spec.get("raw", "")), "line": line}
 	fn_node["return_ann"] = {"types": spec.get("types", []), "void": bool(spec.get("void", false)), "raw": str(spec.get("raw", "")), "line": line}
 
 
@@ -1252,16 +1654,17 @@ func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is
 	if vname != str(decl_node.get("name", "")):
 		_error(ERR_VAR_UNKNOWN, "@var '" + vname + "' does not match declared variable '" + str(decl_node.get("name", "")) + "'", line, col, owner)
 		return
-	for m in spec.get("types", []):
-		if not _type_known(str(m)):
-			_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(m) + "'", line, col, owner)
-			return
+	var cm := _canon_members(spec)
+	if not bool(cm.get("ok", false)):
+		_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(cm.get("bad", "")) + "'", line, col, owner)
+		return
+	var members: Array = cm.get("types", [])
 	var ref := _var_reference(decl_node, is_const)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
-		for m in spec.get("types", []):
+		for m in members:
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, col, owner)
-	decl_node["var_ann"] = {"name": vname, "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "line": line}
+	decl_node["var_ann"] = {"name": vname, "types": members, "raw": str(spec.get("raw", "")), "line": line}
 
 
 ## Marks a VAR_DECL/CONST_DECL node (@var allowed in any position).
@@ -1371,10 +1774,11 @@ func _check_free_var(spec: Dictionary, scope: Dictionary, owner: String, fn_node
 	if target.has("bad"):
 		_error(ERR_VAR_UNKNOWN, "'" + vname + "' is a " + str(target.get("bad", "")) + ", not a variable", line, 0, owner)
 		return
-	for m in spec.get("types", []):
-		if not _type_known(str(m)):
-			_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(m) + "'", line, 0, owner)
-			return
+	var cm := _canon_members(spec)
+	if not bool(cm.get("ok", false)):
+		_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(cm.get("bad", "")) + "'", line, 0, owner)
+		return
+	var members: Array = cm.get("types", [])
 	var ref := ""
 	var tnode: Dictionary = target.get("node", {})
 	if bool(target.get("is_param", false)):
@@ -1382,7 +1786,7 @@ func _check_free_var(spec: Dictionary, scope: Dictionary, owner: String, fn_node
 	elif not tnode.is_empty():
 		ref = _var_reference(tnode, bool(target.get("is_const", false)))
 	if ref != "" and ref != "Variant" and ref != "dynamic":
-		for m in spec.get("types", []):
+		for m in members:
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
 
@@ -1596,6 +2000,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 				_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_tuple_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -1616,6 +2022,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_tuple_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "PARAM":
 		var ptag = _leading_tag(d)
@@ -1631,6 +2039,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_apply_param_single(_extract_param_tags(d, owner), d, owner)
 		if _has_any_tuple_tag(d):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_struct_tag(d):
+			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "LAMBDA" or t == "ACCESSOR":
 		if _has_any_deprecated_tag(d):
@@ -1657,6 +2067,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_tuple_tag(d):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_struct_tag(d):
+			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
 		_scan(d.get("params", []), owner, false)
 		_scan(d.get("body", null), owner, false)
 		_scan(d.get("detail", null), owner, false)
@@ -1671,12 +2084,19 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_tuple_tag(d).is_empty():
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not member_pos and not _has_struct_tag(d).is_empty():
+			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if _has_any_tuple_tag(d):
 		if not (member_pos and owner == ""):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		# Top level: already collected by _prescan_tuples; falls through.
+	if _has_any_struct_tag(d):
+		if not (member_pos and owner == ""):
+			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
+		# Top level: already collected by _prescan_structs; falls through.
 	if _has_any_param_tag(d):
 		if t == "EXPR_STMT":
 			var _pe: Variant = d.get("expr", null)
@@ -1838,6 +2258,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_tuple_tag(child):
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_struct_tag(child):
+					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				_scan_class_body(child, full)
 			elif child is Dictionary and str((child as Dictionary).get("type", "")) in DECL_TYPES:
 				_mark_decl(child, full)
@@ -1860,6 +2282,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 						_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_tuple_tag(child):
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_struct_tag(child):
+					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				elif _has_any_return_tag(child):
 					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 						_mark_return_stmt(child, (child as Dictionary).get("value", null), full)
@@ -1972,6 +2396,7 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 		_check_return_ann(d.get("value", null), owner)
 		_check_value_lambda(d.get("value", null), scope, owner)
 		_check_tuple_value(_vartype_name(d), d.get("value", null), int(d.get("line", 0)), owner)
+		_check_struct_value(_vartype_name(d), d.get("value", null), int(d.get("line", 0)), owner)
 		var acc: Variant = d.get("accessors", null)
 		if acc is Dictionary:
 			_walk(acc, scope, owner)
@@ -2072,6 +2497,7 @@ func _walk_members(children: Variant, scope: Dictionary, owner: String) -> void:
 			_check_return_ann((child as Dictionary).get("value", null), owner)
 			_check_value_lambda((child as Dictionary).get("value", null), scope, owner)
 			_check_tuple_value(_vartype_name(child as Dictionary), (child as Dictionary).get("value", null), int((child as Dictionary).get("line", 0)), owner)
+			_check_struct_value(_vartype_name(child as Dictionary), (child as Dictionary).get("value", null), int((child as Dictionary).get("line", 0)), owner)
 			var acc: Variant = (child as Dictionary).get("accessors", null)
 			if acc is Dictionary:
 				_walk(acc, scope, owner)
@@ -2825,6 +3251,8 @@ func _link_kind_of(tname: String, ctx: String) -> Dictionary:
 		return {"kind": "script", "key": sk}
 	if not _tuple_def(tname).is_empty():
 		return {"kind": "tuple", "name": tname}
+	if not _struct_def(tname).is_empty():
+		return {"kind": "struct", "name": tname}
 	if _engine_info(tname).is_empty():
 		return {}
 	return {"kind": "engine", "name": tname}
@@ -3027,6 +3455,47 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 					sure_miss = true
 				dnames.append(tname)
 				continue
+			if str(L.get("kind", "")) == "struct":
+				var sname := str(L.get("name", ""))
+				var sdef := _struct_def(sname)
+				if sdef.is_empty():
+					silent = true
+					dnames.append(sname)
+					continue
+				var matched := false
+				var fany := false
+				var ftypes: Array = []
+				for f in (sdef.get("fields", []) as Array):
+					if str((f as Dictionary).get("name", "")) == seg:
+						matched = true
+						fany = bool((f as Dictionary).get("any", false))
+						ftypes = ((f as Dictionary).get("types", []) as Array).duplicate()
+						break
+				if matched:
+					found = true
+					if fany or ftypes.is_empty():
+						silent = true
+					else:
+						for cn in ftypes:
+							var cl := _link_kind_of(str(cn), next_ctx)
+							if cl.is_empty():
+								silent = true
+							else:
+								next_links.append(cl)
+				else:
+					var dv := _verify_seg(["Dictionary"], seg, is_call, false, tokens[j], owner, true)
+					var dvt := str(dv.get("vtype", ""))
+					if dvt != "":
+						found = true
+						var dl := _link_kind_of(dvt, next_ctx)
+						if dl.is_empty():
+							silent = true
+						else:
+							next_links.append(dl)
+					else:
+						sure_miss = true
+				dnames.append(sname)
+				continue
 			if str(L.get("kind", "")) == "script":
 				var r := _script_seg(str(L.get("key", "")), seg, is_call)
 				var status := str(r.get("status", ""))
@@ -3224,7 +3693,10 @@ func _verify_subscript(tokens: Array, i: int, scope: Dictionary, owner: String, 
 		_verify_tokens(tokens.slice(i + 2, close), scope, owner, fn, env, overlay)
 	var def := _tuple_base_def(base, fn, scope, owner, env, overlay)
 	if def.is_empty():
-		return close + 1
+		var sdef := _struct_base_def(base, fn, scope, owner, env, overlay)
+		if sdef.is_empty():
+			return close + 1
+		return _verify_struct_key(tokens, i, close, sdef, owner)
 	var inner: Array = []
 	if close > i + 2:
 		inner = tokens.slice(i + 2, close)
@@ -3265,6 +3737,43 @@ func _tuple_base_def(base: String, fn: Variant, scope: Dictionary, owner: String
 		if not def.is_empty():
 			return {"name": str(t), "size": int(def.get("size", 0))}
 	return {}
+
+
+## Struct definition {name} for a subscript base, or {}.
+func _struct_base_def(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, overlay: Dictionary) -> Dictionary:
+	var fb := _flow_base(base, fn, scope, owner, env, overlay)
+	if str(fb.get("kind", "")) != "instance":
+		return {}
+	for t in (fb.get("types", []) as Array):
+		if not _struct_def(str(t)).is_empty():
+			return {"name": str(t)}
+	return {}
+
+
+## Struct key access for an already-resolved definition: single
+## string-literal keys resolve (unknown keys error); anything else
+## skips silently.
+func _verify_struct_key(tokens: Array, i: int, close: int, def: Dictionary, owner: String) -> int:
+	var inner: Array = []
+	if close > i + 2:
+		inner = tokens.slice(i + 2, close)
+	if inner.size() != 1 or not (inner[0] is Dictionary):
+		return close + 1
+	var tok: Dictionary = inner[0]
+	if str(tok.get("type", "")) != "STRING":
+		return close + 1
+	var raw := str(tok.get("value", ""))
+	var key := raw
+	if raw.length() >= 2:
+		key = raw.substr(1, raw.length() - 2)
+	var sdef := _struct_def(str(def.get("name", "")))
+	if sdef.is_empty():
+		return close + 1
+	for f in (sdef.get("fields", []) as Array):
+		if str((f as Dictionary).get("name", "")) == key:
+			return close + 1
+	_error(ERR_MISSING_MEMBER, "type '" + str(def.get("name", "")) + "' has no member '" + key + "'", int(tok.get("line", 0)), int(tok.get("column", 0)), owner)
+	return close + 1
 
 
 static func _vt_val(tokens: Array, i: int) -> String:
