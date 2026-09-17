@@ -138,7 +138,9 @@ var ast3: Dictionary = syn.parse("res://script.gd")
   `{"type": "SCRIPT", "children": [...], "errors": int, "header_comment": Variant, "line": 1, "column": 0}`.
   Every node carries at least `type`, `line`, `column`; declarations
   add `name`, `params`, `value`, `body`, `branches`, `tokens`, etc.
-  Raw token runs stay inside `EXPR` / `TYPE_REF` / `PATTERN` nodes.
+  `VAR_DECL` / `CONST_DECL` also carry `op` (`"="`, `":="` or `""`
+  when there is no initializer). Raw token runs stay inside `EXPR` /
+  `TYPE_REF` / `PATTERN` nodes.
 - Fault tolerant: each syntax error becomes a `SYNTAX_ERROR` node and
   parsing resumes at the next `NEWLINE` / `SEMICOLON` / `DEDENT` / `EOF`.
 - Comments are kept twice: the very first comment of the file goes to
@@ -437,6 +439,51 @@ var f = func():
   a function or a lambda. Marked nodes gain a `return_ann` stamp;
   nothing is written to the user JSON files.
 
+### `@var`
+
+Declares or redefines a variable type. It takes a name and a type
+(`# @var myvar int|float`, unions with `|`): before a variable or
+constant declaration the name must equal the declared one; anywhere
+inside a function body it redefines the type of a visible variable
+(locals, parameters and members). Never before function parameters.
+
+```gdscript
+extends Node
+
+# @var x Control
+var x: Node                # OK: narrows the declared type
+
+# @var y int
+var y := 1                 # OK: := infers int from the literal
+
+# @var z String
+var z = 1                  # OK: plain = holds Variant, anything goes
+
+func f(a: Node):
+    var t: Node
+    # @var t Control
+
+    print(t)               # OK: narrows the local
+    # @var t Object       # ERROR: Object is neither Node nor a subclass
+    # @var nope int       # ERROR: no variable 'nope' in function 'f'
+```
+
+- Every type member must be known (`var_unknown_type`); every member
+  must equal the declared type or inherit from it (`var_mismatch`,
+  `Variant` accepts anything). Without an explicit vartype, `:=`
+  infers from simple initializers (literals, arrays, dictionaries,
+  known constructors, lambdas); plain `=` means Variant. Anything
+  more complex skips the check.
+- Shape errors are `var_malformed` (missing name/type, bad
+  identifiers, `void`, empty union arms); wrong positions are
+  `var_misplaced` (parameters, file root, non-variable statements,
+  accessor bodies); missing or non-variable targets are
+  `var_unknown`. Declarations gain a `var_ann` stamp.
+- Order-insensitive like the rest of the analyzer: a `@var` sees all
+  locals/params of its function. Narrowing a captured outer variable
+  from a nested lambda checks existence but skips the type check;
+  lambdas inside default values or call arguments are not scanned.
+
 ## types_info layout
 
 - `types_info/builtin/<Name>.json` and `types_info/classes/<Name>.json`
@@ -468,8 +515,8 @@ green. `GODOT_BIN` overrides the engine path.
   `test_native_guard.gd` (native database contract),
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
-  `test_reuse.gd` (same instance parsing twice must give independent
-  results).
+  `test_var.gd` (`@var` rule), `test_reuse.gd` (same instance
+  parsing twice must give independent results).
 - `tests/ensure_native_types.gd` runs first: if `types_info/builtin/`,
   `types_info/classes/` and `index.json` exist with content it exits
   immediately; otherwise it runs the dumper with the same engine

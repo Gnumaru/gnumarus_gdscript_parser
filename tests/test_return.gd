@@ -141,3 +141,5 @@ func _r_marks_and_skips(h) -> void:
 	h.check(marked, "func node stamped with return_ann")
 	var src2 := "extends Node\n# @return int\nfunc f() -> Array[int]:\n\treturn []\n"
 	h.check((h.analyze_text(src2, "res://tests/tmp_ret_cx.gd").get("errors", []) as Array).is_empty(), "complex -> skips mismatch check")
+	var src3 := "extends Node\n# @return Node\nfunc f() -> Variant:\n\tpass\n"
+	h.check((h.analyze_text(src3, "res://tests/tmp_ret_top.gd").get("errors", []) as Array).is_empty(), "anything narrows Variant")

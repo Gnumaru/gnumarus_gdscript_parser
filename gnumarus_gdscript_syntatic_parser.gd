@@ -506,13 +506,15 @@ func _parse_const(annotations: Array, is_static: bool) -> Dictionary:
 		_advance()
 		vartype = _parse_type(["OPERATOR", "NEWLINE", "SEMICOLON", "EOF", "DEDENT"])
 	var value: Variant = null
+	var op := ""
 	if _peek_type() == "OPERATOR" and (_peek_value() == "=" or _peek_value() == ":="):
+		op = _peek_value()
 		_advance()
 		value = _parse_expr(["NEWLINE", "SEMICOLON", "DEDENT", "EOF"])
 	else:
 		_error_at("Expected '=' with value in const declaration.", _peek())
 	_end_stmt()
-	return {"type": NODE_CONST_DECL, "name": name["value"], "vartype": vartype, "value": value, "is_static": is_static, "annotations": annotations, "line": kw["line"], "column": kw["column"]}
+	return {"type": NODE_CONST_DECL, "name": name["value"], "vartype": vartype, "value": value, "op": op, "is_static": is_static, "annotations": annotations, "line": kw["line"], "column": kw["column"]}
 
 
 func _parse_var(annotations: Array, is_static: bool) -> Dictionary:
@@ -531,7 +533,9 @@ func _parse_var(annotations: Array, is_static: bool) -> Dictionary:
 		_advance()
 		vartype = _parse_type(["OPERATOR", "COLON", "NEWLINE", "SEMICOLON", "EOF", "DEDENT"])
 	var value: Variant = null
+	var op := ""
 	if _peek_type() == "OPERATOR" and (_peek_value() == "=" or _peek_value() == ":="):
+		op = _peek_value()
 		_advance()
 		if _peek_type() == "KEYWORD" and _peek_value() == "func" and _peek_type(1) == "LPAREN":
 			value = _parse_lambda()
@@ -543,7 +547,7 @@ func _parse_var(annotations: Array, is_static: bool) -> Dictionary:
 		accessors = _parse_suite()
 	else:
 		_end_stmt()
-	return {"type": NODE_VAR_DECL, "name": name["value"], "vartype": vartype, "value": value, "accessors": accessors, "is_static": is_static, "annotations": annotations, "line": kw["line"], "column": kw["column"]}
+	return {"type": NODE_VAR_DECL, "name": name["value"], "vartype": vartype, "value": value, "op": op, "accessors": accessors, "is_static": is_static, "annotations": annotations, "line": kw["line"], "column": kw["column"]}
 
 
 func _parse_func(annotations: Array, is_static: bool) -> Dictionary:
