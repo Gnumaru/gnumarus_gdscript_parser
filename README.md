@@ -675,8 +675,43 @@ var d: Drawable     # OK: known name; assignments stay lenient
   (`interface_conflict`); bad shapes error (`interface_malformed`,
   `interface_unknown_type`). Written as `kind: "interface"` JSONs
   reusing class entry shapes (methods split static/instance, enum
-  values and const values null). No use checking yet: names resolve,
-  assignments pass, member verification skips interface types.
+  values and const values null). A `void` func return stays `"void"`
+  (not `any`), so `@implements` can require it. No use checking yet:
+  names resolve, assignments pass, member verification skips
+  interface types.
+
+### `@implements`
+
+Claims conformance: `# @implements Name1 Name2` at the script root
+(file header, before `extends`/`class_name`, or before any root
+member) or immediately before a nested `class` (then it applies to
+that class). Each name is any valid type except tuples: dotted
+nested classes (`My.Inner`), structs, `@interface` names, native
+classes (`Node2D`) and non-object types (`Vector2`).
+
+```gdscript
+extends Node2D
+
+# @interface Drawable
+# func:draw:void:canvas:CanvasItem
+# @endinterface
+# @implements Node2D Drawable
+func draw(canvas: CanvasItem) -> void:
+    pass
+```
+
+- Every directly-declared member of each target is checked against
+  the class, own or inherited: methods (staticness, arity with
+  defaults/vararg, contravariant params, covariant returns),
+  fields/consts (compatible types), signals (arity + params),
+  enums (all members present). Missing members error
+  (`implements_mismatch`); unknown names error
+  (`implements_unknown_type`); tuples are rejected
+  (`implements_mismatch`); empty/misshapen tags error
+  (`implements_malformed`); any other position errors
+  (`implements_misplaced`). Dynamic (untyped) implementation sides
+  pass; `void` interface returns require `void`-compatible
+  implementations.
 
 ### `@struct`
 
@@ -746,6 +781,7 @@ green. `GODOT_BIN` overrides the engine path.
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
   `test_tuple.gd` (`@tuple` rule), `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
+  `test_implements.gd` (`@implements` rule),
   `test_flow.gd` (flow member checks + guards),
   `test_reuse.gd` (same instance parsing twice must give independent
   results).

@@ -78,7 +78,9 @@ extends RefCounted
 ## between @interface Name and @endinterface, single or multi-line).
 ## Definitions live top-level only; duplicates and clashes error.
 ## Tuples/structs verify literals, index/key access and members;
-## interfaces only define for now (conformance arrives with @implements).
+## interfaces define blueprints and @implements checks conformance
+## (methods, fields, signals, enums, consts) at the script root or on
+## nested classes.
 ##
 ## The walk is scope-aware (locals and parameters shadow members) and
 ## threads an explicit owner ("", "Outer", "Outer.Inner") so later
@@ -1587,6 +1589,8 @@ func _parse_iface_func(rest: String, is_static: bool, line: int) -> Dictionary:
 				return {}
 			rtypes.append(cm)
 		returns = "|".join(rtypes)
+	else:
+		returns = "void"
 	var params: Array = []
 	if ptext != "":
 		params = _parse_iface_params(ptext, line)
@@ -2152,12 +2156,18 @@ func _types_wider(impl_types: Array, req_types: Array) -> bool:
 	return true
 
 
-## Counts required (no default, non-vararg) and total params.
+## Counts required and total params. Normalized entries carry "req";
+## raw entries fall back to has_default/is_vararg flags.
 static func _arity_of(params: Array) -> Array:
 	var req := 0
 	for p in params:
-		if p is Dictionary and not bool((p as Dictionary).get("has_default", false)) and not bool((p as Dictionary).get("is_vararg", false)):
-			req += 1
+		if p is Dictionary:
+			var d := p as Dictionary
+			if d.has("req"):
+				if bool(d.get("req", true)):
+					req += 1
+			elif not bool(d.get("has_default", false)) and not bool(d.get("is_vararg", false)):
+				req += 1
 	return [req, params.size()]
 
 
@@ -2178,16 +2188,22 @@ func _compare_method(req: Dictionary, imp: Dictionary) -> String:
 		var ip: Dictionary = ipars[i]
 		if not _types_wider((ip as Dictionary).get("types", []), (rp as Dictionary).get("types", [])):
 			return "method '" + rname + "' parameter '" + str((rp as Dictionary).get("name", "")) + "' is incompatible"
-	var rret := _ret_list(req)
-	var iret: Array = imp.get("returns", [])
+	var rret := _returns_list(req.get("returns", "any"))
+	var iret := _returns_list(imp.get("returns", []))
 	if not _types_narrower(iret, rret):
-		return "method '" + rname + "' must return '" + str(req.get("returns", "any")) + "'"
+		var want := "any"
+		if not rret.is_empty():
+			want = "|".join(rret)
+		return "method '" + rname + "' must return '" + want + "'"
 	return ""
 
 
-## Required-side returns as a list ([] = any/dynamic).
-static func _ret_list(req: Dictionary) -> Array:
-	var r := str(req.get("returns", "any"))
+## Required/implementation returns as a list ([] = any/dynamic).
+## Accepts a "a|b" string or a [a, b] array (both shapes circulate).
+static func _returns_list(v: Variant) -> Array:
+	if v is Array:
+		return (v as Array).duplicate()
+	var r := str(v)
 	if r == "" or r == "any":
 		return []
 	var out: Array = []
@@ -2196,6 +2212,11 @@ static func _ret_list(req: Dictionary) -> Array:
 		if t != "":
 			out.append(t)
 	return out
+
+
+## Required-side returns as a list ([] = any/dynamic).
+static func _ret_list(req: Dictionary) -> Array:
+	return _returns_list(req.get("returns", "any"))
 
 
 ## Resolves an @implements name to a target (no errors here; the
@@ -2211,6 +2232,10 @@ func _implement_target(name: String, owner: String) -> Dictionary:
 		return {"kind": "script", "key": sk}
 	if _interfaces.has(name):
 		return {"kind": "interface", "name": name}
+	if _structs.has(name):
+		return {"kind": "struct", "name": name}
+	if _tuples.has(name):
+		return {"kind": "tuple", "name": name}
 	var info := _type_info(name)
 	if info.is_empty():
 		return {}
@@ -3161,6 +3186,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_implements_tag(d):
 			if t == "CLASS_DECL":
 				_record_implements(_full_name(owner, str(d.get("name", ""))), d, int(d.get("line", 0)))
+			elif member_pos and owner == "":
+				_record_implements("", d, int(d.get("line", 0)))
 			else:
 				_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
@@ -3188,10 +3215,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_implements_tag(d):
-			if t == "CLASS_NAME":
-				_record_implements("", d, int(d.get("line", 0)))
-			else:
-				_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			_record_implements("", d, int(d.get("line", 0)))
 		return
 	if t == "PARAM":
 		var ptag = _leading_tag(d)
@@ -3287,6 +3311,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		# Top level: already collected by _prescan_interfaces; falls through.
+	if _has_any_implements_tag(d):
+		_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		return
 	if _has_any_param_tag(d):
 		if t == "EXPR_STMT":
 			var _pe: Variant = d.get("expr", null)

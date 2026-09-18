@@ -22,6 +22,7 @@ func _init() -> void:
 		"res://tests/test_tuple.gd",
 		"res://tests/test_struct.gd",
 		"res://tests/test_interface.gd",
+		"res://tests/test_implements.gd",
 		"res://tests/test_flow.gd",
 		"res://tests/test_reuse.gd",
 	]
