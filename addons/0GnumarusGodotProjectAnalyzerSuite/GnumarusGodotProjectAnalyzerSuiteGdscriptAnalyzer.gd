@@ -233,6 +233,10 @@ var _interfaces: Dictionary = {}
 ## @implements raw uses: owner -> [{names, line}]. Checked in
 ## _check_implements after the walk (tables complete by then).
 var _implements: Dictionary = {}
+## Complex annotation trees awaiting tuple validation: [{tree, mm_kind,
+## what, line, col, owner}]. Attach runs before _resolve_tuples, so
+## arity/compatibility waits for _check_pending_trees (post-resolve).
+var _pending_tree_checks: Array = []
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -252,6 +256,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_structs = {}
 	_interfaces = {}
 	_implements = {}
+	_pending_tree_checks = []
 	_script_class = ""
 	_script_extends = ""
 	for child in ast.get("children", []):
@@ -278,6 +283,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_resolve_tuples()
 	_resolve_structs()
 	_resolve_interfaces()
+	_check_pending_trees()
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
@@ -528,9 +534,11 @@ func _has_any_tuple_tag(node: Dictionary) -> bool:
 ## Parses an @tuple message ("Name COUNT item...") into {"ok","name",
 ## "size","items","raw"} or {"ok": false, "error"}. COUNT is mandatory
 ## and must equal the item count (checked by the caller against the
-## parsed words). Items stay raw here (unions, `*`, `variant`).
+## parsed words). Items stay raw here (unions, `*`, `variant`, nested
+## generics). Words split on whitespace first, then bracketed spans
+## rejoin so "Dictionary[ String , int ]" stays one item.
 static func _parse_tuple_spec(raw_msg: String) -> Dictionary:
-	var words := _split_words(raw_msg.strip_edges())
+	var words := _rejoin_bracket_words(_split_words(raw_msg.strip_edges()))
 	if words.size() < 2:
 		return {"ok": false, "error": "@tuple needs a name and an explicit size: '# @tuple TupleName 5 int|string float|bool object variant *'"}
 	var tname := str(words[0])
@@ -547,6 +555,33 @@ static func _parse_tuple_spec(raw_msg: String) -> Dictionary:
 	for w in words.slice(2):
 		items.append(str(w))
 	return {"ok": true, "name": tname, "size": int(count_word), "items": items, "raw": raw_msg.strip_edges()}
+
+
+## Rejoins whitespace-split words while brackets stay open, so spaced
+## generics survive word-based definition syntax. Joins with "" (spaces
+## inside brackets are insignificant to _parse_type_expr).
+static func _rejoin_bracket_words(words: Array) -> Array:
+	var out: Array = []
+	var cur := ""
+	var depth := 0
+	for w in words:
+		var ws := str(w)
+		if depth > 0:
+			cur += ws
+		else:
+			cur = ws
+		for i in range(ws.length()):
+			var c := ws.unicode_at(i)
+			if c == 91:
+				depth += 1
+			elif c == 93 and depth > 0:
+				depth -= 1
+		if depth <= 0:
+			out.append(cur)
+			cur = ""
+	if cur != "":
+		out.append(cur)
+	return out
 
 
 ## Pre-scan (before _scan): collects @tuple raw definitions from
@@ -626,6 +661,16 @@ func _resolve_tuples() -> void:
 		entry["resolved"] = true
 		entry["spec"] = {"ok": true, "name": tname, "size": int(spec.get("size", 0)), "items": items, "raw": str(spec.get("raw", "")), "line": int(first.get("line", 0))}
 		_write_tuple_file(tname)
+	for tname in _tuples.keys():
+		var done: Dictionary = _tuples[tname]
+		if not bool(done.get("resolved", false)):
+			continue
+		var dspec: Dictionary = done.get("spec", {})
+		for item in (dspec.get("items", []) as Array):
+			if item is Dictionary and (item as Dictionary).has("tree"):
+				var tv := _check_tree_tuples((item as Dictionary).get("tree", {}))
+				if not bool(tv.get("ok", false)):
+					_error(ERR_TUPLE_MISMATCH, "@tuple " + str(tv.get("mismatch", "")), int(dspec.get("line", 0)), 0, "")
 
 
 ## Canonical type name: exact match first (user definitions win),
@@ -654,11 +699,16 @@ static func _split_struct_field(word: String) -> Dictionary:
 
 
 ## Parses one tuple item word: `*` (any), `variant` (unknown marker,
-## normalized to Variant), or a |-union of known names (tuple refs
-## allowed: all names were pre-scanned). {} + error on failure.
+## normalized to Variant), a |-union of known names (tuple refs
+## allowed: all names were pre-scanned), or a nested type expression
+## with brackets ("Dictionary[String,int]", "P[int]"). {} + error on
+## failure. Generic arms keep their head (anonymous `tuple[...]` reads
+## as `Array`); the parsed tree rides along for future structural work.
 func _parse_tuple_item(word: String, line: int) -> Dictionary:
 	if word == "*":
 		return {"types": [], "any": true}
+	if "[" in word or "]" in word or "," in word:
+		return _parse_tuple_item_complex(word, line)
 	var raw := word
 	if word == "variant":
 		raw = "Variant"
@@ -677,6 +727,57 @@ func _parse_tuple_item(word: String, line: int) -> Dictionary:
 		_error(ERR_TUPLE_MALFORMED, "@tuple has an empty type", line, 0, "")
 		return {}
 	return {"types": types, "any": false}
+
+
+## Bracketed tuple-item route: mini-parses the whole word, resolves
+## every name, validates tuple applications, and flattens arms to
+## head names (legacy flat shape, so literal checks keep working).
+func _parse_tuple_item_complex(word: String, line: int) -> Dictionary:
+	var parsed := _parse_type_expr(word, "@tuple")
+	if not bool(parsed.get("ok", false)):
+		_error(ERR_TUPLE_MALFORMED, str(parsed.get("error", "")), line, 0, "")
+		return {}
+	var tree: Dictionary = parsed.get("node", {})
+	if _count_void_names(tree) > 0:
+		_error(ERR_TUPLE_MALFORMED, "@tuple 'void' is not a valid item type", line, 0, "")
+		return {}
+	var arms: Array = []
+	if str(tree.get("kind", "")) == "union":
+		arms = (tree.get("arms", []) as Array).duplicate()
+	else:
+		arms = [tree]
+	var types: Array = []
+	for arm in arms:
+		if not (arm is Dictionary):
+			_error(ERR_TUPLE_MALFORMED, "@tuple has an invalid type '" + word + "'", line, 0, "")
+			return {}
+		var kind := str((arm as Dictionary).get("kind", ""))
+		if kind == "any":
+			_error(ERR_TUPLE_MALFORMED, "@tuple has an invalid type '*'", line, 0, "")
+			return {}
+		if kind == "name":
+			types.append(str((arm as Dictionary).get("name", "")))
+		elif kind == "generic":
+			var hname := str((arm as Dictionary).get("name", ""))
+			if hname == "tuple" and _tuple_def("tuple").is_empty():
+				types.append("Array")
+			else:
+				types.append(hname)
+		else:
+			_error(ERR_TUPLE_MALFORMED, "@tuple has an invalid type '" + word + "'", line, 0, "")
+			return {}
+	var tv := _resolve_tree_names(tree)
+	if not bool(tv.get("ok", false)):
+		_error(ERR_TUPLE_UNKNOWN_TYPE, "@tuple has unknown type '" + str((tv as Dictionary).get("bad", "")) + "'", line, 0, "")
+		return {}
+	var out: Array = []
+	for t in types:
+		var cm := _canon_type(str(t))
+		if cm == "":
+			_error(ERR_TUPLE_UNKNOWN_TYPE, "@tuple has unknown type '" + str(t) + "'", line, 0, "")
+			return {}
+		out.append(cm)
+	return {"types": out, "any": false, "tree": tree}
 
 
 ## Why a tuple name cannot be defined ("" when free). Existing tuple
@@ -1199,7 +1300,10 @@ func _extract_tok_tags(tok: Dictionary, owner: String, tagname: String, what: St
 			if not bool(spec.get("ok", false)):
 				_error(malformed_kind, str(spec.get("error", "")), tok_line + li, 0, owner)
 			else:
-				out.append({"name": str(spec.get("name", "")), "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "line": tok_line + li})
+				var entry := {"name": str(spec.get("name", "")), "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "line": tok_line + li}
+				if (spec as Dictionary).has("tree"):
+					entry["tree"] = (spec as Dictionary).get("tree", {})
+				out.append(entry)
 		li += 1
 	return out
 
@@ -1258,6 +1362,8 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 	if not bool(cm.get("ok", false)):
 		_error(ERR_PARAM_UNKNOWN_TYPE, "@param has unknown type '" + str(cm.get("bad", "")) + "'", line, 0, owner)
 		return
+	if not _report_tree_errors(pair, ERR_PARAM_UNKNOWN_TYPE, ERR_PARAM_MISMATCH, "@param", line, 0, owner):
+		return
 	var members: Array = cm.get("types", [])
 	var ref := _vartype_name(pnode)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
@@ -1265,6 +1371,8 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + str(m) + "' for parameter '" + str(pair.get("name", "")) + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
 	pnode["param_ann"] = {"name": str(pair.get("name", "")), "types": members, "raw": str(pair.get("raw", "")), "line": line}
+	if (pair as Dictionary).has("tree"):
+		(pnode["param_ann"] as Dictionary)["tree"] = (pair as Dictionary).get("tree", {})
 
 
 ## Applies @param pairs to a whole parameter list (before-func/lambda
@@ -2641,6 +2749,8 @@ static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary
 	var raw := raw_msg.strip_edges()
 	if raw == "":
 		return {"ok": false, "error": what + " needs a type: 'void' or a type name like 'Node' (unions join with '|', e.g. 'Object|String|int')"}
+	if "[" in raw or "]" in raw or "," in raw:
+		return _parse_complex_spec(raw, what)
 	var parts := raw.split("|")
 	var types: Array = []
 	for p in parts:
@@ -2655,6 +2765,350 @@ static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary
 			return {"ok": false, "error": what + " has an invalid type name '" + name + "'"}
 		types.append(name)
 	return {"ok": true, "types": types, "void": false, "raw": raw}
+
+
+## Complex-spec route (nested type expressions with brackets): parses
+## the whole text with the mini-parser, then flattens top-level union
+## arms to head names for the legacy flat pipeline. Anonymous
+## `tuple[...]` (no user tuple named `tuple`) desugars to `Array`;
+## named generics keep their head. `void` alone stays void; `void`
+## combined or a top-level `*` keep the legacy rejections.
+static func _parse_complex_spec(raw: String, what: String) -> Dictionary:
+	var parsed := _parse_type_expr(raw, what)
+	if not bool(parsed.get("ok", false)):
+		return {"ok": false, "error": str(parsed.get("error", ""))}
+	var tree: Dictionary = parsed.get("node", {})
+	var voids := _count_void_names(tree)
+	if voids > 0:
+		if voids == 1 and str(tree.get("kind", "")) == "name" and str(tree.get("name", "")) == "void":
+			return {"ok": true, "types": [], "void": true, "raw": raw}
+		return {"ok": false, "error": what + " 'void' cannot be combined with other types in '" + raw + "'"}
+	var arms: Array = []
+	if str(tree.get("kind", "")) == "union":
+		arms = (tree.get("arms", []) as Array).duplicate()
+	else:
+		arms = [tree]
+	var types: Array = []
+	for arm in arms:
+		if not (arm is Dictionary):
+			return {"ok": false, "error": what + " has an invalid type in '" + raw + "'"}
+		var kind := str((arm as Dictionary).get("kind", ""))
+		if kind == "any":
+			return {"ok": false, "error": what + " has an invalid type name '*'"}
+		if kind == "name":
+			types.append(str((arm as Dictionary).get("name", "")))
+		elif kind == "generic":
+			var hname := str((arm as Dictionary).get("name", ""))
+			if hname == "tuple":
+				types.append("Array")
+			else:
+				types.append(hname)
+		else:
+			return {"ok": false, "error": what + " has an invalid type in '" + raw + "'"}
+	return {"ok": true, "types": types, "void": false, "raw": raw, "tree": tree}
+
+
+## Counts `void` name leaves in a type tree (heads included).
+static func _count_void_names(node: Dictionary) -> int:
+	var kind := str(node.get("kind", ""))
+	if kind == "name":
+		return 1 if str(node.get("name", "")) == "void" else 0
+	var total := 0
+	if kind == "generic":
+		if str(node.get("name", "")) == "void":
+			total += 1
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				total += _count_void_names(arg)
+	elif kind == "union":
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				total += _count_void_names(arm)
+	return total
+
+
+## Short display of a type node for messages ("int", "*", "P[int,String]").
+static func _show_tree(node: Dictionary) -> String:
+	var kind := str(node.get("kind", ""))
+	if kind == "any":
+		return "*"
+	if kind == "name":
+		return str(node.get("name", ""))
+	if kind == "union":
+		var parts: Array = []
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				parts.append(_show_tree(arm))
+		return "|".join(parts)
+	if kind == "generic":
+		var parts: Array = []
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				parts.append(_show_tree(arg))
+		return str(node.get("name", "")) + "[" + ",".join(parts) + "]"
+	return "?"
+
+
+## True for the anonymous-tuple head: exactly `tuple` with no user
+## tuple definition under that name (user definitions win).
+func _is_anon_tuple_head(hname: String) -> bool:
+	return hname == "tuple" and _tuple_def("tuple").is_empty()
+
+
+## Phase 1: every name in the tree resolves. {"ok": true} or
+## {"ok": false, "bad": name} with the as-written name. A bare `tuple`
+## name still needs a definition (legacy); only generic heads get the
+## anonymous-`tuple` pass.
+func _resolve_tree_names(node: Dictionary) -> Dictionary:
+	return _resolve_tree_node(node)
+
+
+func _resolve_tree_node(node: Dictionary) -> Dictionary:
+	var kind := str(node.get("kind", ""))
+	if kind == "any":
+		return {"ok": true}
+	if kind == "name":
+		if _canon_type(str(node.get("name", ""))) == "":
+			return {"ok": false, "bad": str(node.get("name", ""))}
+		return {"ok": true}
+	if kind == "union":
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				var r := _resolve_tree_node(arm)
+				if not bool(r.get("ok", false)):
+					return r
+		return {"ok": true}
+	if kind == "generic":
+		var hname := str(node.get("name", ""))
+		if not _is_anon_tuple_head(hname):
+			if _canon_type(hname) == "":
+				return {"ok": false, "bad": hname}
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				var r := _resolve_tree_node(arg)
+				if not bool(r.get("ok", false)):
+					return r
+		return {"ok": true}
+	return {"ok": false, "bad": "?"}
+
+
+## Head name of one applied argument for compatibility ("Array" for
+## anonymous `tuple[...]`, "" for unions which callers expand).
+func _tree_arg_head(node: Dictionary) -> String:
+	var kind := str(node.get("kind", ""))
+	if kind == "name":
+		return _canon_type(str(node.get("name", "")))
+	if kind == "generic":
+		var hname := str(node.get("name", ""))
+		if _is_anon_tuple_head(hname):
+			return "Array"
+		return _canon_type(hname)
+	return ""
+
+
+## True when one applied argument fits a tuple definition item
+## ({types, any}): `*` and any-items fit all; unions need every arm;
+## otherwise the head must equal or derive from an item member.
+func _tree_arg_fits(arg: Dictionary, item: Dictionary) -> bool:
+	if bool(item.get("any", false)):
+		return true
+	if str(arg.get("kind", "")) == "any":
+		return true
+	if str(arg.get("kind", "")) == "union":
+		for arm in (arg.get("arms", []) as Array):
+			if not (arm is Dictionary) or not _tree_arg_fits(arm, item):
+				return false
+		return true
+	var head := _tree_arg_head(arg)
+	if head == "":
+		return false
+	for m in (item.get("types", []) as Array):
+		if head == str(m) or _derives_from(head, str(m)):
+			return true
+	return false
+
+
+## Phase 2: generic applications of known @tuple types match the
+## definition (arity + per-argument compatibility, recursing into
+## nested applications). {"ok": true} or {"ok": false, "mismatch": msg}.
+func _check_tree_tuples(node: Dictionary) -> Dictionary:
+	var kind := str(node.get("kind", ""))
+	if kind == "union":
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				var r := _check_tree_tuples(arm)
+				if not bool(r.get("ok", false)):
+					return r
+		return {"ok": true}
+	if kind != "generic":
+		return {"ok": true}
+	var hname := str(node.get("name", ""))
+	var args: Array = node.get("args", [])
+	var def := _tuple_def(hname)
+	if not def.is_empty() and not _is_anon_tuple_head(hname):
+		var items: Array = def.get("items", [])
+		if args.size() != int(def.get("size", -1)):
+			return {"ok": false, "mismatch": "tuple '" + hname + "' expects " + str(def.get("size", 0)) + " type arguments, got " + str(args.size())}
+		for i in range(args.size()):
+			var arg: Dictionary = args[i]
+			var item: Dictionary = items[i]
+			if not _tree_arg_fits(arg, item):
+				return {"ok": false, "mismatch": "tuple '" + hname + "' argument " + str(i) + " expects '" + _show_types(item.get("types", [])) + "', got '" + _show_tree(arg) + "'"}
+	for arg in args:
+		if arg is Dictionary:
+			var r := _check_tree_tuples(arg)
+			if not bool(r.get("ok", false)):
+				return r
+	return {"ok": true}
+
+
+## Full tree validation: names resolve, then tuple applications fit.
+## {"ok": true} or {"ok": false, "bad": name} (unknown) or
+## {"ok": false, "mismatch": msg} (tuple arity/compatibility).
+## NOTE: only the post-resolve passes may call this whole (definitions
+## must be resolved first); attach-time callers use _resolve_tree_names
+## plus _pending_tree_checks instead.
+func _validate_type_tree(tree: Dictionary) -> Dictionary:
+	var rn := _resolve_tree_names(tree)
+	if not bool(rn.get("ok", false)):
+		return rn
+	return _check_tree_tuples(tree)
+
+
+## Reports tree errors for one complex spec (specs without "tree" pass
+## through). Name resolution runs now (unknown names error with
+## unk_kind immediately); tuple arity/compatibility needs resolved
+## definitions, so it is queued for _check_pending_trees (post-resolve)
+## and reported with mm_kind there. Returns false when an error was
+## reported now.
+func _report_tree_errors(spec: Dictionary, unk_kind: String, mm_kind: String, what: String, line: int, col: int, owner: String) -> bool:
+	if not spec.has("tree"):
+		return true
+	var tree: Dictionary = spec.get("tree", {})
+	var rn := _resolve_tree_names(tree)
+	if not bool(rn.get("ok", false)):
+		_error(unk_kind, what + " has unknown type '" + str(rn.get("bad", "")) + "'", line, col, owner)
+		return false
+	_pending_tree_checks.append({"tree": tree, "mm_kind": mm_kind, "what": what, "line": line, "col": col, "owner": owner})
+	return true
+
+
+## Post-resolve pass: tuple applications queued by _report_tree_errors
+## (attach runs before _resolve_tuples, when definitions are still
+## raw, so arity/compatibility waits until here).
+func _check_pending_trees() -> void:
+	for pen in _pending_tree_checks:
+		if not (pen is Dictionary):
+			continue
+		var tv := _check_tree_tuples((pen as Dictionary).get("tree", {}))
+		if not bool(tv.get("ok", false)):
+			_error(str((pen as Dictionary).get("mm_kind", "")), str((pen as Dictionary).get("what", "")) + " " + str(tv.get("mismatch", "")), int((pen as Dictionary).get("line", 0)), int((pen as Dictionary).get("col", 0)), str((pen as Dictionary).get("owner", "")))
+
+
+## Cap on nested type-expression depth (tuple[A,[B,...]]): purely
+## against pathological inputs; real annotations never get close.
+const MAX_TYPE_DEPTH := 32
+
+
+## Parses one nested type expression ("int|tuple[int]|Dictionary[K,V]")
+## into {"ok","node"} or {"ok": false, "error"}. Nodes: {"kind":"any"}
+## (`*`), {"kind":"name","name"}, {"kind":"union","arms":[...]},
+## {"kind":"generic","name","args":[...]}. Whitespace is tolerated
+## between tokens; `|` splits at the current bracket level, `,` splits
+## generic args. `void` parses as a plain name: callers apply their own
+## void rules on top. Pure (no errors reported, no state touched).
+static func _parse_type_expr(text: String, what := "@var") -> Dictionary:
+	var res := _parse_type_union(text, 0, 0, what)
+	if not bool(res.get("ok", false)):
+		return res
+	var pos := int(res.get("pos", 0))
+	pos = _skip_type_ws(text, pos)
+	if pos != text.length():
+		return {"ok": false, "error": what + " has an unexpected '" + text.substr(pos, 1) + "' in '" + text.strip_edges() + "'"}
+	return {"ok": true, "node": res.get("node", {})}
+
+
+## Skips spaces/tabs/newlines, returning the new position.
+static func _skip_type_ws(s: String, pos: int) -> int:
+	var p := pos
+	while p < s.length():
+		var c := s.unicode_at(p)
+		if c != 32 and c != 9 and c != 10 and c != 13:
+			break
+		p += 1
+	return p
+
+
+## Parses one union arm level: primary ("|" primary)*. Returns
+## {"ok","node","pos"}; a single arm is returned unwrapped.
+static func _parse_type_union(s: String, pos: int, depth: int, what: String) -> Dictionary:
+	if depth > MAX_TYPE_DEPTH:
+		return {"ok": false, "error": what + " type is nested too deep in '" + s.strip_edges() + "'"}
+	var p := _skip_type_ws(s, pos)
+	var first := _parse_type_primary(s, p, depth, what)
+	if not bool(first.get("ok", false)):
+		return first
+	var arms: Array = [first.get("node", {})]
+	p = int(first.get("pos", p))
+	while true:
+		p = _skip_type_ws(s, p)
+		if p >= s.length() or s.unicode_at(p) != 124:
+			break
+		p = _skip_type_ws(s, p + 1)
+		if p >= s.length():
+			return {"ok": false, "error": what + " has an empty type after '|' in '" + s.strip_edges() + "'"}
+		if s.unicode_at(p) == 124 or s.unicode_at(p) == 44 or s.unicode_at(p) == 93:
+			return {"ok": false, "error": what + " has an empty type after '|' in '" + s.strip_edges() + "'"}
+		var arm := _parse_type_primary(s, p, depth, what)
+		if not bool(arm.get("ok", false)):
+			return arm
+		arms.append(arm.get("node", {}))
+		p = int(arm.get("pos", p))
+	if arms.size() == 1:
+		return {"ok": true, "node": arms[0], "pos": p}
+	return {"ok": true, "node": {"kind": "union", "arms": arms}, "pos": p}
+
+
+## Parses one primary: `*` (any), an identifier, or an identifier
+## followed by "[args]". Returns {"ok","node","pos"}.
+static func _parse_type_primary(s: String, pos: int, depth: int, what: String) -> Dictionary:
+	var raw := s.strip_edges()
+	var p := _skip_type_ws(s, pos)
+	if p >= s.length():
+		return {"ok": false, "error": what + " has an empty type in '" + raw + "'"}
+	var c := s.unicode_at(p)
+	if c == 42:
+		return {"ok": true, "node": {"kind": "any"}, "pos": p + 1}
+	if c == 124 or c == 44 or c == 93:
+		return {"ok": false, "error": what + " has an empty type in '" + raw + "'"}
+	if not _is_type_start(c):
+		return {"ok": false, "error": what + " has an invalid character '" + s.substr(p, 1) + "' in '" + raw + "'"}
+	var name := ""
+	while p < s.length() and _is_type_part(s.unicode_at(p)):
+		name += s.substr(p, 1)
+		p += 1
+	p = _skip_type_ws(s, p)
+	if p >= s.length() or s.unicode_at(p) != 91:
+		return {"ok": true, "node": {"kind": "name", "name": name}, "pos": p}
+	p = _skip_type_ws(s, p + 1)
+	if p < s.length() and s.unicode_at(p) == 93:
+		return {"ok": false, "error": what + " has no type arguments in '" + name + "[]'"}
+	var args: Array = []
+	while true:
+		var arg := _parse_type_union(s, p, depth + 1, what)
+		if not bool(arg.get("ok", false)):
+			return arg
+		args.append(arg.get("node", {}))
+		p = _skip_type_ws(s, int(arg.get("pos", p)))
+		if p < s.length() and s.unicode_at(p) == 44:
+			p = _skip_type_ws(s, p + 1)
+			if p >= s.length() or s.unicode_at(p) == 93:
+				return {"ok": false, "error": what + " has an empty type after ',' in '" + raw + "'"}
+			continue
+		break
+	if p >= s.length() or s.unicode_at(p) != 93:
+		return {"ok": false, "error": what + " is missing ']' in '" + raw + "'"}
+	return {"ok": true, "node": {"kind": "generic", "name": name, "args": args}, "pos": p + 1}
 
 
 ## Parses an @var/@param message ("name Type|Union") into
@@ -2676,7 +3130,10 @@ static func _parse_var_spec(raw_msg: String, what := "@var") -> Dictionary:
 		return spec
 	if bool(spec.get("void", false)):
 		return {"ok": false, "error": what + " 'void' is not a valid variable type"}
-	return {"ok": true, "name": vname, "types": spec.get("types", []), "raw": str(spec.get("raw", ""))}
+	var out := {"ok": true, "name": vname, "types": spec.get("types", []), "raw": str(spec.get("raw", ""))}
+	if (spec as Dictionary).has("tree"):
+		out["tree"] = (spec as Dictionary).get("tree", {})
+	return out
 
 
 ## Full info Dictionary of a type from its JSON file (builtin, classes
@@ -2801,8 +3258,15 @@ func _attach_return(fn_node: Dictionary, tag: Dictionary, owner: String) -> void
 		if not bool(cm.get("ok", false)):
 			_error(ERR_RETURN_UNKNOWN, "@return has unknown type '" + str(cm.get("bad", "")) + "'", line, col, owner)
 			return
-		spec = {"ok": true, "types": cm.get("types", []), "void": false, "raw": str(spec.get("raw", "")), "line": line}
+		var rebuilt := {"ok": true, "types": cm.get("types", []), "void": false, "raw": str(spec.get("raw", "")), "line": line}
+		if (spec as Dictionary).has("tree"):
+			rebuilt["tree"] = (spec as Dictionary).get("tree", {})
+		spec = rebuilt
+	if not _report_tree_errors(spec, ERR_RETURN_UNKNOWN, ERR_RETURN_MISMATCH, "@return", line, col, owner):
+		return
 	fn_node["return_ann"] = {"types": spec.get("types", []), "void": bool(spec.get("void", false)), "raw": str(spec.get("raw", "")), "line": line}
+	if (spec as Dictionary).has("tree"):
+		(fn_node["return_ann"] as Dictionary)["tree"] = (spec as Dictionary).get("tree", {})
 
 
 ## Marks a FUNC_DECL node (@return allowed in any position: a nested
@@ -2837,6 +3301,8 @@ func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is
 	if not bool(cm.get("ok", false)):
 		_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(cm.get("bad", "")) + "'", line, col, owner)
 		return
+	if not _report_tree_errors(spec, ERR_VAR_UNKNOWN_TYPE, ERR_VAR_MISMATCH, "@var", line, col, owner):
+		return
 	var members: Array = cm.get("types", [])
 	var ref := _var_reference(decl_node, is_const)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
@@ -2844,6 +3310,8 @@ func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, col, owner)
 	decl_node["var_ann"] = {"name": vname, "types": members, "raw": str(spec.get("raw", "")), "line": line}
+	if (spec as Dictionary).has("tree"):
+		(decl_node["var_ann"] as Dictionary)["tree"] = (spec as Dictionary).get("tree", {})
 
 
 ## Marks a VAR_DECL/CONST_DECL node (@var allowed in any position).

@@ -535,6 +535,15 @@ Declares or redefines a variable type. It takes a name and a type
 constant declaration the name must equal the declared one; anywhere
 inside a function body it redefines the type of a visible variable
 (locals, parameters and members). Never before function parameters.
+Types may nest with brackets
+(`# @var myvar int|tuple[int]|Dictionary[String|int,tuple[*,float]]`):
+`|` splits at the current bracket level, `,` splits generic
+arguments, whitespace is free, `*` is allowed inside brackets.
+Every name must resolve; applications of known `@tuple` types check
+arity and per-argument compatibility (see `@tuple`). Plain union arms
+still narrow the declared type one by one; anonymous `tuple[...]`
+reads as `Array` for narrowing. Full structural narrowing is future
+work (generics milestone).
 
 ```gdscript
 extends Node
@@ -614,7 +623,11 @@ Defines a fixed-shape tuple type: `# @tuple TupleName 5 int|string
 float|bool Object Variant *` — name, **mandatory** size, then exactly
 that many items. Items are `|`-unions of known names; `*` means
 dynamic (`any`), `variant` means unknown (normalized to `Variant`).
-Nested templates must exist (two-pass: definition order is free).
+Items may nest with brackets (`Dictionary[String,int]`,
+`Pair[int]`): spaces inside brackets are rejoined, every nested name
+must resolve, and applications of known `@tuple` items check arity
+and per-argument compatibility (`tuple_mismatch`). Nested templates
+must exist (two-pass: definition order is free).
 
 ```gdscript
 extends Node
@@ -789,7 +802,9 @@ green. `GODOT_BIN` overrides the engine path.
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
-  `test_tuple.gd` (`@tuple` rule), `test_struct.gd` (`@struct` rule),
+  `test_tuple.gd` (`@tuple` rule),
+  `test_type_expr.gd` (nested type-expression mini-parser + tuple
+  applications), `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
   `test_implements.gd` (`@implements` rule),
   `test_flow.gd` (flow member checks + guards),
