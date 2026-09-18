@@ -72,6 +72,14 @@ extends RefCounted
 ##   "param_unknown_type", "param_mismatch"). Parameters gain a
 ##   `param_ann` stamp.
 ##
+## Named type templates share user/ with classes (one global type
+## namespace) as kind-tagged JSONs: @tuple (fixed-shape arrays),
+## @struct (fixed-key dictionaries) and @interface (member blueprints
+## between @interface Name and @endinterface, single or multi-line).
+## Definitions live top-level only; duplicates and clashes error.
+## Tuples/structs verify literals, index/key access and members;
+## interfaces only define for now (conformance arrives with @implements).
+##
 ## The walk is scope-aware (locals and parameters shadow members) and
 ## threads an explicit owner ("", "Outer", "Outer.Inner") so later
 ## rules can grow flow analysis and type narrowing on top of it.
@@ -126,6 +134,10 @@ const ERR_STRUCT_MALFORMED := "struct_malformed"
 const ERR_STRUCT_UNKNOWN_TYPE := "struct_unknown_type"
 const ERR_STRUCT_CONFLICT := "struct_conflict"
 const ERR_STRUCT_MISMATCH := "struct_mismatch"
+const ERR_INTERFACE_MISPLACED := "interface_misplaced"
+const ERR_INTERFACE_MALFORMED := "interface_malformed"
+const ERR_INTERFACE_UNKNOWN_TYPE := "interface_unknown_type"
+const ERR_INTERFACE_CONFLICT := "interface_conflict"
 const ERR_MISSING_METHOD := "missing_method"
 const ERR_MISSING_MEMBER := "missing_member"
 
@@ -209,6 +221,9 @@ var _type_cache: Dictionary = {}
 var _tuples: Dictionary = {}
 ## @struct definitions, same two-pass split as tuples.
 var _structs: Dictionary = {}
+## @interface raw blocks: name -> [{words, line}]. Validated in
+## _resolve_interfaces before the walk.
+var _interfaces: Dictionary = {}
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -226,6 +241,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_type_cache = {}
 	_tuples = {}
 	_structs = {}
+	_interfaces = {}
 	_script_class = ""
 	_script_extends = ""
 	for child in ast.get("children", []):
@@ -247,9 +263,11 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_scan_header(ast)
 	_prescan_tuples(ast)
 	_prescan_structs(ast)
+	_prescan_interfaces(ast)
 	_scan_children(ast.get("children", []), "")
 	_resolve_tuples()
 	_resolve_structs()
+	_resolve_interfaces()
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
@@ -318,6 +336,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_struct(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_interface(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 
 
 # ------------------------------------------------------------- tag scan
@@ -1267,6 +1287,451 @@ func _mark_param_carrier(stmt_node: Dictionary, fn_node: Dictionary, owner: Stri
 	_apply_param_pairs(pairs, fn_node.get("params", []), _fn_display(fn_node), owner)
 
 
+# ------------------------------------------------------- @interface helpers
+
+func _find_interface(value: String) -> Dictionary:
+	return _find_tag(value, "interface")
+
+
+func _has_interface_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_interface(str(tok.get("value", "")))
+
+
+func _has_any_interface_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_interface_tag(c).is_empty():
+			return true
+	return false
+
+
+## Splits a comment token value into words (1+ whitespaces of any
+## kind), dropping pure-`#` words left by merged comment lines.
+static func _iface_words(value: String) -> Array:
+	var out: Array = []
+	for w in _split_words(value):
+		var word := str(w)
+		var hashes := true
+		for i in range(word.length()):
+			if word.unicode_at(i) != 35:
+				hashes = false
+				break
+		if word != "" and not hashes:
+			out.append(word)
+	return out
+
+
+## Pre-scan (before _scan): collects @interface raw blocks from
+## top-level standalone comments and top-level leadings. Each block is
+## {name, words, line}; missing @endinterface errors here.
+func _prescan_interfaces(ast: Dictionary) -> void:
+	for child in ast.get("children", []):
+		if not (child is Dictionary):
+			continue
+		if str((child as Dictionary).get("type", "")) == "TYPE_INFO":
+			_collect_interface_tok(child as Dictionary)
+			continue
+		for c in (child as Dictionary).get("leading_comments", []):
+			if c is Dictionary:
+				_collect_interface_tok(c)
+
+
+## Collects @interface blocks from one comment token. Several blocks
+## may share a token; stray @endinterface words are ignored.
+func _collect_interface_tok(tok: Dictionary) -> void:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return
+	var words := _iface_words(str(tok.get("value", "")))
+	var i := 0
+	while i < words.size():
+		if str(words[i]) != "@interface":
+			i += 1
+			continue
+		if i + 1 >= words.size():
+			_error(ERR_INTERFACE_MALFORMED, "@interface needs a name", int(tok.get("line", 0)), 0, "")
+			return
+		var iname := str(words[i + 1])
+		if not _is_type_name(iname):
+			_error(ERR_INTERFACE_MALFORMED, "@interface has an invalid name '" + iname + "'", int(tok.get("line", 0)), 0, "")
+			return
+		var j := i + 2
+		while j < words.size() and str(words[j]) != "@endinterface":
+			j += 1
+		if j >= words.size():
+			_error(ERR_INTERFACE_MALFORMED, "@interface '" + iname + "' is missing @endinterface", int(tok.get("line", 0)), 0, "")
+			return
+		var block := {"name": iname, "words": words.slice(i + 2, j), "line": int(tok.get("line", 0))}
+		if not _interfaces.has(iname):
+			_interfaces[iname] = {"resolved": false, "raws": [block]}
+		else:
+			((_interfaces[iname] as Dictionary).get("raws", []) as Array).append(block)
+		i = j + 1
+
+
+## Second pass (after _scan, before _walk): validates interface blocks
+## and writes their JSON files.
+func _resolve_interfaces() -> void:
+	_ensure_user_dir()
+	for iname in _interfaces.keys():
+		var entry: Dictionary = _interfaces[iname]
+		if bool(entry.get("resolved", false)):
+			continue
+		var raws: Array = entry.get("raws", [])
+		if raws.is_empty():
+			continue
+		var first: Dictionary = raws[0]
+		if raws.size() > 1:
+			_error(ERR_INTERFACE_CONFLICT, "@interface '" + iname + "' is defined more than once", int(first.get("line", 0)), 0, "")
+			continue
+		var clash := _iface_conflict(iname)
+		if clash != "":
+			_error(ERR_INTERFACE_CONFLICT, "@interface '" + iname + "' conflicts with " + clash, int(first.get("line", 0)), 0, "")
+			continue
+		var members := _parse_iface_members(first.get("words", []), int(first.get("line", 0)))
+		if members.is_empty() and not (first.get("words", []) as Array).is_empty():
+			continue
+		entry["resolved"] = true
+		entry["spec"] = {"ok": true, "name": iname, "members": members, "line": int(first.get("line", 0))}
+		_write_interface_file(iname)
+
+
+## Parses member words into [{kind, static, name, ...}]. Returns [] on
+## any error (each error reported inline). Empty word lists (empty
+## interfaces) yield [] cleanly. A lone `static` word prefixes the next
+## member (colon form `static:...` also accepted).
+func _parse_iface_members(words: Variant, line: int) -> Array:
+	var out: Array = []
+	if not (words is Array):
+		return out
+	var seen := {}
+	var pending_static := false
+	for w in words:
+		var word := str(w)
+		if word == "static":
+			pending_static = true
+			continue
+		var m := _parse_iface_member(word, line, pending_static)
+		pending_static = false
+		if m.is_empty():
+			return []
+		var key := str(m.get("kind", "")) + ":" + str(m.get("name", ""))
+		if seen.has(key):
+			_error(ERR_INTERFACE_MALFORMED, "@interface repeats member '" + str(m.get("name", "")) + "'", line, 0, "")
+			return []
+		seen[key] = true
+		out.append(m)
+	if pending_static:
+		_error(ERR_INTERFACE_MALFORMED, "@interface 'static' needs a member after it", line, 0, "")
+		return []
+	return out
+
+
+## Parses one member word: [static] kind:name[:rest] (`static` also
+## arrives as a separate word via pending_static). A trailing `:` with
+## nothing after it is always malformed (write nothing instead).
+## Returns {} + error on failure.
+func _parse_iface_member(word: String, line: int, pending_static: bool = false) -> Dictionary:
+	if word.ends_with(":"):
+		_error(ERR_INTERFACE_MALFORMED, "@interface member '" + word + "' has a trailing ':' with nothing after it", line, 0, "")
+		return {}
+	var body := word
+	var is_static := pending_static
+	if body == "static" or body.begins_with("static:"):
+		if body == "static":
+			_error(ERR_INTERFACE_MALFORMED, "@interface 'static' needs kind, name and body", line, 0, "")
+			return {}
+		is_static = true
+		body = body.substr(7)
+	var ci := body.find(":")
+	var kind := body
+	var rest := ""
+	if ci >= 0:
+		kind = body.substr(0, ci)
+		rest = body.substr(ci + 1)
+	if kind != "var" and kind != "func" and kind != "const" and kind != "enum" and kind != "signal":
+		_error(ERR_INTERFACE_MALFORMED, "@interface has an unknown member kind '" + kind + "'", line, 0, "")
+		return {}
+	if is_static and kind != "var" and kind != "func":
+		_error(ERR_INTERFACE_MALFORMED, "@interface only var and func can be static", line, 0, "")
+		return {}
+	if kind == "var" or kind == "const":
+		return _parse_iface_varconst(kind, is_static, rest, line)
+	if kind == "enum":
+		return _parse_iface_enum(rest, line)
+	if kind == "signal":
+		return _parse_iface_signal(rest, line)
+	return _parse_iface_func(rest, is_static, line)
+
+
+## var:name[:types] / const:name[:types]. Bare means any.
+func _parse_iface_varconst(kind: String, is_static: bool, rest: String, line: int) -> Dictionary:
+	if rest == "":
+		_error(ERR_INTERFACE_MALFORMED, "@interface " + kind + " needs a name", line, 0, "")
+		return {}
+	var np: Array = rest.split(":", true, 1)
+	var vname := str(np[0])
+	if not _is_type_name(vname):
+		_error(ERR_INTERFACE_MALFORMED, "@interface has an invalid name '" + vname + "'", line, 0, "")
+		return {}
+	if np.size() < 2:
+		return {"kind": kind, "static": is_static, "name": vname, "types": [], "any": true}
+	var spec := _parse_return_spec(str(np[1]), "@interface")
+	if not bool(spec.get("ok", false)):
+		_error(ERR_INTERFACE_MALFORMED, str(spec.get("error", "")), line, 0, "")
+		return {}
+	if bool(spec.get("void", false)):
+		_error(ERR_INTERFACE_MALFORMED, "@interface 'void' is not a valid member type", line, 0, "")
+		return {}
+	var types: Array = []
+	for m in spec.get("types", []):
+		var cm := _canon_type(str(m))
+		if cm == "":
+			_error(ERR_INTERFACE_UNKNOWN_TYPE, "@interface has unknown type '" + str(m) + "'", line, 0, "")
+			return {}
+		types.append(cm)
+	return {"kind": kind, "static": is_static, "name": vname, "types": types, "any": false}
+
+
+## enum:Name:m1,m2 (names only, at least one).
+func _parse_iface_enum(rest: String, line: int) -> Dictionary:
+	if rest == "":
+		_error(ERR_INTERFACE_MALFORMED, "@interface enum needs a name and members", line, 0, "")
+		return {}
+	var np: Array = rest.split(":", true, 1)
+	var ename := str(np[0])
+	if not _is_type_name(ename):
+		_error(ERR_INTERFACE_MALFORMED, "@interface has an invalid enum name '" + ename + "'", line, 0, "")
+		return {}
+	if np.size() < 2 or str(np[1]).strip_edges() == "":
+		_error(ERR_INTERFACE_MALFORMED, "@interface enum '" + ename + "' needs at least one member", line, 0, "")
+		return {}
+	var vals: Array = []
+	for v in str(np[1]).split(","):
+		var member := str(v).strip_edges()
+		if member == "" or not _is_type_name(member):
+			_error(ERR_INTERFACE_MALFORMED, "@interface enum '" + ename + "' has an invalid member '" + str(v) + "'", line, 0, "")
+			return {}
+		vals.append({"name": member, "value": null})
+	return {"kind": "enum", "static": false, "name": ename, "members": vals}
+
+
+## signal:name[:params] (no defaults, no varargs).
+func _parse_iface_signal(rest: String, line: int) -> Dictionary:
+	if rest == "":
+		_error(ERR_INTERFACE_MALFORMED, "@interface signal needs a name", line, 0, "")
+		return {}
+	var np: Array = rest.split(":", true, 1)
+	var sname := str(np[0])
+	if not _is_type_name(sname):
+		_error(ERR_INTERFACE_MALFORMED, "@interface has an invalid signal name '" + sname + "'", line, 0, "")
+		return {}
+	var params: Array = []
+	if np.size() > 1:
+		if ";" in str(np[1]) or "..." in str(np[1]):
+			_error(ERR_INTERFACE_MALFORMED, "@interface signals cannot have default or vararg parameters", line, 0, "")
+			return {}
+		params = _parse_iface_params(str(np[1]), line)
+		if params.is_empty():
+			return {}
+	return {"kind": "signal", "static": false, "name": sname, "params": params}
+
+
+## func[:name][:return[:params]]: bare name means any-return without
+## params; empty return or param sections are invalid (write void).
+func _parse_iface_func(rest: String, is_static: bool, line: int) -> Dictionary:
+	if rest == "":
+		_error(ERR_INTERFACE_MALFORMED, "@interface func needs a name", line, 0, "")
+		return {}
+	var np: Array = rest.split(":", true, 1)
+	var fname := str(np[0])
+	if not _is_type_name(fname):
+		_error(ERR_INTERFACE_MALFORMED, "@interface has an invalid function name '" + fname + "'", line, 0, "")
+		return {}
+	if np.size() < 2:
+		return {"kind": "func", "static": is_static, "name": fname, "returns": "any", "params": [], "vararg": false}
+	var tail := str(np[1])
+	if tail == "":
+		_error(ERR_INTERFACE_MALFORMED, "@interface func '" + fname + "' with ':' needs a return type (write void)", line, 0, "")
+		return {}
+	var rp: Array = tail.split(":", true, 1)
+	var returns := "any"
+	var ptext := ""
+	if rp.size() > 1:
+		if str(rp[1]).strip_edges() == "":
+			_error(ERR_INTERFACE_MALFORMED, "@interface func '" + fname + "' with ':' needs parameters (or drop the colon)", line, 0, "")
+			return {}
+		ptext = str(rp[1])
+	var rspec := _parse_return_spec(str(rp[0]), "@interface")
+	if not bool(rspec.get("ok", false)):
+		_error(ERR_INTERFACE_MALFORMED, str(rspec.get("error", "")), line, 0, "")
+		return {}
+	if not bool(rspec.get("void", false)):
+		var rtypes: Array = []
+		for m in rspec.get("types", []):
+			var cm := _canon_type(str(m))
+			if cm == "":
+				_error(ERR_INTERFACE_UNKNOWN_TYPE, "@interface has unknown type '" + str(m) + "'", line, 0, "")
+				return {}
+			rtypes.append(cm)
+		returns = "|".join(rtypes)
+	var params: Array = []
+	if ptext != "":
+		params = _parse_iface_params(ptext, line)
+		if params.is_empty():
+			return {}
+	var vararg := false
+	if not params.is_empty() and bool((params[params.size() - 1] as Dictionary).get("is_vararg", false)):
+		vararg = true
+	return {"kind": "func", "static": is_static, "name": fname, "returns": returns, "params": params, "vararg": vararg}
+
+
+## Parses a param list "name:type,..." with an optional ";defaults"
+## section (one semicolon max). `...`-prefixed params must be last.
+## Empty entries are malformed. Returns [] on error (reported inline);
+## callers only invoke it with non-empty text, so [] means failure.
+func _parse_iface_params(text: String, line: int) -> Array:
+	var out: Array = []
+	var parts: Array = text.split(";", true)
+	if parts.size() > 2:
+		_error(ERR_INTERFACE_MALFORMED, "@interface params take at most one ';' defaults section", line, 0, "")
+		return []
+	var sections := [false, true]
+	for si in range(parts.size()):
+		var chunk := str(parts[si]).strip_edges()
+		if chunk == "":
+			continue
+		for entry in chunk.split(","):
+			var raw := str(entry).strip_edges()
+			if raw == "":
+				_error(ERR_INTERFACE_MALFORMED, "@interface has an empty parameter", line, 0, "")
+				return []
+			var is_var := false
+			if raw.begins_with("..."):
+				is_var = true
+				raw = raw.substr(3).strip_edges()
+			var pp: Array = raw.split(":", true, 1)
+			var pname := str(pp[0])
+			if not _is_type_name(pname):
+				_error(ERR_INTERFACE_MALFORMED, "@interface has an invalid parameter name '" + pname + "'", line, 0, "")
+				return []
+			var ptypes: Array = []
+			var pany := false
+			if pp.size() < 2 or str(pp[1]).strip_edges() == "":
+				if pp.size() > 1:
+					_error(ERR_INTERFACE_MALFORMED, "@interface param '" + pname + "' needs a type after ':' (or nothing for dynamic)", line, 0, "")
+					return []
+				pany = true
+			else:
+				var pspec := _parse_return_spec(str(pp[1]), "@interface")
+				if not bool(pspec.get("ok", false)):
+					_error(ERR_INTERFACE_MALFORMED, str(pspec.get("error", "")), line, 0, "")
+					return []
+				if bool(pspec.get("void", false)):
+					_error(ERR_INTERFACE_MALFORMED, "@interface 'void' is not a valid parameter type", line, 0, "")
+					return []
+				for m in pspec.get("types", []):
+					var cm := _canon_type(str(m))
+					if cm == "":
+						_error(ERR_INTERFACE_UNKNOWN_TYPE, "@interface has unknown type '" + str(m) + "'", line, 0, "")
+						return []
+					ptypes.append(cm)
+			out.append({"name": pname, "type": "|".join(ptypes), "types": ptypes, "any": pany, "has_default": bool(sections[si]), "default": null, "is_vararg": is_var})
+	for i in range(out.size()):
+		if bool((out[i] as Dictionary).get("is_vararg", false)) and i < out.size() - 1:
+			_error(ERR_INTERFACE_MALFORMED, "@interface vararg must be the last parameter", line, 0, "")
+			return []
+	return out
+
+
+## Why an interface name cannot be defined ("" when free). Same rules
+## as tuples/structs: script members/classes, engine/builtin types and
+## existing non-interface files all conflict.
+func _iface_conflict(tname: String) -> String:
+	for key in _members.keys():
+		var table: Dictionary = _members[key]
+		if table.has(tname):
+			return "script member '" + tname + "' (" + str((table[tname] as Dictionary).get("kind", "")) + ")"
+	if _members.has(tname):
+		return "script class '" + tname + "'"
+	if tname == _script_class and tname != "":
+		return "the script class name"
+	if _type_file_exists(tname):
+		var info := _read_json(_write_base + "/user/" + tname + ".json")
+		if not info.is_empty() and str(info.get("kind", "")) == "interface":
+			return ""
+		return "an existing type '" + tname + "'"
+	return ""
+
+
+## Writes one user/<Name>.json per resolved interface, reusing the
+## class entry shapes (methods split static/instance, fields with
+## flags, signals, enums with null values, constants with nulls).
+func _write_interface_file(tname: String) -> void:
+	var entry: Dictionary = _interfaces[tname]
+	var spec: Dictionary = entry.get("spec", {})
+	var fields: Array = []
+	var static_methods: Array = []
+	var instance_methods: Array = []
+	var signals: Array = []
+	var enums: Array = []
+	var constants: Array = []
+	for m in spec.get("members", []):
+		var md: Dictionary = m
+		var kind := str(md.get("kind", ""))
+		if kind == "var":
+			var ftypes: Array = (md.get("types", []) as Array).duplicate()
+			var ftype := ""
+			if not bool(md.get("any", false)):
+				ftype = "|".join(ftypes)
+			fields.append({"name": str(md.get("name", "")), "type": ftype, "types": ftypes, "any": bool(md.get("any", "")), "is_static": bool(md.get("static", false)), "is_exported": false, "is_onready": false, "default": null})
+		elif kind == "func":
+			var params: Array = []
+			for p in (md.get("params", []) as Array):
+				var pd: Dictionary = p
+				params.append({"name": str(pd.get("name", "")), "type": str(pd.get("type", "")), "types": (pd.get("types", []) as Array).duplicate(), "any": bool(pd.get("any", false)), "has_default": bool(pd.get("has_default", false)), "default": null, "is_vararg": bool(pd.get("is_vararg", false))})
+			var ment := {"name": str(md.get("name", "")), "returns": str(md.get("returns", "")), "is_vararg": bool(md.get("vararg", false)), "is_const": false, "is_virtual": false, "params": params, "static": bool(md.get("static", false))}
+			if bool(md.get("static", false)):
+				static_methods.append(ment)
+			else:
+				instance_methods.append(ment)
+		elif kind == "signal":
+			var sparams: Array = []
+			for p in (md.get("params", []) as Array):
+				var pd: Dictionary = p
+				sparams.append({"name": str(pd.get("name", "")), "type": str(pd.get("type", "")), "types": (pd.get("types", []) as Array).duplicate(), "any": bool(pd.get("any", false)), "has_default": false, "default": null, "is_vararg": false})
+			signals.append({"name": str(md.get("name", "")), "params": sparams})
+		elif kind == "enum":
+			var vals: Array = []
+			for v in (md.get("members", []) as Array):
+				vals.append({"name": str((v as Dictionary).get("name", "")), "value": null})
+			enums.append({"name": str(md.get("name", "")), "is_bitfield": false, "values": vals})
+		elif kind == "const":
+			var ctypes: Array = (md.get("types", []) as Array).duplicate()
+			var ctype := ""
+			if not bool(md.get("any", false)):
+				ctype = "|".join(ctypes)
+			constants.append({"name": str(md.get("name", "")), "value": null, "type": ctype, "types": ctypes, "any": bool(md.get("any", false))})
+	var info := {
+		"name": tname,
+		"kind": "interface",
+		"class_name": "",
+		"resource_path": _script_resource_path,
+		"parent": "",
+		"inheritance_chain": [tname],
+		"size": (spec.get("members", []) as Array).size(),
+		"enums": enums,
+		"constants": constants,
+		"signals": signals,
+		"fields": fields,
+		"static_methods": static_methods,
+		"instance_methods": instance_methods,
+		"inner_classes": [],
+	}
+	_write_json(_write_base + "/user/" + tname + ".json", info)
+	_written.append(_write_base + "/user/" + tname + ".json")
+
+
 # ------------------------------------------------------- @var helpers
 
 ## Single type name behind a vartype TYPE_REF, or "" when absent or
@@ -1536,6 +2001,8 @@ func _type_known(tname: String) -> bool:
 	if _tuples.has(tname):
 		return true
 	if _structs.has(tname):
+		return true
+	if _interfaces.has(tname):
 		return true
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
@@ -2002,6 +2469,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -2024,6 +2493,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "PARAM":
 		var ptag = _leading_tag(d)
@@ -2041,6 +2512,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_interface_tag(d):
+			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "LAMBDA" or t == "ACCESSOR":
 		if _has_any_deprecated_tag(d):
@@ -2070,6 +2543,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_interface_tag(d):
+			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
 		_scan(d.get("params", []), owner, false)
 		_scan(d.get("body", null), owner, false)
 		_scan(d.get("detail", null), owner, false)
@@ -2086,6 +2562,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_struct_tag(d).is_empty():
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not member_pos and not _has_interface_tag(d).is_empty():
+			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if _has_any_tuple_tag(d):
 		if not (member_pos and owner == ""):
@@ -2097,6 +2575,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		# Top level: already collected by _prescan_structs; falls through.
+	if _has_any_interface_tag(d):
+		if not (member_pos and owner == ""):
+			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
+		# Top level: already collected by _prescan_interfaces; falls through.
 	if _has_any_param_tag(d):
 		if t == "EXPR_STMT":
 			var _pe: Variant = d.get("expr", null)
@@ -2260,6 +2743,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_interface_tag(child):
+					_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				_scan_class_body(child, full)
 			elif child is Dictionary and str((child as Dictionary).get("type", "")) in DECL_TYPES:
 				_mark_decl(child, full)
@@ -2284,6 +2769,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_interface_tag(child):
+					_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				elif _has_any_return_tag(child):
 					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 						_mark_return_stmt(child, (child as Dictionary).get("value", null), full)

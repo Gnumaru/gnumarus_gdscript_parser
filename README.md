@@ -645,6 +645,39 @@ func f():
   tuple names without misuse checking; no subscript continuation
   (`t[0].foo()` skips the rest); `Tuple.new()` silently skipped.
 
+### `@interface`
+
+Declares an interface blueprint between `@interface Name` and a
+mandatory `@endinterface`, single or multi-line (members split on any
+whitespace; internals use `:`, `,` and `;`). Members: `var:name[:types]`
+and `const:name[:types]` (bare means any), `func:name` (returns any, no
+params), `func:name:Return[:params]`, `signal:name[:params]`,
+`enum:Name:m1,m2` (names only). Only `var`/`func` take a leading
+`static`. Params are `name:type` (bare means any) separated by `,`;
+`;` starts the default-valued section (it may open the list);
+`...`-prefixed params must be last. Signals take no defaults or
+varargs. Funcs with `:` but empty return/params are invalid (write
+`void`).
+
+```gdscript
+extends Node
+
+# @interface Drawable
+# var:visible:bool
+# func:draw:void:canvas:CanvasItem
+# signal:redrawn
+# @endinterface
+var d: Drawable     # OK: known name; assignments stay lenient
+                    # until @implements checks conformance
+```
+
+- Definitions live top-level only; duplicates and clashes error
+  (`interface_conflict`); bad shapes error (`interface_malformed`,
+  `interface_unknown_type`). Written as `kind: "interface"` JSONs
+  reusing class entry shapes (methods split static/instance, enum
+  values and const values null). No use checking yet: names resolve,
+  assignments pass, member verification skips interface types.
+
 ### `@struct`
 
 Defines a fixed-shape struct type: `# @struct Point 2 x:int y:int`
@@ -712,6 +745,7 @@ green. `GODOT_BIN` overrides the engine path.
   (`@private` nested-family rule), `test_return.gd` (`@return` rule),
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
   `test_tuple.gd` (`@tuple` rule), `test_struct.gd` (`@struct` rule),
+  `test_interface.gd` (`@interface` rule),
   `test_flow.gd` (flow member checks + guards),
   `test_reuse.gd` (same instance parsing twice must give independent
   results).

@@ -87,6 +87,8 @@ var _script_types: Dictionary = {}
 var _tuple_names: Dictionary = {}
 ## @struct names, same split as tuples.
 var _struct_names: Dictionary = {}
+## @interface names, same split (conformance arrives with @implements).
+var _interface_names: Dictionary = {}
 var _script_scope: Dictionary = {}
 var _script_infos: Dictionary = {}
 var _written: Array = []
@@ -104,6 +106,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_script_types = {}
 	_tuple_names = {}
 	_struct_names = {}
+	_interface_names = {}
 	var anchor = _dumper_anchor_dir()
 	_project_root = find_project_root(anchor)
 	if _project_root == "":
@@ -308,6 +311,7 @@ func _collect_script(ast: Dictionary) -> void:
 		_register_top(child)
 	_collect_tuple_names(ast)
 	_collect_struct_names(ast)
+	_collect_interface_names(ast)
 	if _script_class != "":
 		_script_types[_script_class] = {"kind": "class", "full": _script_class}
 	_build_script_infos(ast)
@@ -355,6 +359,40 @@ func _register_struct_node(tok: Dictionary) -> void:
 		return
 	for w in _tuple_tag_names(str(tok.get("value", "")), "struct"):
 		_struct_names[w] = true
+
+
+## Collects @interface names (same split as tuples/structs).
+func _collect_interface_names(ast: Dictionary) -> void:
+	for child in ast.get("children", []):
+		if not (child is Dictionary):
+			continue
+		if str((child as Dictionary).get("type", "")) == "TYPE_INFO":
+			_register_interface_node(child)
+			continue
+		for c in (child as Dictionary).get("leading_comments", []):
+			if c is Dictionary:
+				_register_interface_node(c)
+
+
+## Registers every @interface name in one comment value. Blocks span
+## lines, so only the header word counts (member parsing is
+## analyzer-side).
+func _register_interface_node(tok: Dictionary) -> void:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return
+	var started := false
+	for line in str(tok.get("value", "")).split("\n"):
+		var clean := line.strip_edges().replace("\t", " ")
+		while clean.begins_with("#"):
+			clean = clean.substr(1).strip_edges()
+		if clean == "" or started:
+			continue
+		var words := clean.split(" ", false)
+		if words.is_empty() or str(words[0]) != "@interface":
+			continue
+		started = true
+		if words.size() > 1 and _is_tuple_name(str(words[1])):
+			_interface_names[str(words[1])] = true
 
 
 ## First words after each @tag in a comment value (one line each).
@@ -973,6 +1011,8 @@ func _resolve_type(name: String, line: int, column: int) -> Dictionary:
 		return {"name": name, "kind": "tuple"}
 	if _struct_names.has(name):
 		return {"name": name, "kind": "struct"}
+	if _interface_names.has(name):
+		return {"name": name, "kind": "interface"}
 	if _type_cache.has(name):
 		return _type_cache[name]
 	if _type_miss.has(name):
@@ -2073,7 +2113,7 @@ func _check_assignable(declared: String, value: String, line: int, column: int) 
 		return
 	var dkind := _type_kind_of(declared)
 	var vkind := _type_kind_of(value)
-	if dkind in ["tuple", "struct"] or vkind in ["tuple", "struct"]:
+	if dkind in ["tuple", "struct", "interface"] or vkind in ["tuple", "struct", "interface"]:
 		_check_tuple_assignable(declared, dkind, value, vkind, line, column)
 		return
 	if _is_enum_type(declared) or _is_enum_type(value):
@@ -2097,8 +2137,9 @@ func _check_assignable(declared: String, value: String, line: int, column: int) 
 	_error(KIND_ASSIGN, "cannot assign '" + value + "' to '" + declared + "'", line, column)
 
 
-## Kind of a type name for nominal compatibility: "tuple"/"struct"
-## for template names, the script/file kind otherwise, "" when unknown.
+## Kind of a type name for nominal compatibility: "tuple"/"struct"/
+## "interface" for template names, the script/file kind otherwise, ""
+## when unknown.
 func _type_kind_of(name: String) -> String:
 	if name == "":
 		return ""
@@ -2106,6 +2147,8 @@ func _type_kind_of(name: String) -> String:
 		return "tuple"
 	if _struct_names.has(name):
 		return "struct"
+	if _interface_names.has(name):
+		return "interface"
 	if _script_types.has(name):
 		return str((_script_types[name] as Dictionary).get("kind", ""))
 	var info := _resolve_type_quiet(name)
@@ -2123,6 +2166,8 @@ func _check_tuple_assignable(declared: String, dkind: String, value: String, vki
 
 
 func _check_nominal_assignable(declared: String, dkind: String, value: String, vkind: String, bases: Dictionary, line: int, column: int) -> void:
+	if dkind == "interface" or vkind == "interface":
+		return
 	if dkind == vkind and (dkind == "tuple" or dkind == "struct"):
 		if declared != value:
 			_error(KIND_ASSIGN, "cannot assign '" + value + "' to '" + declared + "' (different " + dkind + " types)", line, column)
