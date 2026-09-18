@@ -70,7 +70,7 @@ func _a_use(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\n# @alias answer int @endalias\n# @param p answer\nfunc f(p):\n\tpass\n", "res://tests/tmp_ali_u03.gd")), "param use clean")
 	h.check(_clean(h.analyze_text("extends Node\n# @alias answer int @endalias\n# @return answer\nfunc f():\n\treturn 1\n", "res://tests/tmp_ali_u04.gd")), "return use clean")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple TxAP 2 int String\n# @alias bad TxAP[int] @endalias\n", "res://tests/tmp_ali_u05.gd"), "alias_mismatch", "expects 2 type arguments"), "tuple arity in def mismatches")
-	h.check(_clean(h.analyze_text("extends Node\n# @tuple TxAQ 2 int String\n# @alias good TxAQ[int,String] @endalias\n# @var p good\nvar p: TxAQ\n", "res://tests/tmp_ali_u06.gd")), "applied alias clean")
+	h.check(_clean(h.analyze_text("extends Node\n# @tuple TxAQ 2 int String\n# @alias good TxAQ[int,String] @endalias\n# @var p good\nvar p: Array\n", "res://tests/tmp_ali_u06.gd")), "applied alias clean")
 
 
 func _a_narrow(h) -> void:

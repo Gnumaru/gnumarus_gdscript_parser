@@ -74,8 +74,8 @@ func _t_var(h) -> void:
 	h.check(_has_err(h.analyze_text("extends Node\n# @var x Nope[int]\nvar x: Array\n", "res://tests/tmp_tx_v04.gd"), "var_unknown_type", "Nope"), "unknown head errors")
 	h.check(_has_err(h.analyze_text("extends Node\n# @var x int|tuple[int\nvar x: Array\n", "res://tests/tmp_tx_v05.gd"), "var_malformed", "missing ']'"), "unbalanced brackets malformed")
 	h.check(_has_err(h.analyze_text("extends Node\n# @var x void|int\nvar x: Variant\n", "res://tests/tmp_tx_v06.gd"), "var_malformed", "cannot be combined"), "void union still rejected")
-	h.check(_clean(h.analyze_text("extends Node\n# @tuple TxPair 2 int String\n# @var p TxPair[int,String]\nvar p: TxPair\n", "res://tests/tmp_tx_v07.gd")), "applied tuple clean")
-	h.check(_has_err(h.analyze_text("extends Node\n# @tuple TxPair2 2 int String\n# @var p TxPair2[int]\nvar p: TxPair2\n", "res://tests/tmp_tx_v08.gd"), "var_mismatch", "expects 2 type arguments, got 1"), "tuple arity mismatches")
+	h.check(_clean(h.analyze_text("extends Node\n# @tuple TxPair 2 int String\n# @var p TxPair[int,String]\nvar p: Array\n", "res://tests/tmp_tx_v07.gd")), "applied tuple clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @tuple TxPair2 2 int String\n# @var p TxPair2[int]\nvar p: Array\n", "res://tests/tmp_tx_v08.gd"), "var_mismatch", "expects 2 type arguments, got 1"), "tuple arity mismatches")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple TxPair3 2 int String\n# @var p TxPair3[int,int]\nvar p: TxPair3\n", "res://tests/tmp_tx_v09.gd"), "var_mismatch", "argument 1 expects 'String'"), "tuple arg compat mismatches")
 	h.check(_has_err(h.analyze_text("extends Node\n# @var x tuple[Nope]\nvar x: Array\n", "res://tests/tmp_tx_v10.gd"), "var_unknown_type", "Nope"), "anon tuple leaf validated")
 

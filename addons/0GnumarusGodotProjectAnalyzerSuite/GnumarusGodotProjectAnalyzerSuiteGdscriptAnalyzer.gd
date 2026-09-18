@@ -120,6 +120,7 @@ const ERR_VAR_MALFORMED := "var_malformed"
 const ERR_VAR_UNKNOWN := "var_unknown"
 const ERR_VAR_UNKNOWN_TYPE := "var_unknown_type"
 const ERR_VAR_MISMATCH := "var_mismatch"
+const ERR_VIRTUAL_VARTYPE := "virtual_vartype"
 const ERR_PARAM_MISPLACED := "param_misplaced"
 const ERR_PARAM_MALFORMED := "param_malformed"
 const ERR_PARAM_UNKNOWN := "param_unknown"
@@ -1085,6 +1086,27 @@ func _check_tuple_value(tname: String, value: Variant, line: int, owner: String)
 	_check_tuple_elements(tname, def, lit.get("elements", []), line, owner)
 
 
+## Literal value checks against every nominal tuple/struct type in
+## play: the declared vartype plus @var members naming tuples or
+## structs (deduped). Keeps literal validation working under the
+## @var + Array/Dictionary pattern; each checker no-ops on misses.
+func _check_nominal_values(d: Dictionary, value: Variant, line: int, owner: String) -> void:
+	var seen := {}
+	var vt := _vartype_name(d)
+	if vt != "":
+		seen[vt] = true
+		_check_tuple_value(vt, value, line, owner)
+		_check_struct_value(vt, value, line, owner)
+	var ann: Dictionary = d.get("var_ann", {})
+	for m in (ann.get("types", []) as Array):
+		var ms := str(m)
+		if ms == "" or seen.has(ms):
+			continue
+		seen[ms] = true
+		_check_tuple_value(ms, value, line, owner)
+		_check_struct_value(ms, value, line, owner)
+
+
 ## Element-wise check of a literal element list against a definition.
 func _check_tuple_elements(tname: String, def: Dictionary, elems: Array, line: int, owner: String) -> void:
 	var items: Array = def.get("items", [])
@@ -1569,7 +1591,8 @@ func _tree_top_heads(tree: Dictionary) -> Array:
 
 ## Post-resolve pass: alias members queued at attach narrow against
 ## the declared type through their expanded heads.
-func _check_pending_alias_narrows() -> void:	for pen in _pending_alias_narrows:
+func _check_pending_alias_narrows() -> void:
+	for pen in _pending_alias_narrows:
 		if not (pen is Dictionary):
 			continue
 		var pd: Dictionary = pen
@@ -1583,11 +1606,12 @@ func _check_pending_alias_narrows() -> void:	for pen in _pending_alias_narrows:
 			continue
 		for h in _tree_top_heads(exp.get("node", {})):
 			var hs := str(h)
-			if hs != ref and not _derives_from(hs, ref):
-				if str(pd.get("pkind", "")) == "param":
-					_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + hs + "' (from alias '" + member + "') for parameter '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), 0, str(pd.get("owner", "")))
-				else:
-					_error(ERR_VAR_MISMATCH, "cannot use @var type '" + hs + "' (from alias '" + member + "') for variable '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
+			if _nominal_compat(hs, ref):
+				continue
+			if str(pd.get("pkind", "")) == "param":
+				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + hs + "' (from alias '" + member + "') for parameter '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), 0, str(pd.get("owner", "")))
+			else:
+				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + hs + "' (from alias '" + member + "') for variable '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
 
 
 # ----------------------------------------------------- @template helpers
@@ -2490,7 +2514,7 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 			if _aliases.has(str(m)) or not _alias_def(str(m)).is_empty():
 				_pending_alias_narrows.append({"member": str(m), "ref": ref, "label": str(pair.get("name", "")), "line": line, "col": 0, "owner": owner, "pkind": "param"})
 				continue
-			if str(m) != ref and not _derives_from(str(m), ref):
+			if not _nominal_compat(str(m), ref):
 				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + str(m) + "' for parameter '" + str(pair.get("name", "")) + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
 	pnode["param_ann"] = {"name": str(pair.get("name", "")), "types": members, "raw": str(pair.get("raw", "")), "line": line}
 	if (pair as Dictionary).has("tree"):
@@ -4434,6 +4458,85 @@ func _derives_from(member: String, declared: String) -> bool:
 	return _script_derives(member, declared)
 
 
+## True for a @tuple name (declared or on disk). Presence-based, so it
+## works before _resolve_tuples (attach-time narrowing needs it).
+func _is_tuple_name(nm: String) -> bool:
+	if nm != "" and _tuples.has(nm):
+		return true
+	var info := _type_info(nm)
+	return not info.is_empty() and str(info.get("kind", "")) == "tuple"
+
+
+## True for a @struct name (declared or on disk). Same order-free deal.
+func _is_struct_name(nm: String) -> bool:
+	if nm != "" and _structs.has(nm):
+		return true
+	var info := _type_info(nm)
+	return not info.is_empty() and str(info.get("kind", "")) == "struct"
+
+
+## True for an @alias name (declared or on disk). Aliases never work
+## as vartypes either (semantic resolves their JSON, so without this
+## the misuse would pass silently).
+func _is_alias_name(nm: String) -> bool:
+	if nm != "" and _aliases.has(nm):
+		return true
+	var info := _type_info(nm)
+	return not info.is_empty() and str(info.get("kind", "")) == "alias"
+
+
+## True when a name is virtual (tuple/struct/alias): annotation-only
+## types that can never appear as a declared GDScript type.
+func _is_virtual_name(nm: String) -> bool:
+	return _is_tuple_name(nm) or _is_struct_name(nm) or _is_alias_name(nm)
+
+
+## Head type name of a vartype (before any brackets), "" when absent
+## or not a plain identifier (dotted paths stay lenient, like today).
+static func _vartype_head(node: Dictionary, key := "vartype") -> String:
+	var vt: Variant = node.get(key, null)
+	if not (vt is Dictionary):
+		return ""
+	var text := ""
+	for t in (vt as Dictionary).get("tokens", []):
+		if t is Dictionary:
+			text += str((t as Dictionary).get("value", ""))
+	text = text.strip_edges()
+	var bi := text.find("[")
+	if bi >= 0:
+		text = text.substr(0, bi).strip_edges()
+	if text == "" or not _is_type_name(text):
+		return ""
+	return text
+
+
+## Flags virtual types used as declared types (vartypes and `->`
+## arrows): tuples, structs and aliases only refine Array/Dictionary/
+## Variant through @var/@param/@return. Interfaces stay lenient
+## (documented asymmetry: their README section blesses vartype use).
+func _mark_virtual_vartype(node: Dictionary, owner: String) -> void:
+	var head := _vartype_head(node)
+	if head != "" and _is_virtual_name(head):
+		_error(ERR_VIRTUAL_VARTYPE, "virtual type '" + head + "' cannot be used as a declared type (refine Array/Dictionary/Variant with @var/@param/@return instead)", int(node.get("line", 0)), int(node.get("column", 0)), owner)
+	var rhead := _vartype_head(node, "return_type")
+	if rhead != "" and _is_virtual_name(rhead):
+		_error(ERR_VIRTUAL_VARTYPE, "virtual type '" + rhead + "' cannot be used as a declared type (refine Array/Dictionary/Variant with @var/@param/@return instead)", int(node.get("line", 0)), int(node.get("column", 0)), owner)
+
+
+## True when an annotation member fits a declared reference: equal,
+## derived, or a nominal tuple/struct against its Array/Dictionary
+## root (tuples ARE fixed-shape arrays, structs ARE fixed-key
+## dictionaries, so they narrow those roots).
+func _nominal_compat(member: String, ref: String) -> bool:
+	if member == ref or _derives_from(member, ref):
+		return true
+	if ref == "Array" and _is_tuple_name(member):
+		return true
+	if ref == "Dictionary" and _is_struct_name(member):
+		return true
+	return false
+
+
 func _script_derives(child: String, ancestor: String) -> bool:
 	var key := _resolve_private_owner(child, "")
 	var seen := {}
@@ -4536,7 +4639,7 @@ func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is
 			if _aliases.has(str(m)) or not _alias_def(str(m)).is_empty():
 				_pending_alias_narrows.append({"member": str(m), "ref": ref, "label": vname, "line": line, "col": col, "owner": owner, "pkind": "var"})
 				continue
-			if str(m) != ref and not _derives_from(str(m), ref):
+			if not _nominal_compat(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, col, owner)
 	decl_node["var_ann"] = {"name": vname, "types": members, "raw": str(spec.get("raw", "")), "line": line}
 	if (spec as Dictionary).has("tree"):
@@ -4663,7 +4766,7 @@ func _check_free_var(spec: Dictionary, scope: Dictionary, owner: String, fn_node
 		ref = _var_reference(tnode, bool(target.get("is_const", false)))
 	if ref != "" and ref != "Variant" and ref != "dynamic":
 		for m in members:
-			if str(m) != ref and not _derives_from(str(m), ref):
+			if not _nominal_compat(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
 
 
@@ -4799,7 +4902,7 @@ func _check_return_ann(fn_node: Variant, owner: String) -> void:
 							continue
 				atypes.append(str(m))
 			for m in atypes:
-				if str(m) != arrow and not _derives_from(str(m), arrow):
+				if not _nominal_compat(str(m), arrow):
 					_error(ERR_RETURN_MISMATCH, "cannot use @return '" + str(m) + "' with '-> " + arrow + "' on function " + disp + " ('" + str(m) + "' is neither '" + arrow + "' nor a subclass of it)", int(fn.get("line", 0)), int(fn.get("column", 0)), owner)
 	var rets := _collect_returns(fn.get("body", null))
 	if ann_void:
@@ -4867,6 +4970,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if t == "FUNC_DECL":
 			_mark_return_func(d, owner)
 			_mark_vartype_on(d.get("return_type", null), d, owner)
+			_mark_virtual_vartype(d, owner)
 		elif _has_any_return_tag(d):
 			if t == "VAR_DECL" or t == "CONST_DECL":
 				_mark_return_stmt(d, d.get("value", null), owner)
@@ -4875,6 +4979,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if t == "VAR_DECL" or t == "CONST_DECL":
 			_mark_var_decl(d, owner)
 			_mark_vartype(d, owner)
+			_mark_virtual_vartype(d, owner)
 		elif _has_any_var_tag(d):
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "FUNC_DECL":
@@ -4947,6 +5052,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if not ptag.is_empty():
 			_error(ERR_DEPRECATED_UNSUPPORTED, "@deprecated on function parameters is not supported yet", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		_mark_vartype(d, owner)
+		_mark_virtual_vartype(d, owner)
 		if _has_any_private_tag(d):
 			_error(ERR_PRIVATE_MISPLACED, "@private must precede a member declaration (variable, function, class, enum, constant or signal) inside a class body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_return_tag(d):
@@ -4971,6 +5077,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "LAMBDA" or t == "ACCESSOR":
+		if t == "LAMBDA":
+			_mark_virtual_vartype(d, owner)
 		if _has_any_deprecated_tag(d):
 			_error(ERR_DEPRECATED_MISPLACED, "@deprecated must precede a member declaration (variable, function, class, enum, constant or signal)", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
@@ -5220,6 +5328,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 	var base = _extends_text(node)
 	if base != "":
 		_class_extends[full] = base
+		if _is_type_name(base) and _is_virtual_name(base):
+			_error(ERR_VIRTUAL_VARTYPE, "virtual type '" + base + "' cannot be used as a base class (tuples, structs and aliases only refine values through @var/@param/@return)", int(node.get("line", 0)), int(node.get("column", 0)), owner)
 	_record_extends_args(full, node, owner)
 	var body: Variant = node.get("body", null)
 	if body is Dictionary:
@@ -5254,11 +5364,13 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 				if str((child as Dictionary).get("type", "")) == "FUNC_DECL":
 					_mark_return_func(child, full)
 					_mark_vartype_on((child as Dictionary).get("return_type", null), child, full)
+					_mark_virtual_vartype(child, full)
 					_mark_param_carrier(child, child, full)
 					_scan((child as Dictionary).get("body", null), full)
 				if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 					_mark_var_decl(child, full)
 					_mark_vartype(child, full)
+					_mark_virtual_vartype(child, full)
 				elif _has_any_var_tag(child):
 					_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if str((child as Dictionary).get("type", "")) != "FUNC_DECL" and _has_any_param_tag(child):
@@ -5408,8 +5520,7 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 		_scope_add(scope, str(d.get("name", "")), "local")
 		_check_return_ann(d.get("value", null), owner)
 		_check_value_lambda(d.get("value", null), scope, owner)
-		_check_tuple_value(_vartype_name(d), d.get("value", null), int(d.get("line", 0)), owner)
-		_check_struct_value(_vartype_name(d), d.get("value", null), int(d.get("line", 0)), owner)
+		_check_nominal_values(d, d.get("value", null), int(d.get("line", 0)), owner)
 		var acc: Variant = d.get("accessors", null)
 		if acc is Dictionary:
 			_walk(acc, scope, owner)
@@ -5509,8 +5620,7 @@ func _walk_members(children: Variant, scope: Dictionary, owner: String) -> void:
 			_check_type_ref((child as Dictionary).get("vartype", null), scope, owner)
 			_check_return_ann((child as Dictionary).get("value", null), owner)
 			_check_value_lambda((child as Dictionary).get("value", null), scope, owner)
-			_check_tuple_value(_vartype_name(child as Dictionary), (child as Dictionary).get("value", null), int((child as Dictionary).get("line", 0)), owner)
-			_check_struct_value(_vartype_name(child as Dictionary), (child as Dictionary).get("value", null), int((child as Dictionary).get("line", 0)), owner)
+			_check_nominal_values(child as Dictionary, (child as Dictionary).get("value", null), int((child as Dictionary).get("line", 0)), owner)
 			var acc: Variant = (child as Dictionary).get("accessors", null)
 			if acc is Dictionary:
 				_walk(acc, scope, owner)

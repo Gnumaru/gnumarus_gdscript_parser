@@ -567,11 +567,13 @@ func f(a: Node):
 ```
 
 - Every type member must be known (`var_unknown_type`); every member
-  must equal the declared type or inherit from it (`var_mismatch`,
-  `Variant` accepts anything). Without an explicit vartype, `:=`
-  infers from simple initializers (literals, arrays, dictionaries,
-  known constructors, lambdas); plain `=` means Variant. Anything
-  more complex skips the check.
+  must equal the declared type, inherit from it, or be a nominal
+  tuple/struct refining its root (`@var x Pair` narrows `Array`,
+  `@var p Point` narrows `Dictionary`) — anything else is
+  `var_mismatch` (`Variant` accepts anything). Without an explicit
+  vartype, `:=` infers from simple initializers (literals, arrays,
+  dictionaries, known constructors, lambdas); plain `=` means
+  Variant. Anything more complex skips the check.
 - Shape errors are `var_malformed` (missing name/type, bad
   identifiers, `void`, empty union arms); wrong positions are
   `var_misplaced` (parameters, file root, non-variable statements,
@@ -633,9 +635,12 @@ must exist (two-pass: definition order is free).
 extends Node
 
 # @tuple Pair 2 int String
-var x: Pair = [1, "a"]      # OK: length and elements conform
-var y: Pair = [1, 2, 3]     # ERROR: expects 2 elements, got 3
-var z: Pair = ["a", "b"]    # ERROR: element 0 expects 'int', got 'String'
+# @var x Pair
+var x: Array = [1, "a"]   # OK: length and elements conform
+# @var y Pair
+var y: Array = [1, 2, 3]  # ERROR: expects 2 elements, got 3
+# @var z Pair
+var z: Array = ["a", "b"] # ERROR: element 0 expects 'int', got 'String'
 
 func f():
     print(x[0])             # OK: int
@@ -645,9 +650,13 @@ func f():
     x.bogus()               # ERROR: Array has no such method
 ```
 
-- A tuple flows into `Array`/`Variant`/untyped positions; an `Array`
-  flows in only as a conforming literal (checked at `var`/`const`
-  declarations); different tuple names never mix (nominal typing).
+- Tuples are virtual types (like aliases): they refine `Array`,
+  `Variant` or untyped declarations through `@var`/`@param`/
+  `@return`, but `var x: Pair` is `virtual_vartype` (use the pattern
+  above). A tuple narrows `Array` (and `Variant`/dynamic accept
+  anything); an `Array` flows in only as a conforming literal
+  (checked at `var`/`const` declarations, via the annotation too);
+  different tuple names never mix (nominal typing).
   Definitions live top-level only (`tuple_misplaced` elsewhere);
   duplicates and name clashes with script/engine types error
   (`tuple_conflict`); bad shapes error (`tuple_malformed`,
@@ -874,9 +883,12 @@ so every reader keeps working.
 extends Node
 
 # @struct Point 2 x:int y:int
-var p: Point = {"x": 1, "y": 2}   # OK: exact keys, conforming values
-var q: Point = {"x": 1}           # ERROR: missing field 'y'
-var r: Point = {"x": 1, "y": 2, "z": 3}  # ERROR: expects 2 fields, got 3
+# @var p Point
+var p: Dictionary = {"x": 1, "y": 2}   # OK: exact keys, conforming values
+# @var q Point
+var q: Dictionary = {"x": 1}           # ERROR: missing field 'y'
+# @var r Point
+var r: Dictionary = {"x": 1, "y": 2, "z": 3}  # ERROR: expects 2 fields, got 3
 
 func f():
     print(p.x)                    # OK: int
@@ -885,9 +897,13 @@ func f():
     print(p.keys())               # OK: Dictionary methods work
 ```
 
-- A struct flows into `Dictionary`/`Variant`/untyped positions; a
-  `Dictionary` flows in only as a conforming literal (checked at
-  `var`/`const` declarations); different struct names never mix.
+- Structs are virtual types (like aliases): they refine `Dictionary`,
+  `Variant` or untyped declarations through `@var`/`@param`/
+  `@return`, but `var p: Point` is `virtual_vartype` (use the pattern
+  above). A struct narrows `Dictionary`; a `Dictionary` flows in
+  only as a conforming literal (checked at `var`/`const`
+  declarations, via the annotation too); different struct names
+  never mix.
   Definitions live top-level only; duplicates and clashes error
   (`struct_conflict`); bad shapes error (`struct_malformed`,
   `struct_unknown_type`, `struct_mismatch`). Same documented gaps as
@@ -942,6 +958,7 @@ green. `GODOT_BIN` overrides the engine path.
   `test_template.gd` (`@template` file-local variables + subst/unify IR),
   `test_generic_call.gd` (generic call instantiation),
   `test_generic.gd` (`@generic` classes),
+  `test_virtual.gd` (virtual types: annotation-only tuples/structs/aliases),
   `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
   `test_implements.gd` (`@implements` rule),

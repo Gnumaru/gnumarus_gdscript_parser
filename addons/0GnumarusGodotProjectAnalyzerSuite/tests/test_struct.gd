@@ -58,9 +58,9 @@ func _has_err_sem(src: String, path: String, kind: String, part: String) -> bool
 
 
 func _s_def(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @tuple MyTuple 1 int\n# @struct MyStructB 4 field1:MyTuple field2:int|bool field3 field4:Variant\nvar x: MyStructB\n", "res://tests/tmp_st_d1.gd")), "full example clean")
-	h.check(_clean(h.analyze_text("extends Node\n# @struct Outer 2 a:Inner b:int\n# @struct Inner 1 x:int\nvar v: Outer\n", "res://tests/tmp_st_d2.gd")), "forward struct ref clean")
-	h.check(_clean(h.analyze_text("extends Node\n# @struct ES 0\nvar x: ES = {}\n", "res://tests/tmp_st_d3.gd")), "empty struct clean")
+	h.check(_clean(h.analyze_text("extends Node\n# @tuple MyTuple 1 int\n# @struct MyStructB 4 field1:MyTuple field2:int|bool field3 field4:Variant\n# @var x MyStructB\nvar x: Dictionary\n", "res://tests/tmp_st_d1.gd")), "full example clean")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct Outer 2 a:Inner b:int\n# @struct Inner 1 x:int\n# @var v Outer\nvar v: Dictionary\n", "res://tests/tmp_st_d2.gd")), "forward struct ref clean")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct ES 0\n# @var x ES\nvar x: Dictionary = {}\n", "res://tests/tmp_st_d3.gd")), "empty struct clean")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple E 0\n# @struct E 0\nvar x: E\n", "res://tests/tmp_st_d4.gd"), "struct_conflict", "existing type"), "tuple vs struct collides")
 
 
@@ -88,26 +88,26 @@ func _s_sem(h) -> void:
 
 
 func _s_use(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1, \"b\": \"s\"}\n", "res://tests/tmp_st_u1.gd")), "conforming literal clean")
-	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1}\n", "res://tests/tmp_st_u2.gd"), "struct_mismatch", "expects 2 fields, got 1"), "missing key mismatches")
-	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1, \"b\": \"s\", \"c\": 2}\n", "res://tests/tmp_st_u3.gd"), "struct_mismatch", "expects 2 fields, got 3"), "extra key mismatches")
-	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": \"s\", \"b\": \"s\"}\n", "res://tests/tmp_st_u4.gd"), "struct_mismatch", "field 'a' expects 'int'"), "wrong value mismatches")
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar d := {}\nvar x: S = d\n", "res://tests/tmp_st_u5.gd")), "analyzer silent on non-literal")
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 m:Variant\nvar x: S = {\"m\": 1}\n", "res://tests/tmp_st_u6.gd")), "unknown field accepts literal")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"}\n", "res://tests/tmp_st_u1.gd")), "conforming literal clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1}\n", "res://tests/tmp_st_u2.gd"), "struct_mismatch", "expects 2 fields, got 1"), "missing key mismatches")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\", \"c\": 2}\n", "res://tests/tmp_st_u3.gd"), "struct_mismatch", "expects 2 fields, got 3"), "extra key mismatches")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": \"s\", \"b\": \"s\"}\n", "res://tests/tmp_st_u4.gd"), "struct_mismatch", "field 'a' expects 'int'"), "wrong value mismatches")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar d := {}\n# @var x S\nvar x: Dictionary = d\n", "res://tests/tmp_st_u5.gd")), "analyzer silent on non-literal")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 m:Variant\n# @var x S\nvar x: Dictionary = {\"m\": 1}\n", "res://tests/tmp_st_u6.gd")), "unknown field accepts literal")
 
 
 func _s_keys_members(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x.a)\n", "res://tests/tmp_st_k1.gd")), "member read clean")
-	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x.nope)\n", "res://tests/tmp_st_k2.gd"), "missing_member", "has no member 'nope'"), "member bogus errors")
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 a:int\nvar x: S = {\"a\": 1}\nfunc f():\n\tprint(x.keys())\n", "res://tests/tmp_st_k3.gd")), "dict method clean")
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x[\"a\"])\n", "res://tests/tmp_st_k4.gd")), "key read clean")
-	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x[\"z\"])\n", "res://tests/tmp_st_k5.gd"), "missing_member", "has no member 'z'"), "key unknown errors")
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar x: S = {\"a\": 1, \"b\": \"s\"}\nfunc f(k):\n\tprint(x[k])\n", "res://tests/tmp_st_k6.gd")), "dynamic key skips")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x.a)\n", "res://tests/tmp_st_k1.gd")), "member read clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x.nope)\n", "res://tests/tmp_st_k2.gd"), "missing_member", "has no member 'nope'"), "member bogus errors")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 a:int\n# @var x S\nvar x: Dictionary = {\"a\": 1}\nfunc f():\n\tprint(x.keys())\n", "res://tests/tmp_st_k3.gd")), "dict method clean")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x[\"a\"])\n", "res://tests/tmp_st_k4.gd")), "key read clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"}\nfunc f():\n\tprint(x[\"z\"])\n", "res://tests/tmp_st_k5.gd"), "missing_member", "has no member 'z'"), "key unknown errors")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"}\nfunc f(k):\n\tprint(x[k])\n", "res://tests/tmp_st_k6.gd")), "dynamic key skips")
 
 
 func _s_canon(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 a:string\nvar x: S\n", "res://tests/tmp_st_c1.gd")), "lowercase field type corrected")
-	h.check(_clean(h.analyze_text("extends Node\n# @tuple T 1 object\nvar x: T\n", "res://tests/tmp_st_c2.gd")), "lowercase tuple item corrected")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 a:string\n# @var x S\nvar x: Dictionary\n", "res://tests/tmp_st_c1.gd")), "lowercase field type corrected")
+	h.check(_clean(h.analyze_text("extends Node\n# @tuple T 1 object\n# @var x T\nvar x: Array\n", "res://tests/tmp_st_c2.gd")), "lowercase tuple item corrected")
 	h.check(_clean(h.analyze_text("extends Node\n# @return object\nfunc f():\n\tpass\n", "res://tests/tmp_st_c3.gd")), "lowercase return corrected")
 
 
