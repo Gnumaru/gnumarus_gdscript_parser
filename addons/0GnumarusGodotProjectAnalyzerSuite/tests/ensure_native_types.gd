@@ -1,12 +1,12 @@
 extends SceneTree
 
-## Setup step for the test infrastructure (run by tests/test.sh before
-## the suites): guarantees the native type database exists.
+## Setup step for the test infrastructure (run by the addon tests/test.sh
+## before the suites): guarantees the native type database exists.
 ##
-## Only types_info/user/ is written by the parser/analyzer during the
-## tests. types_info/builtin/, types_info/classes/ and index.json are
-## produced exclusively by gnumaru_godot_native_types_info_dumper, so a
-## deleted types_info/ never grows them back on its own. This script
+## Only the data-dir user/ is written by the parser/analyzer during the
+## tests. The data-dir builtin/, classes/ and index.json are
+## produced exclusively by GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper, so a
+## deleted data dir never grows them back on its own. This script
 ## closes that gap: if the three markers exist and are non-empty it
 ## exits immediately; otherwise it runs the dumper with the same Godot
 ## binary used for the tests (env GODOT_BIN, fallback "godot").
@@ -15,10 +15,10 @@ extends SceneTree
 ## Success prints the "NATIVE TYPES READY" marker and exits 0; test.sh
 ## requires both, so a silent failure can never look green.
 
-const Dumper = preload("res://gnumaru_godot_native_types_info_dumper.gd")
+const Dumper = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
 
-const BASE := "res://types_info"
-const INDEX_FILE := "res://types_info/index.json"
+const BASE := "res://.godot/0GnumarusGodotProjectAnalyzerSuiteData"
+const INDEX_FILE := "res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/index.json"
 
 
 func _init() -> void:

@@ -1,4 +1,4 @@
-class_name gnumarus_gdscript_analyzer
+class_name GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer
 extends RefCounted
 
 ## Analyzer of type-annotation comments.
@@ -38,7 +38,7 @@ extends RefCounted
 ##   the function return type: "void", one type name ("# @return Node")
 ##   or a union ("# @return Object|String|int").
 ## - Every named member must be a known type (script classes/enums or
-##   types_info files); "void" only works alone. When the function also
+##   data-dir JSON files); "void" only works alone. When the function also
 ##   has a "->" annotation, every @return member must equal it or
 ##   inherit from it (Control is fine for "-> Node", Node is not fine
 ##   for "-> Control"). Value/bare returns are checked against voidness.
@@ -98,8 +98,8 @@ extends RefCounted
 ## records a "native_types" error, prints it and returns early.
 ##
 ## Usage:
-##   var sem := gnumarus_gdscript_semantic_parser.new()
-##   var ana := gnumarus_gdscript_analyzer.new()
+##   var sem := GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.new()
+##   var ana := GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.new()
 ##   var ast: Dictionary = sem.analyze(syn.parse("res://s.gd"), "res://s.gd")
 ##   var result: Dictionary = ana.analyze(ast, "res://s.gd")
 ##   print(result["warnings"])
@@ -197,10 +197,10 @@ const VARIANT_TYPE_MAP := {
 
 ## Preloaded (not via class_name) so this script compiles standalone,
 ## even before the editor/cache registers global classes.
-const SemParser = preload("res://gnumarus_gdscript_semantic_parser.gd")
+const SemParser = preload("GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
 ## Preloaded like SemParser so the native database can be ensured
 ## without relying on the global class cache.
-const NativeDumper = preload("res://gnumaru_godot_native_types_info_dumper.gd")
+const NativeDumper = preload("GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
 
 ## Member kinds tracked per owner. Owner "" is the script root,
 ## otherwise a dotted inner path like "Outer" or "Outer.Inner".
@@ -216,7 +216,7 @@ var _script_class = ""
 var _script_extends = ""
 var _script_resource_path = ""
 var _project_root = ""
-var _write_base = "types_info"
+var _write_base = NativeDumper.DATA_DIR_NAME
 var _written: Array = []
 ## Type file lookups (builtin/classes/user JSON info or miss marker),
 ## cached per analyze() call for @return name resolution.
@@ -262,7 +262,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	var anchor = _analyzer_anchor_dir()
 	_project_root = SemParser.find_project_root(anchor)
 	if _project_root == "":
-		_project_root = SemParser.fallback_root(anchor + "/gnumaru_godot_native_types_info_dumper.gd")
+		_project_root = SemParser.fallback_root(anchor + "/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
 	_script_resource_path = SemParser.resource_path_for(script_path, _project_root)
 	_write_base = _compute_write_base(_project_root)
 	if not _ensure_native_types():
@@ -289,7 +289,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	return {"ast": ast, "errors": _errors, "warnings": _warnings}
 
 
-## Ensures the native type database (types_info/builtin, classes,
+## Ensures the native type database (data-dir builtin, classes,
 ## index.json) exists, dumping it on demand into _write_base. On failure
 ## records a "native_types" error, prints it and returns false, so
 ## analyze() returns early with just that error.
@@ -311,9 +311,9 @@ func _analyzer_anchor_dir() -> String:
 	var self_dir = self_path.get_base_dir()
 	if self_dir == "":
 		self_dir = "res://"
-	if FileAccess.file_exists(self_dir + "/gnumaru_godot_native_types_info_dumper.gd"):
+	if FileAccess.file_exists(self_dir + "/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd"):
 		return self_dir
-	if self_path.begins_with("res://") and FileAccess.file_exists("res://gnumaru_godot_native_types_info_dumper.gd"):
+	if self_path.begins_with("res://") and FileAccess.file_exists("res://GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd"):
 		return "res://"
 	return self_dir
 
@@ -323,8 +323,8 @@ func _compute_write_base(root: String) -> String:
 		var r = root
 		if r.ends_with("/") and r.length() > 1:
 			r = r.substr(0, r.length() - 1)
-		return r + "/types_info"
-	return "types_info"
+		return r + "/" + NativeDumper.DATA_DIR_NAME
+	return NativeDumper.DATA_DIR_NAME
 
 
 ## Handles the file header comment: a @deprecated tag here marks
@@ -2693,7 +2693,7 @@ func _type_info(tname: String) -> Dictionary:
 	return {}
 
 
-## True when a types_info file exists for the name (builtin, classes or
+## True when a data-dir JSON file exists for the name (builtin, classes or
 ## user under _write_base). Results are cached per analyze() call.
 func _type_file_exists(tname: String) -> bool:
 	return not _type_info(tname).is_empty()
@@ -2706,7 +2706,7 @@ func _engine_chain(tname: String) -> Array:
 
 
 ## A @return member is known when it is the script class, a script class
-## or enum member, or a types_info file exists for it.
+## or enum member, or a data-dir JSON file exists for it.
 func _type_known(tname: String) -> bool:
 	if tname != "" and tname == _script_class:
 		return true
@@ -5405,7 +5405,7 @@ func _flow_accessor(node: Dictionary, scope: Dictionary, owner: String) -> void:
 
 # ------------------------------------------------------- user JSON files
 
-## Updates types_info/user files: main script file plus one per inner
+## Updates data-dir user/ files: main script file plus one per inner
 ## class (dotted names). Existing files are patched (deprecated flags
 ## plus analysis lists); missing files get a minimal equivalent.
 func _update_user_files(ast: Dictionary) -> void:

@@ -52,7 +52,7 @@ const ENUM_CONST := State.IDLE
 const NEG_CONST := -7
 const FLOAT_EXP := 1.5e-3
 ## Self preload (valid path inside the project).
-const SELF_SCRIPT := preload("res://tests/ValidScript0.gd")
+const SELF_SCRIPT := preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 
 
 

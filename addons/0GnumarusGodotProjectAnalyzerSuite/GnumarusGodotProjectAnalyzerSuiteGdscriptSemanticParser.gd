@@ -1,9 +1,9 @@
-class_name gnumarus_gdscript_semantic_parser
+class_name GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser
 extends RefCounted
 
 ## Semantic analyzer for GDScript abstract syntax trees.
 ##
-## Walks the AST produced by gnumarus_gdscript_syntatic_parser and checks
+## Walks the AST produced by GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser and checks
 ## semantic errors: unknown types, static versus instance misuse, missing
 ## methods (including ancestors), invalid operators, wrong argument
 ## counts, assignments to constants, unknown identifiers and bad
@@ -15,16 +15,17 @@ extends RefCounted
 ## returned "semantic_errors" list and checking continues wherever
 ## viable. Nodes the analyzer cannot understand are skipped, never fatal.
 ##
-## Type information comes from JSON files. Unknown type names are looked
-## up first in types_info/builtin/<Name>.json, then in
-## types_info/user/<Name>.json. Missing files mean
+## Type information comes from JSON files under the analyzer data dir
+## (.godot/0GnumarusGodotProjectAnalyzerSuiteData, see NativeDumper).
+## Unknown type names are looked up first in builtin/<Name>.json, then in
+## user/<Name>.json. Missing files mean
 ## "unknown type '<Name>'". Loaded files are cached per analyze() call.
 ## analyze() first ensures the native database (builtin/, classes/,
 ## index.json), dumping it on demand; when the dump itself fails it
 ## records a "native_types" error, prints it and returns early.
 ##
 ## After checking, and before returning the modified AST, user type files
-## are created or updated under types_info/user/: one per script
+## are created or updated under user/: one per script
 ## class_name (or resource-path based name for class_name-less scripts)
 ## plus one per inner class, named by concatenating the class names
 ## needed to reach it (e.g. minha.classe.interna.json). Each file holds
@@ -32,8 +33,8 @@ extends RefCounted
 ## every other publicly accessible member found in the script.
 ##
 ## Usage:
-##   var syn := gnumarus_gdscript_syntatic_parser.new()
-##   var sem := gnumarus_gdscript_semantic_parser.new()
+##   var syn := GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new()
+##   var sem := GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.new()
 ##   var ast: Dictionary = sem.analyze(syn.parse("res://script.gd"), "res://script.gd")
 ##   print(ast["semantic_errors"], ast["user_types_written"])
 
@@ -48,7 +49,7 @@ const KIND_ASSIGN := "assign"
 const KIND_SUBSCRIPT := "subscript"
 const KIND_NATIVE_TYPES := "native_types"
 
-const NativeDumper = preload("res://gnumaru_godot_native_types_info_dumper.gd")
+const NativeDumper = preload("GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
 
 const SIGNAL_METHODS := ["connect", "disconnect", "is_connected", "emit", "get_connections"]
 const NODE_SIGNALS := ["ready", "renamed", "tree_entered", "tree_entering", "tree_exited", "tree_exiting", "replacing_by"]
@@ -75,7 +76,7 @@ var _errors: Array = []
 var _type_cache: Dictionary = {}
 var _type_miss: Dictionary = {}
 var _bases: Array = []
-var _write_base: String = "types_info"
+var _write_base: String = NativeDumper.DATA_DIR_NAME
 var _project_root: String = ""
 var _script_resource_path: String = ""
 var _script_class: String = ""
@@ -110,7 +111,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	var anchor = _dumper_anchor_dir()
 	_project_root = find_project_root(anchor)
 	if _project_root == "":
-		_project_root = fallback_root(anchor + "/gnumaru_godot_native_types_info_dumper.gd")
+		_project_root = fallback_root(anchor + "/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
 	_script_resource_path = resource_path_for(script_path, _project_root)
 	_bases = _compute_bases(_project_root)
 	_write_base = _compute_write_base(_project_root)
@@ -128,7 +129,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	return ast
 
 
-## Ensures the native type database (types_info/builtin, classes,
+## Ensures the native type database (data-dir builtin, classes,
 ## index.json) exists, dumping it on demand into _write_base. On failure
 ## records a "native_types" error, prints it and returns false, so
 ## analyze() returns early with just that error instead of flooding
@@ -151,9 +152,9 @@ func _dumper_anchor_dir() -> String:
 	var self_dir = self_path.get_base_dir()
 	if self_dir == "":
 		self_dir = "res://"
-	if FileAccess.file_exists(self_dir + "/gnumaru_godot_native_types_info_dumper.gd"):
+	if FileAccess.file_exists(self_dir + "/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd"):
 		return self_dir
-	if self_path.begins_with("res://") and FileAccess.file_exists("res://gnumaru_godot_native_types_info_dumper.gd"):
+	if self_path.begins_with("res://") and FileAccess.file_exists("res://GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd"):
 		return "res://"
 	return self_dir
 
@@ -236,11 +237,12 @@ func _compute_bases(root: String) -> Array:
 	var bases: Array = []
 	if root != "":
 		var r = _rstrip_slash(root)
-		bases.append(r + "/types_info")
+		bases.append(r + "/" + NativeDumper.DATA_DIR_NAME)
 		if r.begins_with("res://"):
 			var g = _rstrip_slash(ProjectSettings.globalize_path(r))
 			if g != r:
-				bases.append(g + "/types_info")
+				bases.append(g + "/" + NativeDumper.DATA_DIR_NAME)
+	# Legacy fallback: pre-addon-layout root types_info/.
 	bases.append("types_info")
 	bases.append("res://types_info")
 	var seen = {}
@@ -254,8 +256,8 @@ func _compute_bases(root: String) -> Array:
 
 func _compute_write_base(root: String) -> String:
 	if root != "":
-		return _rstrip_slash(root) + "/types_info"
-	return "types_info"
+		return _rstrip_slash(root) + "/" + NativeDumper.DATA_DIR_NAME
+	return NativeDumper.DATA_DIR_NAME
 
 
 # ---------------------------------------------------------------- scope

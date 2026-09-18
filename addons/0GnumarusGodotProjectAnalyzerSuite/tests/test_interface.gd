@@ -3,9 +3,9 @@ extends RefCounted
 ## @interface suite: multi/single-line blocks, member forms, static
 ## rules, defaults/vararg, enums/signals, conflicts, JSON shape.
 
-const Syn = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const Sem = preload("res://gnumarus_gdscript_semantic_parser.gd")
-const H = preload("res://tests/helpers.gd")
+const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const Sem = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:
@@ -108,7 +108,7 @@ func _i_sem(h) -> void:
 
 func _i_json(h) -> void:
 	h.analyze_text("extends Node\n# @interface JFace\n# static var:sp:int\n# func:f:String:a:int,...rest:String\n# signal:s:x:int\n# enum:E:m1,m2\n# const:c:float\n# @endinterface\n", "res://tests/tmp_if_j1.gd")
-	var info: Dictionary = h.load_json("res://types_info/user/JFace.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/JFace.json")
 	h.check(str(info.get("kind", "")) == "interface", "json kind interface")
 	var found_static := false
 	for f in info.get("fields", []):

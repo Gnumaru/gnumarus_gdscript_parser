@@ -3,10 +3,10 @@ extends RefCounted
 ## Doc-fetch suite: builtin enums/constants come from doc XML downloads
 ## (ClassDB and the extension dump never carry them). Everything here
 ## is offline-safe: unit cases plus graceful-failure paths. Live merges
-## are validated by regenerating types_info, not by this suite.
+## are validated by regenerating the data dir, not by this suite.
 
-const D = preload("res://gnumaru_godot_native_types_info_dumper.gd")
-const H = preload("res://tests/helpers.gd")
+const D = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:
@@ -54,7 +54,7 @@ func _d_graceful(h) -> void:
 
 
 func _d_color_json(h) -> void:
-	var info: Dictionary = h.load_json("res://types_info/builtin/Color.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/builtin/Color.json")
 	var names: Array = []
 	for c in info.get("constants", []):
 		names.append(str((c as Dictionary).get("name", "")))

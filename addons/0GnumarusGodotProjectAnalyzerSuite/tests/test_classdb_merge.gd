@@ -4,8 +4,8 @@ extends RefCounted
 ## Object.free() in 4.7.2), so the dumper completes classes with live
 ## ClassDB data. Only additions, never overrides, idempotent.
 
-const D = preload("res://gnumaru_godot_native_types_info_dumper.gd")
-const H = preload("res://tests/helpers.gd")
+const D = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:
@@ -48,7 +48,7 @@ func _c_merge_unit(h) -> void:
 
 
 func _c_object_json(h) -> void:
-	var info: Dictionary = h.load_json("res://types_info/classes/Object.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/classes/Object.json")
 	var found := false
 	for m in info.get("instance_methods", []):
 		if str((m as Dictionary).get("name", "")) == "free":

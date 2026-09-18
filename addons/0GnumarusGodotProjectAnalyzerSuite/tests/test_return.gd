@@ -3,7 +3,7 @@ extends RefCounted
 ## @return rule suite: placement, union shape, known names, "->"
 ## compatibility (equal or narrower), and value/bare return presence.
 
-const H = preload("res://tests/helpers.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:

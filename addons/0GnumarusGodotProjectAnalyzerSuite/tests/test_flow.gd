@@ -4,7 +4,7 @@ extends RefCounted
 ## typeof guards. Reads, dynamic `=`, unknown, self/super and script
 ## classes never error (suppression-safe by construction).
 
-const H = preload("res://tests/helpers.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:

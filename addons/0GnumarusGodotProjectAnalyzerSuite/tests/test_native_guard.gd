@@ -2,19 +2,19 @@ extends RefCounted
 
 ## Native-database guard suite: the dumper's is_present()/ensure_present()
 ## contract that the semantic parser and the analyzer rely on.
-## (Their early-return branch itself needs a missing types_info/ and is
-## covered by a manual probe, not here: wiping types_info/ mid-run would
+## (Their early-return branch itself needs a missing data dir and is
+## covered by a manual probe, not here: wiping the data dir mid-run would
 ## break the other suites' JSON assertions.)
 
-const Dumper = preload("res://gnumaru_godot_native_types_info_dumper.gd")
-const H = preload("res://tests/helpers.gd")
+const Dumper = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:
 	var h = H.new()
 	h.suite = "native_guard"
 	var d = Dumper.new()
-	d.output_base = "res://types_info"
+	d.output_base = "res://.godot/0GnumarusGodotProjectAnalyzerSuiteData"
 	h.check(d.is_present(), "native database present")
 	h.check(d.ensure_present(), "ensure_present passes when cached")
 	h.check(str(Dumper.default_executable()) != "", "default executable non-empty")

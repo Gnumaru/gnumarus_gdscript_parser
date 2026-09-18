@@ -2,9 +2,9 @@ extends RefCounted
 
 ## @deprecated rule suite (migrated from the scratch runner).
 
-const Syn = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const Ana = preload("res://gnumarus_gdscript_analyzer.gd")
-const H = preload("res://tests/helpers.gd")
+const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const Ana = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:
@@ -108,7 +108,7 @@ func _t11(h) -> void:
 	var res: Dictionary = h.analyze_text(src, "res://tests/tmp_t11.gd")
 	h.check((res.get("warnings", []) as Array).is_empty(), "t11 no internal warnings")
 	h.check((res.get("errors", []) as Array).is_empty(), "t11 no errors")
-	var info: Dictionary = h.load_json("res://types_info/user/OldLib.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/OldLib.json")
 	h.check(str(info.get("deprecated", {}).get("message", "")) == "Whole script is old.", "t11 json marks script")
 
 
@@ -118,7 +118,7 @@ func _t12(h) -> void:
 	h.check(res.has("ast") and res.has("errors") and res.has("warnings"), "t12 return shape")
 	h.check(((res.get("ast", {}) as Dictionary).has("analyzer_errors")), "t12 ast has analyzer_errors")
 	h.check(((res.get("ast", {}) as Dictionary).has("analyzer_warnings")), "t12 ast has analyzer_warnings")
-	var info: Dictionary = h.load_json("res://types_info/user/MyLib2.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/MyLib2.json")
 	var flagged := false
 	for m in info.get("instance_methods", []):
 		if str((m as Dictionary).get("name", "")) == "old_fn" and (m as Dictionary).has("deprecated"):
@@ -136,7 +136,7 @@ func _t12(h) -> void:
 func _t13(h) -> void:
 	var syn = Syn.new()
 	var ana = Ana.new()
-	var ast: Dictionary = syn.parse("res://tests/ValidScript0.gd")
-	var res: Dictionary = ana.analyze(ast, "res://tests/ValidScript0.gd")
+	var ast: Dictionary = syn.parse("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
+	var res: Dictionary = ana.analyze(ast, "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 	h.check((res.get("errors", []) as Array).is_empty(), "t13 fixture no errors")
 	h.check((res.get("warnings", []) as Array).is_empty(), "t13 fixture no warnings")

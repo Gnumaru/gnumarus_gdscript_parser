@@ -10,23 +10,24 @@ from any script in the project without preloads.
 
 ```
 source text (.gd)
-  └─> gnumarus_gdscript_tokenizer        flat token list (comments kept)
-        └─> gnumarus_gdscript_post_tokenizer   @-comments become TYPE_INFO
-              └─> gnumarus_gdscript_syntatic_parser   AST (syntax only)
-                    └─> gnumarus_gdscript_semantic_parser  semantic errors + types_info/user/*.json
-                          └─> gnumarus_gdscript_analyzer   annotation rules (@deprecated) + JSON update
+  └─> GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer        flat token list (comments kept)
+        └─> GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer   @-comments become TYPE_INFO
+              └─> GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser   AST (syntax only)
+                    └─> GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser  semantic errors + data-dir user/*.json
+                          └─> GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer   annotation rules (@deprecated) + JSON update
 ```
 
-`types_info/` (native data) is produced once by
-`gnumaru_godot_native_types_info_dumper` and is ignored by git
+`.godot/0GnumarusGodotProjectAnalyzerSuiteData/` (native + user data)
+is produced once by
+`GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper` and is ignored by git
 (see `.gitignore`).
 
 Minimal end-to-end example:
 
 ```gdscript
-var syn := gnumarus_gdscript_syntatic_parser.new()
-var sem := gnumarus_gdscript_semantic_parser.new()
-var ana := gnumarus_gdscript_analyzer.new()
+var syn := GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new()
+var sem := GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.new()
+var ana := GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.new()
 
 var ast: Dictionary = sem.analyze(syn.parse("res://script.gd"), "res://script.gd")
 print(ast["semantic_errors"], ast["user_types_written"])
@@ -37,7 +38,7 @@ print(result["warnings"], result["errors"])
 
 Each stage below documents its own input, output and knobs.
 
-## 1. gnumarus_gdscript_tokenizer
+## 1. GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer
 
 Turns source text into a flat list of token Dictionaries:
 
@@ -54,7 +55,7 @@ Turns source text into a flat list of token Dictionaries:
   in `pending_text` first (only one active iteration per instance):
 
 ```gdscript
-var tok := gnumarus_gdscript_tokenizer.new()
+var tok := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new()
 tok.pending_text = "var x := 1\n"
 for token in tok:
     print(token)
@@ -89,7 +90,7 @@ for token in tok:
   `STRING`, `STRING_NAME` (`&"..."`), `UNIQUE_NAME` (`%Name`),
   `UNKNOWN`. The stream always ends with `EOF`.
 
-## 2. gnumarus_gdscript_post_tokenizer
+## 2. GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer
 
 Iterates raw tokenizer tokens and converts comments carrying type
 annotations into `TYPE_INFO` tokens. A comment counts when it contains
@@ -107,7 +108,7 @@ Same value, line and column are preserved; every other token passes
 through untouched.
 
 ```gdscript
-var post := gnumarus_gdscript_post_tokenizer.new()
+var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()
 var tokens: Array = post.process("res://script.gd")   # file or source, like tokenize()
 var same: Array = post.process_text("var x := 1 # @param x\n")
 var from_array: Array = post.process_tokens(raw_tokens)
@@ -119,7 +120,7 @@ then `for token in post`; every `process_*` method just collects the
 loop). The static helper `has_type_annotation(value: String) -> bool`
 tests a single comment string against the rule above.
 
-## 3. gnumarus_gdscript_syntatic_parser
+## 3. GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser
 
 Builds a complete AST Dictionary from post-tokenizer tokens. Syntax
 ONLY: `var myvar: int = null` parses fine here; the semantic stage
@@ -127,8 +128,8 @@ flags the mismatch later. This class is **not** an iterator: each
 `parse_*` returns the whole AST.
 
 ```gdscript
-var post := gnumarus_gdscript_post_tokenizer.new()
-var syn := gnumarus_gdscript_syntatic_parser.new()
+var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()
+var syn := GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new()
 var ast1: Dictionary = syn.parse_tokens(post.process("res://script.gd"))
 var ast2: Dictionary = syn.parse_text("var x := 1\n")
 var ast3: Dictionary = syn.parse("res://script.gd")
@@ -158,7 +159,7 @@ var ast3: Dictionary = syn.parse("res://script.gd")
   `BREAKPOINT_STMT`, `ASSERT_STMT`, `EXPR_STMT`, `EXPR`, `LAMBDA`,
   `ACCESSOR`, `COMMENT`, `DOC_COMMENT`, `TYPE_INFO`, `SYNTAX_ERROR`.
 
-## 4. gnumaru_godot_native_types_info_dumper
+## 4. GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper
 
 Runs a Godot executable with `--dump-extension-api` and converts the
 (huge) `extension_api.json` into one small JSON file per native type.
@@ -184,13 +185,14 @@ constants, enums — adding only what the dump lacks (dump data is
   paths never need awaiting.
 
 ```gdscript
-var d := gnumaru_godot_native_types_info_dumper.new()
+var d := GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.new()
 var summary: Dictionary = d.dump_all("/path/to/godot4.x86_64")
 var summary2: Dictionary = d.dump_all()  # falls back to the "godot" command
 ```
 
 - Knobs: `godot_executable` (default `"godot"`), `output_base`
-  (default `"types_info"`; accepts `res://`, `user://`, absolute or
+  (default `"res://.godot/0GnumarusGodotProjectAnalyzerSuiteData"`;
+  accepts `res://`, `user://`, absolute or
   CWD-relative paths), `keep_dump_file` (default `false` — the
   intermediate `extension_api.json` is deleted after extraction),
   plus read-only `last_error`, `last_dump_path`, `last_summary`.
@@ -221,7 +223,7 @@ var summary2: Dictionary = d.dump_all()  # falls back to the "godot" command
   `"derived_from"` set. Missing `return_type` means `"void"`;
   `typedarray::T` normalizes to `Array[T]`, `enum::X` to `int`.
 
-## 5. gnumarus_gdscript_semantic_parser
+## 5. GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser
 
 Walks a syntactic AST and checks semantic errors — unknown types,
 static vs instance misuse (`FileAccess.close()` must be `file.close()`),
@@ -238,12 +240,12 @@ var ast: Dictionary = sem.analyze(syn.parse("res://script.gd"), "res://script.gd
 print(ast["semantic_errors"], ast["user_types_written"])
 ```
 
-- Unknown type names resolve from `types_info/builtin/<Name>.json`,
-  then `types_info/classes/<Name>.json`, then
-  `types_info/user/<Name>.json` (cached per call); a total miss is
+- Unknown type names resolve from the data-dir `builtin/<Name>.json`,
+  then `classes/<Name>.json`, then
+  `user/<Name>.json` (cached per call); a total miss is
   `"unknown type '<Name>'"`.
 - Before returning, user type files are created/updated under
-  `types_info/user/`: one per script `class_name` (or resource-path
+  `user/`: one per script `class_name` (or resource-path
   name for `class_name`-less scripts — `res://a/b.gd` becomes
   `a_b.json`, `anonymous` as last resort), plus one per inner class
   named by concatenating the path to it (`minha.classe.interna.json`).
@@ -261,7 +263,7 @@ print(ast["semantic_errors"], ast["user_types_written"])
   involving unknown, `Variant` or enum types are accepted without
   checks.
 
-## 6. gnumarus_gdscript_analyzer (annotation rules)
+## 6. GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer (annotation rules)
 
 Interprets the `TYPE_INFO` comments of a semantic-parser AST and
 checks the annotation rules, one rule at a time. The walk is
@@ -279,7 +281,7 @@ print(result["warnings"], result["errors"])  # result["ast"] is the modified AST
   entries look like `{"kind", "message", "line", "column", "owner"}`.
   The AST root gains `analyzer_errors` / `analyzer_warnings`, and
   marked declaration nodes gain `"deprecated"` / `"private"` marks.
-- Just before returning, the `types_info/user/*.json` files are
+- Just before returning, the data-dir `user/*.json` files are
   updated with member flags plus per-file `analysis_errors` /
   `analysis_warnings`.
 
@@ -511,7 +513,7 @@ var f = func():
 ```
 
 - Every named member must be a known type (the script class, script
-  classes/enums, or a `types_info` file); unknown names error
+  classes/enums, or a data-dir JSON file); unknown names error
   (`return_unknown_type`). Empty specs, non-identifiers, empty union
   arms and `void` combined with names error (`return_malformed`).
 - When the function also has a `->` annotation, every `@return`
@@ -745,12 +747,16 @@ func f():
   `struct_unknown_type`, `struct_mismatch`). Same documented gaps as
   tuples (call args, defaults, returns, `is`/`as`, no continuation).
 
-## types_info layout
+## Analyzer data layout
 
-- `types_info/builtin/<Name>.json` and `types_info/classes/<Name>.json`
+All pipeline data lives under
+`.godot/0GnumarusGodotProjectAnalyzerSuiteData/` (inside `.godot`, so
+it never pollutes the project tree):
+
+- `builtin/<Name>.json` and `classes/<Name>.json`
   come from the dumper (plus `index.json`); the whole directory is
   gitignored and regenerated on demand (see "tests" below).
-- `types_info/user/<Name>.json` is written by the semantic parser and
+- `user/<Name>.json` is written by the semantic parser and
   updated by the analyzer: one file per script `class_name` (or
   resource-path name like `a_b.json` for `class_name`-less scripts),
   plus one dotted file per inner class (`Outer.json`,
@@ -760,16 +766,20 @@ func f():
 
 ## tests
 
-`./tests/test.sh` (from the project root) runs every
-`tests/test_*.gd` suite headlessly inside this project's own directory
+`./addons/0GnumarusGodotProjectAnalyzerSuite/tests/test.sh` (from the
+project root) runs every
+`addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_*.gd` suite
+headlessly inside this project's own directory
 — no scratch copies needed. It exits 0 only when Godot exits 0 AND
 the `ALL TESTS PASSED` marker is printed, so crashes can never look
 green. `GODOT_BIN` overrides the engine path.
 
-- `tests/run_all.gd` loads each suite (they expose `run()`), prints a
+- `addons/0GnumarusGodotProjectAnalyzerSuite/tests/run_all.gd` loads
+  each suite (they expose `run()`), prints a
   per-suite `PASS`/`FAIL` line plus the grand total. A suite that
   fails to load counts as a failure.
-- `tests/helpers.gd` holds the shared assertions: one instance per
+- `addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd` holds
+  the shared assertions: one instance per
   suite, `check()` per expectation, failed names via printerr.
 - Suites: `test_fixture.gd` (tokenize → parse → analyze on the
   `tests/ValidScript0.gd` fixture, must come out clean),
@@ -785,10 +795,11 @@ green. `GODOT_BIN` overrides the engine path.
   `test_flow.gd` (flow member checks + guards),
   `test_reuse.gd` (same instance parsing twice must give independent
   results).
-- `tests/ensure_native_types.gd` runs first: if `types_info/builtin/`,
-  `types_info/classes/` and `index.json` exist with content it exits
+- `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
+  runs first: if the data-dir `builtin/`,
+  `classes/` and `index.json` exist with content it exits
   immediately; otherwise it runs the dumper with the same engine
-  binary, so a deleted `types_info/` fully grows back
+  binary, so a deleted data dir fully grows back
   (`FORCE_NATIVE_DUMP=1` regenerates even when present).
 - The semantic parser and the analyzer enforce the same precondition
   on every `analyze()`: when the native database is missing they dump
@@ -796,10 +807,10 @@ green. `GODOT_BIN` overrides the engine path.
   binary) they print an error and return early with a single
   `native_types` error entry instead of flooding unknown-type noise.
 - Workflow: after any change to the pipeline scripts, run
-  `./tests/test.sh`. If checks that should pass fail (or vice
+  `./addons/0GnumarusGodotProjectAnalyzerSuite/tests/test.sh`. If checks that should pass fail (or vice
   versa), fix the code or the test — never both silently — and
   re-run until green.
-- Test artifacts (`types_info/`, `.godot/`, `*.uid`) are gitignored.
+- Test artifacts (`.godot/`, `*.uid`) are gitignored.
 
 ## Documentation maintenance
 

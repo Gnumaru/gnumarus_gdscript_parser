@@ -4,8 +4,8 @@ extends RefCounted
 ## target resolution (script/engine/struct/interface/tuple) and
 ## conformance (methods/fields/signals/enums/consts).
 
-const Syn = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const H = preload("res://tests/helpers.gd")
+const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:

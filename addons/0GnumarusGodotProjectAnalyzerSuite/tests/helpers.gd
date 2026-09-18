@@ -7,8 +7,8 @@ extends RefCounted
 ## immediately via printerr AND count toward the suite totals, so a
 ## single run shows both the failing names and the final tally.
 
-const SynParser = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const Analyzer = preload("res://gnumarus_gdscript_analyzer.gd")
+const SynParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const Analyzer = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
 
 var suite: String = ""
 var passed: int = 0

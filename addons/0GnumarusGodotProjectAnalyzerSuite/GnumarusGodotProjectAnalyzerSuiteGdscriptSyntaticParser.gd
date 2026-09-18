@@ -1,9 +1,9 @@
-class_name gnumarus_gdscript_syntatic_parser
+class_name GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser
 extends RefCounted
 
 ## Syntactic parser for GDScript source code.
 ##
-## Consumes the tokens produced by gnumarus_gdscript_post_tokenizer and
+## Consumes the tokens produced by GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer and
 ## builds a complete abstract syntax tree (AST). This stage performs
 ## syntactic analysis ONLY: no type checking, no name resolution, no
 ## value validation. For example, `var myvar: int = null` is accepted
@@ -33,13 +33,13 @@ extends RefCounted
 ##
 ## Usage with a token array:
 ##   var tokens: Array = post.process("res://script.gd")
-##   var ast: Dictionary = gnumarus_gdscript_syntatic_parser.new().parse_tokens(tokens)
+##   var ast: Dictionary = GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new().parse_tokens(tokens)
 ## Usage with source code or a file path:
-##   var ast: Dictionary = gnumarus_gdscript_syntatic_parser.new().parse_text("var x := 1\n")
-##   var ast: Dictionary = gnumarus_gdscript_syntatic_parser.new().parse("res://script.gd")
+##   var ast: Dictionary = GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new().parse_text("var x := 1\n")
+##   var ast: Dictionary = GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new().parse("res://script.gd")
 
-const gnumarus_gdscript_tokenizer = preload('gnumarus_gdscript_tokenizer.gd')
-const gnumarus_gdscript_post_tokenizer = preload('gnumarus_gdscript_post_tokenizer.gd')
+const GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer = preload('GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.gd')
+const GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer = preload('GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.gd')
 
 const NODE_SCRIPT := "SCRIPT"
 const NODE_ANNOTATION_DECL := "ANNOTATION_DECL"
@@ -118,16 +118,16 @@ func parse_tokens(tokens: Array) -> Dictionary:
 
 ## Parses raw GDScript source code passed as a string.
 func parse_text(text: String) -> Dictionary:
-	var tok := gnumarus_gdscript_tokenizer.new()
-	var post := gnumarus_gdscript_post_tokenizer.new()
+	var tok := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new()
+	var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()
 	return parse_tokens(post.process_tokens(tok.tokenize_text(text)))
 
 
 ## Parses either a file path (res://, user:// or OS path, when the file
 ## exists) or a raw GDScript source string.
 func parse(source: String) -> Dictionary:
-	var tok := gnumarus_gdscript_tokenizer.new()
-	var post := gnumarus_gdscript_post_tokenizer.new()
+	var tok := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new()
+	var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()
 	return parse_tokens(post.process_tokens(tok.tokenize(source)))
 
 

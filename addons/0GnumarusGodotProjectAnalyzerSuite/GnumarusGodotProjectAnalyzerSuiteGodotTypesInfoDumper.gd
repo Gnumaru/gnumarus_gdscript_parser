@@ -1,4 +1,4 @@
-class_name gnumaru_godot_native_types_info_dumper
+class_name GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper
 extends RefCounted
 
 ## Dumps Godot native type information for future semantic analysis.
@@ -16,11 +16,12 @@ extends RefCounted
 ## missing enums and constants come from doc XML downloads instead
 ## (see merge_doc_data).
 ##
-## Output layout (created when missing; "types_info" is ignored by the
-## repo .gitignore):
+## Output layout (created when missing; lives under .godot so it never
+## pollutes the project tree):
 ##   <output_base>/builtin/<Name>.json   (String, Array, int, ...)
 ##   <output_base>/builtin/Variant.json  (synthesized root)
 ##   <output_base>/classes/<Name>.json   (Node3D, Object, ...)
+##   <output_base>/user/<Name>.json      (scripts and @tuple/@struct/@interface)
 ##   <output_base>/index.json                      (type lists and counts)
 ## Every per-type file holds at minimum the type name, the allowed
 ## operators with the expected type of each parameter, and the static and
@@ -29,7 +30,7 @@ extends RefCounted
 ## properties, signals, enums, constants) is included when available.
 ##
 ## Usage with an explicit executable:
-##   var d := gnumaru_godot_native_types_info_dumper.new()
+##   var d := GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.new()
 ##   var summary: Dictionary = d.dump_all("/path/to/godot4.x86_64")
 ## Usage relying on PATH (falls back to the "godot" command):
 ##   var summary: Dictionary = d.dump_all()
@@ -38,9 +39,13 @@ extends RefCounted
 
 ## Default executable used when dump_all()/run_dump() get an empty path.
 var godot_executable: String = "godot"
-## Base directory for types_info/builtin and types_info/classes.
+## Project-relative data directory holding builtin/, classes/, user/
+## and index.json (single source of truth; also used by the semantic
+## parser and the analyzer via NativeDumper.DATA_DIR_NAME).
+const DATA_DIR_NAME := ".godot/0GnumarusGodotProjectAnalyzerSuiteData"
+## Base directory for builtin/, classes/ and user/ data.
 ## Accepts res://, user://, absolute or CWD-relative paths.
-var output_base: String = "types_info"
+var output_base: String = "res://.godot/0GnumarusGodotProjectAnalyzerSuiteData"
 ## Keeps the intermediate extension_api.json next to the output.
 var keep_dump_file: bool = false
 ## Human readable description of the last failure ("" when fine).
@@ -702,7 +707,7 @@ func write_infos(infos: Dictionary) -> Dictionary:
 	class_types.sort()
 	var index := {
 		"engine_version": str(infos.get("__engine_version__", "")),
-		"generator": "gnumaru_godot_native_types_info_dumper",
+		"generator": "GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper",
 		"generated_at": Time.get_datetime_string_from_system(),
 		"builtin_count": builtin_types.size(),
 		"class_count": class_types.size(),

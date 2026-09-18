@@ -1,7 +1,7 @@
-class_name gnumarus_gdscript_post_tokenizer
+class_name GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer
 extends RefCounted
 
-## Post-processor for the gnumarus_gdscript_tokenizer output.
+## Post-processor for the GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer output.
 ##
 ## Iterates the raw tokens and looks inside every COMMENT / DOC_COMMENT
 ## token for type annotation markers such as @param. A marker counts as
@@ -16,8 +16,8 @@ extends RefCounted
 ## Every other token passes through untouched.
 ##
 ## Usage with a token array:
-##   var raw := gnumarus_gdscript_tokenizer.new().tokenize("var x := 1\n")
-##   var post := gnumarus_gdscript_post_tokenizer.new()
+##   var raw := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new().tokenize("var x := 1\n")
+##   var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()
 ##   var tokens: Array = post.process_tokens(raw)
 ## Usage with a tokenizer instance (it is iterable, so it is drained here):
 ##   var tokens: Array = post.process_tokenizer(tok)
@@ -25,12 +25,12 @@ extends RefCounted
 ##   var tokens: Array = post.process("res://script.gd")
 ##   var tokens: Array = post.process_text("var x := 1 # @param x\n")
 ## Direct iteration (every process_* method is just a collector over it):
-##   var post := gnumarus_gdscript_post_tokenizer.new()
+##   var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()
 ##   post.pending_tokens = raw
 ##   for token in post:
 ##       print(token)
 
-const gnumarus_gdscript_tokenizer = preload('gnumarus_gdscript_tokenizer.gd')
+const GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer = preload('GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.gd')
 const TOKEN_TYPE_INFO := "TYPE_INFO"
 
 ## Raw tokens staged for iteration. Only one iteration may be active
@@ -50,7 +50,7 @@ func process_tokens(tokens: Array) -> Array:
 	return ret
 
 
-## Drains a gnumarus_gdscript_tokenizer instance (any iterable yielding
+## Drains a GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer instance (any iterable yielding
 ## token Dictionaries) and processes its tokens.
 func process_tokenizer(tokenizer: RefCounted) -> Array:
 	var collected: Array = []
@@ -61,15 +61,15 @@ func process_tokenizer(tokenizer: RefCounted) -> Array:
 
 ## Processes raw GDScript source code passed as a string.
 func process_text(text: String) -> Array:
-	var tok := gnumarus_gdscript_tokenizer.new()
+	var tok := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new()
 	return process_tokens(tok.tokenize_text(text))
 
 
 ## Processes either a file path (res://, user:// or OS path, when the
 ## file exists) or a raw GDScript source string, mirroring
-## gnumarus_gdscript_tokenizer.tokenize().
+## GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.tokenize().
 func process(source: String) -> Array:
-	var tok := gnumarus_gdscript_tokenizer.new()
+	var tok := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new()
 	return process_tokens(tok.tokenize(source))
 
 

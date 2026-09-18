@@ -3,7 +3,7 @@ extends RefCounted
 ## @var rule suite: before-declaration narrowing with :=/= inference,
 ## free redefinition over visible variables, and placement/shape errors.
 
-const H = preload("res://tests/helpers.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:

@@ -3,12 +3,12 @@ extends RefCounted
 ## Instance-reuse suite: every stage must parse a second input with the
 ## same object and produce results independent of the first one.
 
-const Tok = preload("res://gnumarus_gdscript_tokenizer.gd")
-const Post = preload("res://gnumarus_gdscript_post_tokenizer.gd")
-const Syn = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const Sem = preload("res://gnumarus_gdscript_semantic_parser.gd")
-const Ana = preload("res://gnumarus_gdscript_analyzer.gd")
-const H = preload("res://tests/helpers.gd")
+const Tok = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.gd")
+const Post = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.gd")
+const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const Sem = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
+const Ana = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:

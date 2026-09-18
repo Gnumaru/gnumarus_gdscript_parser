@@ -2,9 +2,9 @@ extends RefCounted
 
 ## @private nested-family rule suite (migrated from the scratch runner).
 
-const H = preload("res://tests/helpers.gd")
-const Syn = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const Ana = preload("res://gnumarus_gdscript_analyzer.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
+const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const Ana = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
 
 
 func run() -> Dictionary:
@@ -49,7 +49,7 @@ func _f_inner_uses_root(h) -> void:
 		else:
 			non_missing += 1
 	h.check(non_missing == 0 and scoped, "only the scoping error besides family use")
-	var info: Dictionary = h.load_json("res://types_info/user/tests_tmp_fam_in.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/tests_tmp_fam_in.json")
 	h.check(h.field_flagged(info, "_cache"), "root private flag recorded in json")
 
 
@@ -64,7 +64,7 @@ func _f_deep_family(h) -> void:
 	var res: Dictionary = h.analyze_text(src, "res://tests/tmp_fam_deep.gd")
 	h.check(h.priv_errors(res).is_empty(), "transitive ancestor/descendant access allowed")
 	h.check((res.get("errors", []) as Array).is_empty(), "no errors at all in deep family")
-	var deep: Dictionary = h.load_json("res://types_info/user/tests_tmp_fam_deep.Outer.Deep.json")
+	var deep: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/tests_tmp_fam_deep.Outer.Deep.json")
 	h.check(h.field_flagged(deep, "_d"), "deep private flag recorded in json")
 
 
@@ -133,13 +133,13 @@ func _f_misplaced_still_errors(h) -> void:
 func _f_json_flags(h) -> void:
 	var src := "class_name JLib\nextends Node\n# @private\nvar _a := 1\nclass In:\n\t# @private\n\tvar _b := 2\n"
 	var res: Dictionary = h.analyze_text(src, "res://tests/tmp_fam_json.gd")
-	var info: Dictionary = h.load_json("res://types_info/user/JLib.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/JLib.json")
 	var flagged := false
 	for f in info.get("fields", []):
 		if str((f as Dictionary).get("name", "")) == "_a" and (f as Dictionary).has("private"):
 			flagged = true
 	h.check(flagged, "main json flags private field")
-	var inner: Dictionary = h.load_json("res://types_info/user/JLib.In.json")
+	var inner: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/JLib.In.json")
 	var flagged2 := false
 	for f in inner.get("fields", []):
 		if str((f as Dictionary).get("name", "")) == "_b" and (f as Dictionary).has("private"):
@@ -151,7 +151,7 @@ func _f_json_flags(h) -> void:
 func _f_fixture_clean(h) -> void:
 	var syn = Syn.new()
 	var ana = Ana.new()
-	var ast: Dictionary = syn.parse("res://tests/ValidScript0.gd")
-	var res: Dictionary = ana.analyze(ast, "res://tests/ValidScript0.gd")
+	var ast: Dictionary = syn.parse("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
+	var res: Dictionary = ana.analyze(ast, "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 	h.check((res.get("errors", []) as Array).is_empty(), "fixture no analyzer errors")
 	h.check((res.get("warnings", []) as Array).is_empty(), "fixture no analyzer warnings")

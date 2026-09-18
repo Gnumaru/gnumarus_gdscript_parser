@@ -3,9 +3,9 @@ extends RefCounted
 ## @tuple suite: definitions (explicit size, unions, markers), semantic
 ## compatibility, literal shapes, index access and Array fallback.
 
-const Syn = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const Sem = preload("res://gnumarus_gdscript_semantic_parser.gd")
-const H = preload("res://tests/helpers.gd")
+const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const Sem = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:
@@ -115,7 +115,7 @@ func _t_members(h) -> void:
 
 func _t_json(h) -> void:
 	h.analyze_text("extends Node\n# @tuple JTuple 2 int String\nvar x: JTuple\n", "res://tests/tmp_tup_j1.gd")
-	var info: Dictionary = h.load_json("res://types_info/user/JTuple.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/JTuple.json")
 	h.check(str(info.get("kind", "")) == "tuple", "json kind tuple")
 	h.check(int(info.get("size", -1)) == 2, "json size kept")
 	var items: Array = info.get("tuple_items", [])

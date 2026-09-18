@@ -3,9 +3,9 @@ extends RefCounted
 ## @struct suite: definitions (mandatory size, fields, markers),
 ## semantic compatibility, literal shapes, key/member access.
 
-const Syn = preload("res://gnumarus_gdscript_syntatic_parser.gd")
-const Sem = preload("res://gnumarus_gdscript_semantic_parser.gd")
-const H = preload("res://tests/helpers.gd")
+const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
+const Sem = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:
@@ -113,7 +113,7 @@ func _s_canon(h) -> void:
 
 func _s_json(h) -> void:
 	h.analyze_text("extends Node\n# @struct JStruct 2 a:int b:String|int\nvar x: JStruct\n", "res://tests/tmp_st_j1.gd")
-	var info: Dictionary = h.load_json("res://types_info/user/JStruct.json")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/JStruct.json")
 	h.check(str(info.get("kind", "")) == "struct", "json kind struct")
 	h.check(int(info.get("size", -1)) == 2, "json size kept")
 	var fields: Array = info.get("fields", [])

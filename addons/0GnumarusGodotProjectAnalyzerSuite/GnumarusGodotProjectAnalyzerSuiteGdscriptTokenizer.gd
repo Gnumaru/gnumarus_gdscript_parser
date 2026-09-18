@@ -1,4 +1,4 @@
-class_name gnumarus_gdscript_tokenizer
+class_name GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer
 extends RefCounted
 
 ## Tokenizer for GDScript source code.
@@ -19,11 +19,11 @@ extends RefCounted
 ## DEDENT and EOF values are "".
 ##
 ## Usage with a file path:
-##   var tokens := gnumarus_gdscript_tokenizer.new().tokenize("res://script.gd")
+##   var tokens := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new().tokenize("res://script.gd")
 ## Usage with a source string:
-##   var tokens := gnumarus_gdscript_tokenizer.new().tokenize("var x := 1\n")
+##   var tokens := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new().tokenize("var x := 1\n")
 ## Direct iteration (tokenize_text() itself is just a collector over it):
-##   var tok := gnumarus_gdscript_tokenizer.new()
+##   var tok := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new()
 ##   tok.pending_text = "var x := 1\n"
 ##   for token in tok:
 ##       print(token)

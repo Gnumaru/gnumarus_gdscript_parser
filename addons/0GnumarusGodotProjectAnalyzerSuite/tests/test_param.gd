@@ -3,7 +3,7 @@ extends RefCounted
 ## @param rule suite: before-parameter (multiline lists) and
 ## before-function/lambda uses, with @var-style narrowing.
 
-const H = preload("res://tests/helpers.gd")
+const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
 
 func run() -> Dictionary:

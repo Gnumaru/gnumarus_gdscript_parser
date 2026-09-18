@@ -10,21 +10,21 @@ extends SceneTree
 
 func _init() -> void:
 	var suite_files: Array = [
-		"res://tests/test_fixture.gd",
-		"res://tests/test_native_guard.gd",
-		"res://tests/test_classdb_merge.gd",
-		"res://tests/test_doc_fetch.gd",
-		"res://tests/test_deprecated.gd",
-		"res://tests/test_private.gd",
-		"res://tests/test_return.gd",
-		"res://tests/test_var.gd",
-		"res://tests/test_param.gd",
-		"res://tests/test_tuple.gd",
-		"res://tests/test_struct.gd",
-		"res://tests/test_interface.gd",
-		"res://tests/test_implements.gd",
-		"res://tests/test_flow.gd",
-		"res://tests/test_reuse.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_fixture.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_native_guard.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_classdb_merge.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_doc_fetch.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_deprecated.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_private.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_return.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_var.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_param.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_tuple.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_struct.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_interface.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_implements.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_flow.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_reuse.gd",
 	]
 	var total_p := 0
 	var total_f := 0
