@@ -23,6 +23,7 @@ func _init() -> void:
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_alias.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_template.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_generic_call.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_generic.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_type_expr.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_struct.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_interface.gd",

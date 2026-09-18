@@ -141,6 +141,9 @@ const ERR_TEMPLATE_MALFORMED := "template_malformed"
 const ERR_TEMPLATE_UNKNOWN_TYPE := "template_unknown_type"
 const ERR_TEMPLATE_CONFLICT := "template_conflict"
 const ERR_TEMPLATE_MISMATCH := "template_mismatch"
+const ERR_GENERIC_MISPLACED := "generic_misplaced"
+const ERR_GENERIC_MALFORMED := "generic_malformed"
+const ERR_GENERIC_MISMATCH := "generic_mismatch"
 const ERR_STRUCT_MISPLACED := "struct_misplaced"
 const ERR_STRUCT_MALFORMED := "struct_malformed"
 const ERR_STRUCT_UNKNOWN_TYPE := "struct_unknown_type"
@@ -258,6 +261,9 @@ var _pending_tree_checks: Array = []
 ## owner, pkind}]. Alias definitions resolve after the scan, so
 ## alias-vs-declared checks wait for _check_pending_alias_narrows.
 var _pending_alias_narrows: Array = []
+## Vartype arguments awaiting bound checks: [{param, arg, head, line,
+## col, owner}]. Template bounds resolve after the scan.
+var _pending_vartype_bounds: Array = []
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -281,6 +287,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_templates = {}
 	_pending_tree_checks = []
 	_pending_alias_narrows = []
+	_pending_vartype_bounds = []
 	_script_class = ""
 	_script_extends = ""
 	for child in ast.get("children", []):
@@ -311,6 +318,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_resolve_interfaces()
 	_resolve_aliases()
 	_resolve_templates()
+	_check_pending_vartype_bounds()
 	_check_pending_trees()
 	_check_pending_alias_narrows()
 	var scope = _new_scope(null)
@@ -388,6 +396,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_template(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_generic(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		var htag := _find_implements(str((header as Dictionary).get("value", "")))
 		if not htag.is_empty():
 			_record_implements_words("", _split_words(str(htag.get("message", ""))), int((header as Dictionary).get("line", 0)))
@@ -1932,6 +1942,86 @@ static func _check_bound(bound: Dictionary, actual: Dictionary) -> bool:
 	return bool(r.get("ok", false))
 
 
+# ------------------------------------------------------- @generic helpers
+#
+# Class-level generic parameters ("# @generic T1 T2" immediately
+# before a class declaration). Every name must be a file @template
+# (never a concrete type): the count is the class arity, tied to the
+# instance. Stored on the class rec ("generic") and the class JSON.
+
+func _find_generic(value: String) -> Dictionary:
+	return _find_tag(value, "generic")
+
+
+func _has_generic_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_generic(str(tok.get("value", "")))
+
+
+func _has_any_generic_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_generic_tag(c).is_empty():
+			return true
+	return false
+
+
+## Marks one CLASS_DECL node generic from its leading @generic tags.
+## Merges every tag in every leading token; names must be file
+## template types, duplicates and repeats error out.
+func _mark_generic_class(node: Dictionary, owner: String) -> void:
+	var cname := str(node.get("name", ""))
+	if cname == "" or not _members.has(owner):
+		return
+	var rec: Dictionary = (_members[owner] as Dictionary).get(cname, {})
+	if rec.is_empty():
+		return
+	var names: Array = []
+	var found := false
+	for c in node.get("leading_comments", []):
+		if not (c is Dictionary):
+			continue
+		var tag := _has_generic_tag(c)
+		if tag.is_empty():
+			continue
+		found = true
+		for w in _split_words(str(tag.get("message", ""))):
+			var word := str(w)
+			if not _is_type_name(word):
+				_error(ERR_GENERIC_MALFORMED, "@generic has an invalid template name '" + word + "'", int(c.get("line", 0)), 0, owner)
+				return
+			if not _templates.has(word):
+				_error(ERR_GENERIC_MALFORMED, "@generic '" + word + "' must be a template type of this file", int(c.get("line", 0)), 0, owner)
+				return
+			if word in names:
+				_error(ERR_GENERIC_MALFORMED, "@generic lists '" + word + "' more than once", int(c.get("line", 0)), 0, owner)
+				return
+			names.append(word)
+	if not found:
+		return
+	if names.is_empty():
+		_error(ERR_GENERIC_MALFORMED, "@generic needs at least one template name: '# @generic T1 T2'", int(node.get("line", 0)), int(node.get("column", 0)), owner)
+		return
+	rec["generic"] = names
+
+
+## Generic parameter names of a class key ("Outer.Inner"), [] when
+## absent, root, or non-generic. In-memory only (cross-file classes
+## stay lenient until their JSON is consulted by later work).
+func _class_generic(key: String) -> Array:
+	if key == "":
+		return []
+	var parts := str(key).split(".")
+	var pname := str(parts[parts.size() - 1])
+	var pkey := ".".join(parts.slice(0, parts.size() - 1))
+	if not _members.has(pkey):
+		return []
+	var rec: Dictionary = (_members[pkey] as Dictionary).get(pname, {})
+	if rec.is_empty():
+		return []
+	return (rec.get("generic", []) as Array).duplicate()
+
+
 # ------------------------------------------------------- @struct helpers
 
 ## Parses an @struct message ("Name COUNT field...") into {"ok",
@@ -3428,6 +3518,101 @@ static func _vartype_name(decl: Dictionary) -> String:
 	return ""
 
 
+## Raw vartype token text (unvalidated, brackets kept) or "".
+static func _vartype_text(decl: Dictionary, key := "vartype") -> String:
+	var vt: Variant = decl.get(key, null)
+	if not (vt is Dictionary):
+		return ""
+	var text := ""
+	for t in (vt as Dictionary).get("tokens", []):
+		if t is Dictionary:
+			text += str((t as Dictionary).get("value", ""))
+	return text.strip_edges()
+
+
+## Validates one generic arm of a vartype tree against a @generic
+## class (arity + template bounds on arguments). Unknown names are
+## left to the semantic pass on purpose (no double reports).
+## Returns the class key or "" (skip: non-generic, unknown, engine).
+func _check_vartype_arm(head: String, args: Array, owner: String, line: int, col: int) -> String:
+	var key := _script_key_of(head, owner)
+	if key == "":
+		if head == _script_class and head != "":
+			return ""
+		return ""
+	var params := _class_generic(key)
+	if params.is_empty():
+		return ""
+	if args.size() != params.size():
+		_error(ERR_GENERIC_MISMATCH, "vartype '" + head + "' takes " + str(params.size()) + " type argument(s), got " + str(args.size()), line, col, owner)
+		return ""
+	for i in range(args.size()):
+		if not (args[i] is Dictionary):
+			continue
+		_pending_vartype_bounds.append({"param": str(params[i]), "arg": args[i], "head": head, "line": line, "col": col, "owner": owner})
+	return key
+
+
+## Post-resolve pass: template bounds on vartype arguments (bounds
+## resolve after the scan, so this waits like the other post passes).
+func _check_pending_vartype_bounds() -> void:
+	for pen in _pending_vartype_bounds:
+		if not (pen is Dictionary):
+			continue
+		var pd: Dictionary = pen
+		var bound := _template_bound_of(str(pd.get("param", "")))
+		if bound.is_empty():
+			continue
+		var arg: Dictionary = pd.get("arg", {})
+		if arg.is_empty():
+			continue
+		if not _template_refs(arg, _templates.keys()).is_empty():
+			continue
+		if not _check_bound(bound, arg):
+			_error(ERR_GENERIC_MISMATCH, "type '" + _show_tree(arg) + "' for '" + str(pd.get("param", "")) + "' violates bound '" + _show_tree(bound) + "' in vartype '" + str(pd.get("head", "")) + "'", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
+
+
+## Validates a vartype (or `->` return type) holding brackets and
+## stamps node["vartype_ann"] = {head, key, args, raw, line} for the
+## first generic arm over a @generic class. Anything else (simple
+## names, engine generics like Array[int], unknown heads) is skipped
+## silently, exactly like today.
+func _mark_vartype_on(vt: Variant, node: Dictionary, owner: String) -> void:
+	if not (vt is Dictionary):
+		return
+	var text := ""
+	for t in (vt as Dictionary).get("tokens", []):
+		if t is Dictionary:
+			text += str((t as Dictionary).get("value", ""))
+	text = text.strip_edges()
+	if text == "" or (not ("[" in text) and not ("]" in text) and not ("," in text)):
+		return
+	var parsed := _parse_type_expr(text, "vartype")
+	if not bool(parsed.get("ok", false)):
+		return
+	var tree: Dictionary = parsed.get("node", {})
+	var arms: Array = []
+	if str(tree.get("kind", "")) == "union":
+		arms = (tree.get("arms", []) as Array).duplicate()
+	else:
+		arms = [tree]
+	for arm in arms:
+		if not (arm is Dictionary):
+			continue
+		if str((arm as Dictionary).get("kind", "")) != "generic":
+			continue
+		var head := str((arm as Dictionary).get("name", ""))
+		var key := _check_vartype_arm(head, (arm as Dictionary).get("args", []), owner, int(node.get("line", 0)), int(node.get("column", 0)))
+		if key != "":
+			node["vartype_ann"] = {"head": head, "key": key, "args": ((arm as Dictionary).get("args", []) as Array).duplicate(), "raw": text, "line": int(node.get("line", 0))}
+			return
+
+
+## Validates a declaration vartype (VAR/CONST/PARAM nodes).
+func _mark_vartype(node: Dictionary, owner: String) -> void:
+	_mark_vartype_on(node.get("vartype", null), node, owner)
+
+
 ## Infers a variable type from a simple initializer value:
 ## literals, arrays, dictionaries, known-type constructors (Color(...),
 ## Node.new()), node paths and lambdas (Callable). "" when unknown.
@@ -4507,6 +4692,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_PRIVATE_MISPLACED, "@private must precede a member declaration (variable, function, class, enum, constant or signal) inside a class body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "FUNC_DECL":
 			_mark_return_func(d, owner)
+			_mark_vartype_on(d.get("return_type", null), d, owner)
 		elif _has_any_return_tag(d):
 			if t == "VAR_DECL" or t == "CONST_DECL":
 				_mark_return_stmt(d, d.get("value", null), owner)
@@ -4514,6 +4700,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 				_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "VAR_DECL" or t == "CONST_DECL":
 			_mark_var_decl(d, owner)
+			_mark_vartype(d, owner)
 		elif _has_any_var_tag(d):
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "FUNC_DECL":
@@ -4543,6 +4730,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 				_record_implements("", d, int(d.get("line", 0)))
 			else:
 				_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_generic_tag(d):
+			if t == "CLASS_DECL" and member_pos:
+				_mark_generic_class(d, owner)
+			else:
+				_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -4571,6 +4763,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_generic_tag(d):
+			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_implements_tag(d):
 			_record_implements("", d, int(d.get("line", 0)))
 		return
@@ -4578,6 +4772,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		var ptag = _leading_tag(d)
 		if not ptag.is_empty():
 			_error(ERR_DEPRECATED_UNSUPPORTED, "@deprecated on function parameters is not supported yet", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		_mark_vartype(d, owner)
 		if _has_any_private_tag(d):
 			_error(ERR_PRIVATE_MISPLACED, "@private must precede a member declaration (variable, function, class, enum, constant or signal) inside a class body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_return_tag(d):
@@ -4592,6 +4787,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_template_tag(d):
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_generic_tag(d):
+			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d):
@@ -4629,6 +4826,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_template_tag(d):
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_generic_tag(d):
+			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
@@ -4656,6 +4856,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_template_tag(d).is_empty():
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not _has_generic_tag(d).is_empty():
+			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_struct_tag(d).is_empty():
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_interface_tag(d).is_empty():
@@ -4681,6 +4883,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		# Top level: already collected by _prescan_templates; falls through.
+	if _has_any_generic_tag(d):
+		_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		return
 	if _has_any_struct_tag(d):
 		if not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
@@ -4859,6 +5064,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_template_tag(child):
 					_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_generic_tag(child):
+					_mark_generic_class(child, full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
@@ -4871,10 +5078,12 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 				_mark_private(child, full)
 				if str((child as Dictionary).get("type", "")) == "FUNC_DECL":
 					_mark_return_func(child, full)
+					_mark_vartype_on((child as Dictionary).get("return_type", null), child, full)
 					_mark_param_carrier(child, child, full)
 					_scan((child as Dictionary).get("body", null), full)
 				if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 					_mark_var_decl(child, full)
+					_mark_vartype(child, full)
 				elif _has_any_var_tag(child):
 					_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if str((child as Dictionary).get("type", "")) != "FUNC_DECL" and _has_any_param_tag(child):
@@ -4891,6 +5100,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_template_tag(child):
 					_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_generic_tag(child):
+					_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
@@ -5952,17 +6163,47 @@ func _infer_arg_name(vname: String, scope: Dictionary, fn: Variant, env: Diction
 		var pnode := _find_param_node(fnd.get("params", []), vname)
 		if pnode.is_empty():
 			return {"kind": "any"}
+		if pnode.has("param_ann"):
+			return _ann_tree(pnode.get("param_ann", {}))
+		var ptree := _vartype_ann_tree(pnode, owner)
+		if not ptree.is_empty():
+			return ptree
 		return _flat_to_tree(_flow_decl_types(pnode, false, true))
 	if kind == "local" or kind == "const":
 		var decl := _find_body_decl(fnd.get("body", null), vname)
 		if decl.is_empty():
 			return {"kind": "any"}
+		if decl.has("var_ann"):
+			return _ann_tree(decl.get("var_ann", {}))
+		var dtree := _vartype_ann_tree(decl, owner)
+		if not dtree.is_empty():
+			return dtree
 		return _flat_to_tree(_flow_decl_types(decl, str(decl.get("type", "")) == "CONST_DECL", false))
 	for o in [owner, ""]:
 		var n := _member_var_node(str(o), vname)
 		if not n.is_empty():
+			if n.has("var_ann"):
+				return _ann_tree(n.get("var_ann", {}))
+			var ntree := _vartype_ann_tree(n, owner)
+			if not ntree.is_empty():
+				return ntree
 			return _flat_to_tree(_flow_decl_types(n, str(n.get("type", "")) == "CONST_DECL", false))
 	return {"kind": "any"}
+
+
+## Generic tree for a declaration with a validated parameterized
+## vartype, {} otherwise. Head canonized, args as stamped. Pure.
+func _vartype_ann_tree(node: Dictionary, owner: String) -> Dictionary:
+	if not node.has("vartype_ann"):
+		return {}
+	var vta: Dictionary = node["vartype_ann"]
+	if str(vta.get("key", "")) == "":
+		return {}
+	var args: Array = (vta.get("args", []) as Array).duplicate()
+	var head := _canon_type(str(vta.get("head", "")))
+	if head == "":
+		return {}
+	return {"kind": "generic", "name": head, "args": args}
 
 
 ## Flat type-name list to a tree (single name, union, or dynamic).
@@ -5981,13 +6222,28 @@ static func _flat_to_tree(types: Array) -> Dictionary:
 ## inferred actual trees, checks bounds of bound variables, and
 ## returns substituted return heads. Reports template_mismatch and
 ## returns {"ok": false} on failure. No-ops ({ok, n/a}) without
-## template variables (caller keeps existing behavior).
-func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, line: int, col: int) -> Dictionary:
+## template variables (caller keeps existing behavior). `pre` seeds
+## class-level bindings (generic methods on instantiated classes).
+func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, line: int, col: int, pre := {}) -> Dictionary:
 	var sig := _func_template_sig(fn_node)
 	if not bool(sig.get("ok", false)):
 		return {"ok": true, "generic": false}
-	var formals: Array = sig.get("formals", [])
 	var tvars: Array = sig.get("tvars", [])
+	var formals: Array = sig.get("formals", [])
+	var ret: Dictionary = sig.get("return", {})
+	var free: Array = []
+	if pre.is_empty():
+		free = tvars.duplicate()
+	else:
+		for f in formals:
+			if f is Dictionary:
+				(f as Dictionary)["tree"] = _subst_tree((f as Dictionary).get("tree", {}), pre)
+		ret = _subst_tree(ret, pre)
+		for v in tvars:
+			if not pre.has(str(v)):
+				free.append(str(v))
+	if free.is_empty() and pre.is_empty():
+		return {"ok": true, "generic": false}
 	var req := 0
 	for f in formals:
 		if f is Dictionary and bool((f as Dictionary).get("req", true)):
@@ -5998,26 +6254,60 @@ func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope
 			want = str(req) + ".." + str(formals.size())
 		_error(ERR_TEMPLATE_MISMATCH, "generic function " + disp + " expects " + want + " argument(s), got " + str(slices.size()), line, col, owner)
 		return {"ok": false, "generic": true}
-	var subst := {}
+	var subst := pre.duplicate()
 	for idx in range(slices.size()):
 		var formal: Dictionary = formals[idx]
 		var actual := _infer_arg_tree(slices[idx], scope, fn, env, overlay, owner, 0)
-		var u := _unify_trees(formal.get("tree", {}), actual, subst, tvars)
+		var u := _unify_trees(formal.get("tree", {}), actual, subst, free)
 		if not bool(u.get("ok", false)):
 			_error(ERR_TEMPLATE_MISMATCH, "argument " + str(idx + 1) + " of generic function " + disp + " expects '" + _show_tree(formal.get("tree", {})) + "', got '" + _show_tree(actual) + "' (" + str(u.get("error", "")) + ")", line, col, owner)
 			return {"ok": false, "generic": true}
 		subst = u.get("subst", subst)
-	for v in tvars:
+	for v in free:
 		var vs := str(v)
-		if subst.has(vs) and not _template_bound_of(vs).is_empty():
+		if subst.has(vs) and _template_refs(subst[vs], free).is_empty() and not _template_bound_of(vs).is_empty():
 			if not _check_bound(_template_bound_of(vs), subst[vs]):
 				_error(ERR_TEMPLATE_MISMATCH, "type '" + _show_tree(subst[vs]) + "' for '" + vs + "' violates bound '" + _show_tree(_template_bound_of(vs)) + "' in generic function " + disp, line, col, owner)
 				return {"ok": false, "generic": true}
-	var ret := _subst_tree(sig.get("return", {}), subst)
-	return {"ok": true, "generic": true, "heads": _tree_top_heads(ret)}
+	var ret2 := _subst_tree(ret, subst)
+	return {"ok": true, "generic": true, "heads": _tree_top_heads(ret2)}
 
 
-func _script_seg(owner_key: String, seg: String, is_call: bool) -> Dictionary:
+## Substitutes class-parameter heads in a script hit with instance
+## type arguments: only variable/constant hits owned by the link's own
+## class (inherited members stay opaque: no extends-with-args in v1),
+## and only when arities line up (validated at declaration; guarded).
+func _subst_hit_types(hut: Dictionary, rec: Dictionary, key: String, start_key: String, link_args: Array) -> Dictionary:
+	if link_args.is_empty() or key != start_key:
+		return hut
+	if str(rec.get("kind", "")) not in ["variable", "constant"]:
+		return hut
+	if str(rec.get("owner", "")) != start_key:
+		return hut
+	var params := _class_generic(key)
+	if params.is_empty() or params.size() != link_args.size():
+		return hut
+	var cont: Dictionary = hut.get("cont", {})
+	var out: Array = []
+	var changed := false
+	for t in (cont.get("types", []) as Array):
+		var idx := params.find(str(t))
+		if idx < 0 or not (link_args[idx] is Dictionary):
+			out.append(t)
+			continue
+		var hs := _tree_top_heads(link_args[idx])
+		if hs.is_empty():
+			out.append(t)
+		else:
+			for h in hs:
+				out.append(str(h))
+			changed = true
+	if changed:
+		cont["types"] = out
+	return hut
+
+
+func _script_seg(owner_key: String, seg: String, is_call: bool, link_args := []) -> Dictionary:
 	var key := owner_key
 	var seen := {}
 	var guard := 0
@@ -6029,7 +6319,8 @@ func _script_seg(owner_key: String, seg: String, is_call: bool) -> Dictionary:
 		if _members.has(key):
 			var table: Dictionary = _members[key]
 			if table.has(seg):
-				return _script_hit(table[seg], seg, is_call)
+				var hut := _script_hit(table[seg], seg, is_call)
+				return _subst_hit_types(hut, table[seg], key, owner_key, link_args)
 		var base := ""
 		if key == "":
 			base = _script_extends
@@ -6060,6 +6351,10 @@ func _flow_decl_types(node: Dictionary, is_const: bool, is_param: bool) -> Array
 	if node.has("param_ann"):
 		var pa: Dictionary = node["param_ann"]
 		return (pa.get("types", []) as Array).duplicate()
+	if node.has("vartype_ann"):
+		var vta: Dictionary = node["vartype_ann"]
+		if str(vta.get("head", "")) != "":
+			return [str(vta.get("head", ""))]
 	var vt := _vartype_name(node)
 	if vt != "":
 		return [vt]
@@ -6161,9 +6456,51 @@ func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, en
 	return {"kind": "class", "tname": vname}
 
 
-## Resolves one link name to {"kind": "script", "key"} (script classes
-## win over engine names), {"kind": "engine", "name"}, or {} when
-## neither (dynamic/unknown: caller skips silently).
+## Declaration node behind a chain base name (param/local/const
+## scopes, then member vars), {} when shadowed by env/overlay values
+## or unresolvable. Mirrors _flow_base precedence (nodes only).
+func _base_decl_node(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> Dictionary:
+	if base == "" or base == "_" or base == "self" or base == "super":
+		return {}
+	if (env as Dictionary).has(base):
+		return {}
+	var fnd: Dictionary = fn if fn is Dictionary else {}
+	var kind := _scope_kind(scope, base)
+	if kind == "param":
+		return _find_param_node(fnd.get("params", []), base)
+	if kind == "local" or kind == "const":
+		return _find_body_decl(fnd.get("body", null), base)
+	if kind != "":
+		return {}
+	for o in [owner, ""]:
+		var n := _member_var_node(str(o), base)
+		if not n.is_empty():
+			return n
+	return {}
+
+
+## Generic arguments behind a chain base for one resolved link key:
+## the declaration vartype first, then @var/@param stamped trees whose
+## head resolves to the key. [] when absent or mismatched. Pure.
+func _link_vartype_args(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, key: String) -> Array:
+	if key == "":
+		return []
+	var node := _base_decl_node(base, fn, scope, owner, env)
+	if node.is_empty():
+		return []
+	if node.has("vartype_ann"):
+		var vta: Dictionary = node["vartype_ann"]
+		if str(vta.get("key", "")) == key:
+			return (vta.get("args", []) as Array).duplicate()
+	for ak in ["var_ann", "param_ann"]:
+		if node.has(ak):
+			var tree := _ann_tree(node[ak])
+			if str(tree.get("kind", "")) == "generic":
+				var hn := str(tree.get("name", ""))
+				var kk := _script_key_of(hn, owner)
+				if kk == key:
+					return (tree.get("args", []) as Array).duplicate()
+	return []
 func _link_kind_of(tname: String, ctx: String) -> Dictionary:
 	if tname == "":
 		return {}
@@ -6284,7 +6621,7 @@ func _skip_chain_verify(tokens: Array, j: int, scope: Dictionary, owner: String,
 ## references template variables. Returns {"applies": false} for
 ## plain calls (caller keeps existing behavior) or {"applies": true,
 ## "types": [...]} with substituted return heads (possibly dynamic).
-func _generic_link_types(key: String, seg: String, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> Dictionary:
+func _generic_link_types(key: String, seg: String, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, link_args := []) -> Dictionary:
 	var node := _script_func_node(key, seg)
 	if node.is_empty():
 		return {"applies": false}
@@ -6295,10 +6632,27 @@ func _generic_link_types(key: String, seg: String, tokens: Array, j: int, scope:
 		return {"applies": false}
 	var slices := _split_arg_slices(tokens, j + 1)
 	var disp := "'" + seg + "'"
-	var r := _check_generic_call(node, disp, slices, scope, fn, env, overlay, owner, int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)))
+	var pre := _class_prebindings(key, link_args)
+	var r := _check_generic_call(node, disp, slices, scope, fn, env, overlay, owner, int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)), pre)
 	if not bool(r.get("generic", false)):
 		return {"applies": false}
 	return {"applies": true, "types": r.get("heads", [])}
+
+
+## Class-level prebindings for a method call on an instantiated link:
+## {class_param: arg_tree} when the link carries args matching the
+## class arity (checked at declaration; guarded). {} otherwise.
+func _class_prebindings(key: String, link_args: Array) -> Dictionary:
+	var out := {}
+	var params := _class_generic(key)
+	if params.is_empty() or params.size() != link_args.size():
+		return out
+	for i in range(params.size()):
+		if link_args[i] is Dictionary:
+			out[str(params[i])] = link_args[i]
+		else:
+			return {}
+	return out
 
 
 ## Generic instantiation for a bare call `f(...)`: only when the name
@@ -6366,6 +6720,10 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 			if l.is_empty():
 				return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
 			links.append(l)
+		if links.size() == 1 and str(links[0].get("kind", "")) == "script":
+			var largs := _link_vartype_args(base, fn, scope, owner, env, str(links[0].get("key", "")))
+			if not largs.is_empty():
+				(links[0] as Dictionary)["args"] = largs
 	elif kind == "class":
 		var lc := _link_kind_of(str(fb.get("tname", "")), owner)
 		if lc.is_empty():
@@ -6481,14 +6839,14 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 				dnames.append(sname)
 				continue
 			if str(L.get("kind", "")) == "script":
-				var r := _script_seg(str(L.get("key", "")), seg, is_call)
+				var r := _script_seg(str(L.get("key", "")), seg, is_call, (L.get("args", []) as Array).duplicate())
 				var status := str(r.get("status", ""))
 				if status == "found":
 					found = true
 					var cont: Dictionary = r.get("cont", {})
 					var cont_types: Array = (cont.get("types", []) as Array).duplicate()
 					if is_call:
-						var go := _generic_link_types(str(L.get("key", "")), seg, tokens, j, scope, fn, env, overlay, owner)
+						var go := _generic_link_types(str(L.get("key", "")), seg, tokens, j, scope, fn, env, overlay, owner, (L.get("args", []) as Array).duplicate())
 						if bool(go.get("applies", false)):
 							cont_types = go.get("types", [])
 					if not (cont.get("enumvals", []) as Array).is_empty():
@@ -7214,11 +7572,29 @@ func _collect_inner_names(node: Dictionary, file_prefix: String, owner_prefix: S
 				_collect_inner_names(child, file_full, owner_full, out)
 
 
+## Generic parameter names for the class described by a member-table
+## owner key ("" = root script class, never generic in v1). Updates on
+## every analyze (classes may gain or lose @generic).
+func _generic_for_file(owner: String) -> Array:
+	if owner == "":
+		return []
+	var parts := owner.split(".")
+	var pname := str(parts[parts.size() - 1])
+	var pkey := ".".join(parts.slice(0, parts.size() - 1))
+	if not _members.has(pkey):
+		return []
+	var rec: Dictionary = (_members[pkey] as Dictionary).get(pname, {})
+	if rec.is_empty():
+		return []
+	return (rec.get("generic", []) as Array).duplicate()
+
+
 func _write_class_file(file_base: String, owner: String, ast: Dictionary, root_prefix: String) -> void:
 	var path = _write_base + "/user/" + file_base + ".json"
 	var info: Dictionary = _read_json(path)
 	if info.is_empty():
 		info = _minimal_info(file_base, owner, root_prefix)
+	info["generic"] = _generic_for_file(owner)
 	_flag_deprecated(info, owner)
 	_flag_private(info, owner)
 	info["analysis_errors"] = _issues_for(owner, _errors)

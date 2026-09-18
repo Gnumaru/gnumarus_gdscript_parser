@@ -735,6 +735,51 @@ var x: Variant              # OK: known name, narrowing deferred
 - Gaps (documented): `@generic` classes come next; `env` still
   carries flat heads (no tree flow across statements).
 
+### `@generic`
+
+Declares a class generic: `# @generic T1 T2` immediately before a
+class declaration. Every name must be a file `@template` (never a
+concrete type); the count is the class arity, tied to the instance.
+The parameter list rides on the class rec and the class JSON
+(`"generic": [...]`):
+
+```gdscript
+extends Node
+
+# @template TplT
+# @generic TplT
+class GBox:
+    # @param x TplT
+    func setv(x):
+        pass
+
+func f():
+    var b: GBox[int]       # OK: arity matches, bound checked
+    b.setv(1)              # OK: TplT = int here
+    b.setv("a")            # ERROR: expects 'int', got 'String'
+```
+
+- Vartypes (and `->` returns, and params) holding brackets validate
+  against `@generic` classes: unknown or non-generic heads stay
+  silent (engine generics like `Array[int]` keep working); arity and
+  template bounds on arguments error `generic_mismatch`. Bare uses
+  (`var b: GBox`) stay lenient (dynamic arguments).
+- Member lookup substitutes through instance arguments: fields typed
+  by class parameters read substituted, and method calls pre-bind
+  class arguments before unifying the method's own variables
+  (nested generics like `Box[TplU]` inside generic functions fall
+  out). Inherited members stay opaque (no extends-with-args in v1),
+  as do cross-file generic classes (in-memory only for now).
+- Definitions accept classes at root or nested (`generic_misplaced`
+  elsewhere); bad shapes error (`generic_malformed`: empty,
+  duplicates, non-template names).
+- Gaps (documented): the script root itself cannot be generic (no
+  `CLASS_DECL` to attach to); `extends Box[int]` is unchecked;
+  bare template names in vartypes/arrows (`var x: TplT`) error in
+  the semantic pass (untouched) — use applications or annotations;
+  methods cannot carry `@return` (pre-existing rule), so generic
+  method returns flow only via `->` arrows.
+
 ### `@interface`
 
 Declares an interface blueprint between `@interface Name` and a
@@ -883,6 +928,7 @@ green. `GODOT_BIN` overrides the engine path.
   `test_alias.gd` (`@alias` rule),
   `test_template.gd` (`@template` file-local variables + subst/unify IR),
   `test_generic_call.gd` (generic call instantiation),
+  `test_generic.gd` (`@generic` classes),
   `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
   `test_implements.gd` (`@implements` rule),
