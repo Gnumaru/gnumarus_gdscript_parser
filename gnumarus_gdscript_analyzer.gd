@@ -138,6 +138,10 @@ const ERR_INTERFACE_MISPLACED := "interface_misplaced"
 const ERR_INTERFACE_MALFORMED := "interface_malformed"
 const ERR_INTERFACE_UNKNOWN_TYPE := "interface_unknown_type"
 const ERR_INTERFACE_CONFLICT := "interface_conflict"
+const ERR_IMPLEMENTS_MISPLACED := "implements_misplaced"
+const ERR_IMPLEMENTS_MALFORMED := "implements_malformed"
+const ERR_IMPLEMENTS_UNKNOWN_TYPE := "implements_unknown_type"
+const ERR_IMPLEMENTS_MISMATCH := "implements_mismatch"
 const ERR_MISSING_METHOD := "missing_method"
 const ERR_MISSING_MEMBER := "missing_member"
 
@@ -224,6 +228,9 @@ var _structs: Dictionary = {}
 ## @interface raw blocks: name -> [{words, line}]. Validated in
 ## _resolve_interfaces before the walk.
 var _interfaces: Dictionary = {}
+## @implements raw uses: owner -> [{names, line}]. Checked in
+## _check_implements after the walk (tables complete by then).
+var _implements: Dictionary = {}
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -242,6 +249,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_tuples = {}
 	_structs = {}
 	_interfaces = {}
+	_implements = {}
 	_script_class = ""
 	_script_extends = ""
 	for child in ast.get("children", []):
@@ -271,6 +279,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
+	_check_implements()
 	ast["analyzer_errors"] = _errors
 	ast["analyzer_warnings"] = _warnings
 	_update_user_files(ast)
@@ -338,6 +347,9 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_interface(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		var htag := _find_implements(str((header as Dictionary).get("value", "")))
+		if not htag.is_empty():
+			_record_implements_words("", _split_words(str(htag.get("message", ""))), int((header as Dictionary).get("line", 0)))
 
 
 # ------------------------------------------------------------- tag scan
@@ -1732,6 +1744,681 @@ func _write_interface_file(tname: String) -> void:
 	_written.append(_write_base + "/user/" + tname + ".json")
 
 
+# ------------------------------------------------------- @implements
+
+func _find_implements(value: String) -> Dictionary:
+	return _find_tag(value, "implements")
+
+
+func _has_implements_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_implements(str(tok.get("value", "")))
+
+
+func _has_any_implements_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_implements_tag(c).is_empty():
+			return true
+	return false
+
+
+## Dotted type names: every dot-separated part must be an identifier.
+static func _is_dotted_name(text: String) -> bool:
+	if text == "":
+		return false
+	for part in text.split("."):
+		if not _is_type_name(str(part)):
+			return false
+	return true
+
+
+## Canonical dotted name: first-letter-uppercased every lowercase
+## leading segment (mirrors _canon_type for paths). Names are validated
+## by callers; resolution happens in _implement_target.
+static func _canon_dotted(text: String) -> String:
+	var parts: Array = text.split(".")
+	var fixed: Array = []
+	for p in parts:
+		var ps := str(p)
+		if ps != "" and ps.unicode_at(0) >= 97 and ps.unicode_at(0) <= 122:
+			fixed.append(ps.substr(0, 1).to_upper() + ps.substr(1))
+		else:
+			fixed.append(ps)
+	return ".".join(fixed)
+
+
+## Records one raw @implements use (words validated for shape only;
+## resolution needs complete tables, so it happens in _check_implements).
+func _record_implements(owner: String, node: Dictionary, line: int) -> void:
+	for c in node.get("leading_comments", []):
+		if not (c is Dictionary):
+			continue
+		var tag := _has_implements_tag(c)
+		if tag.is_empty():
+			continue
+		_record_implements_words(owner, _split_words(str(tag.get("message", ""))), line)
+
+
+## Records validated @implements words under an owner.
+func _record_implements_words(owner: String, words: Array, line: int) -> void:
+	var names: Array = []
+	for w in words:
+		var word := str(w)
+		if not _is_dotted_name(word):
+			_error(ERR_IMPLEMENTS_MALFORMED, "@implements needs valid type names, got '" + word + "'", line, 0, owner)
+			return
+		names.append(_canon_dotted(word))
+	if names.is_empty():
+		_error(ERR_IMPLEMENTS_MALFORMED, "@implements needs at least one type name", line, 0, owner)
+		return
+	if not _implements.has(owner):
+		_implements[owner] = []
+	(_implements[owner] as Array).append({"names": names, "line": line})
+
+
+## Records one standalone @implements comment token (top level only).
+func _record_implements_tok(owner: String, tok: Dictionary) -> void:
+	var tag := _has_implements_tag(tok)
+	if tag.is_empty():
+		return
+	_record_implements_words(owner, _split_words(str(tag.get("message", ""))), int(tok.get("line", 0)))
+
+
+## Resolved interface spec {members} from the registry ({} when the
+## interface failed validation: its own errors already reported).
+func _iface_spec(iname: String) -> Dictionary:
+	if _interfaces.has(iname):
+		var entry: Dictionary = _interfaces[iname]
+		if bool(entry.get("resolved", false)):
+			return entry.get("spec", {})
+	var info := _type_info(iname)
+	if not info.is_empty() and str(info.get("kind", "")) == "interface":
+		return {"members": _iface_members_from_json(info)}
+	return {}
+
+
+## Interface members from a JSON file into _sort_iface_member shape.
+func _iface_members_from_json(info: Dictionary) -> Array:
+	var out: Array = []
+	for f in info.get("fields", []):
+		if f is Dictionary:
+			out.append({"kind": "var", "static": bool((f as Dictionary).get("is_static", false)), "name": str((f as Dictionary).get("name", "")), "types": (f as Dictionary).get("types", []), "any": bool((f as Dictionary).get("any", false))})
+	for m in info.get("static_methods", []):
+		if m is Dictionary:
+			out.append(_iface_method_from_json(m, true))
+	for m in info.get("instance_methods", []):
+		if m is Dictionary:
+			out.append(_iface_method_from_json(m, false))
+	for s in info.get("signals", []):
+		if s is Dictionary:
+			out.append({"kind": "signal", "static": false, "name": str((s as Dictionary).get("name", "")), "params": (s as Dictionary).get("params", [])})
+	for e in info.get("enums", []):
+		if e is Dictionary:
+			out.append({"kind": "enum", "static": false, "name": str((e as Dictionary).get("name", "")), "members": (e as Dictionary).get("values", [])})
+	for c in info.get("constants", []):
+		if c is Dictionary:
+			out.append({"kind": "const", "static": false, "name": str((c as Dictionary).get("name", "")), "types": (c as Dictionary).get("types", []), "any": bool((c as Dictionary).get("any", false))})
+	return out
+
+
+## One interface method entry from JSON params shape.
+func _iface_method_from_json(md: Dictionary, is_static: bool) -> Dictionary:
+	var params: Array = []
+	for p in (md as Dictionary).get("params", []):
+		if p is Dictionary:
+			params.append({"name": str((p as Dictionary).get("name", "")), "types": (p as Dictionary).get("types", []), "any": bool((p as Dictionary).get("any", false)), "req": not bool((p as Dictionary).get("has_default", false)) and not bool((p as Dictionary).get("is_vararg", false))})
+	return {"kind": "func", "static": is_static, "name": str(md.get("name", "")), "returns": str(md.get("returns", "any")), "params": params}
+
+
+## Finds an implemented member by name walking the class, its script
+## parents and the terminal engine chain. Returns {"found", "sig",
+## "static", "line"} or {"found": false}. `want` selects the table
+## ("methods", "fields", "signals", "enums", "consts").
+func _impl_find(owner: String, mname: String, want: String) -> Dictionary:
+	var key := owner
+	var seen := {}
+	var guard := 0
+	while guard < 64:
+		guard += 1
+		if seen.has(key):
+			return {"found": false}
+		seen[key] = true
+		if _members.has(key):
+			var table: Dictionary = _members[key]
+			if table.has(mname):
+				var rec: Dictionary = table[mname]
+				var sig := _impl_sig(rec, mname, want)
+				if not sig.is_empty():
+					sig["line"] = int((rec.get("node", {}) as Dictionary).get("line", 0)) if (rec.get("node", {}) is Dictionary) else 0
+					return sig
+		var base := ""
+		if key == "":
+			base = _script_extends
+		else:
+			base = str(_class_extends.get(key, ""))
+		if base == "":
+			base = "RefCounted"
+		var resolved := _resolve_private_owner(base, key)
+		if resolved != "" and _members.has(resolved):
+			key = resolved
+			continue
+		var er := _impl_engine_find(base, mname, want)
+		if bool(er.get("found", false)):
+			var esig: Dictionary = er.get("sig", {})
+			esig["line"] = 0
+			esig["found"] = true
+			return esig
+		return {"found": false}
+	return {"found": false}
+
+
+## Main @implements pass: for every owner with recorded uses, resolve
+## each name (deduped) and check all directly-declared members of the
+## target against the class (own or inherited). Tuples resolve but are
+## rejected (only classes, structs and interfaces can be implemented).
+func _check_implements() -> void:
+	for owner in _implements.keys():
+		var disp := _owner_display(str(owner))
+		for use in (_implements[owner] as Array):
+			if not (use is Dictionary):
+				continue
+			var seen := {}
+			for raw in ((use as Dictionary).get("names", []) as Array):
+				var iname := str(raw)
+				if seen.has(iname):
+					continue
+				seen[iname] = true
+				var tgt := _implement_target(iname, str(owner))
+				if tgt.is_empty():
+					_error(ERR_IMPLEMENTS_UNKNOWN_TYPE, "@implements has unknown type '" + iname + "'", int((use as Dictionary).get("line", 0)), 0, str(owner))
+					continue
+				if str(tgt.get("kind", "")) == "tuple":
+					_error(ERR_IMPLEMENTS_MISMATCH, "@implements cannot use tuple '" + iname + "' (only classes, structs and interfaces)", int((use as Dictionary).get("line", 0)), 0, str(owner))
+					continue
+				_check_implements_target(str(owner), disp, iname, tgt, int((use as Dictionary).get("line", 0)))
+
+
+## Checks one resolved target against one class.
+func _check_implements_target(owner: String, disp: String, iname: String, tgt: Dictionary, line: int) -> void:
+	var req := _implement_required(tgt)
+	for m in (req.get("methods", []) as Array):
+		_check_implements_method(owner, disp, iname, m, line)
+	for f in (req.get("fields", []) as Array):
+		_check_implements_field(owner, disp, iname, f, line)
+	for s in (req.get("signals", []) as Array):
+		_check_implements_signal(owner, disp, iname, s, line)
+	for e in (req.get("enums", []) as Array):
+		_check_implements_enum(owner, disp, iname, e, line)
+	for c in (req.get("consts", []) as Array):
+		_check_implements_const(owner, disp, iname, c, line)
+
+
+func _check_implements_method(owner: String, disp: String, iname: String, req: Dictionary, line: int) -> void:
+	var mname := str(req.get("name", ""))
+	var hit := _impl_find(owner, mname, "methods")
+	if not bool(hit.get("found", false)):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "'", line, 0, owner)
+		return
+	var msg := _compare_method(req, hit)
+	if msg != "":
+		var ln := int(hit.get("line", 0))
+		if ln == 0:
+			ln = line
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "': " + msg, ln, 0, owner)
+
+
+func _check_implements_field(owner: String, disp: String, iname: String, req: Dictionary, line: int) -> void:
+	var mname := str(req.get("name", ""))
+	var hit := _impl_find(owner, mname, "fields")
+	if not bool(hit.get("found", false)):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "'", line, 0, owner)
+		return
+	if bool(req.get("static", false)) != bool((hit as Dictionary).get("static", false)):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "': must be " + ("static" if bool(req.get("static", false)) else "an instance member"), int((hit as Dictionary).get("line", line)), 0, owner)
+		return
+	var rtypes: Array = req.get("types", [])
+	var itypes: Array = (hit as Dictionary).get("types", [])
+	if not _types_narrower(itypes, rtypes):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "' (incompatible type)", int((hit as Dictionary).get("line", line)), 0, owner)
+
+
+func _check_implements_signal(owner: String, disp: String, iname: String, req: Dictionary, line: int) -> void:
+	var mname := str(req.get("name", ""))
+	var hit := _impl_find(owner, mname, "signals")
+	if not bool(hit.get("found", false)):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "'", line, 0, owner)
+		return
+	var rpars: Array = req.get("params", [])
+	var ipars: Array = (hit as Dictionary).get("params", [])
+	if rpars.size() != ipars.size():
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "': different arity", int((hit as Dictionary).get("line", line)), 0, owner)
+		return
+	for i in range(rpars.size()):
+		var rp: Dictionary = rpars[i]
+		var ip: Dictionary = ipars[i]
+		if not _types_wider((ip as Dictionary).get("types", []), (rp as Dictionary).get("types", [])):
+			_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "': parameter '" + str((rp as Dictionary).get("name", "")) + "' is incompatible", int((hit as Dictionary).get("line", line)), 0, owner)
+			return
+
+
+func _check_implements_enum(owner: String, disp: String, iname: String, req: Dictionary, line: int) -> void:
+	var mname := str(req.get("name", ""))
+	var hit := _impl_find(owner, mname, "enums")
+	if not bool(hit.get("found", false)):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "'", line, 0, owner)
+		return
+	for v in (req as Dictionary).get("members", []):
+		if not (str(v) in ((hit as Dictionary).get("members", []) as Array).map(func(x): return str(x))):
+			_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "." + str(v) + "'", int((hit as Dictionary).get("line", line)), 0, owner)
+			return
+
+
+func _check_implements_const(owner: String, disp: String, iname: String, req: Dictionary, line: int) -> void:
+	var mname := str(req.get("name", ""))
+	var hit := _impl_find(owner, mname, "consts")
+	if not bool(hit.get("found", false)):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "'", line, 0, owner)
+		return
+	var rtypes: Array = req.get("types", [])
+	var itypes: Array = (hit as Dictionary).get("types", [])
+	if not _types_narrower(itypes, rtypes):
+		_error(ERR_IMPLEMENTS_MISMATCH, "class '" + disp + "' does not implement '" + iname + "." + mname + "' (incompatible type)", int((hit as Dictionary).get("line", line)), 0, owner)
+
+
+## Builds an impl-side signature from a member rec ({} when the kind
+## does not fit the wanted table).
+func _impl_sig(rec: Dictionary, mname: String, want: String) -> Dictionary:
+	var kind := str(rec.get("kind", ""))
+	var node: Variant = rec.get("node", {})
+	if want == "methods" and kind == "function" and node is Dictionary:
+		var sig := _impl_method_sig(node)
+		sig["found"] = true
+		return sig
+	if want == "fields" and (kind == "variable" or kind == "constant") and node is Dictionary:
+		var ann: Dictionary = (node as Dictionary).get("var_ann", {})
+		var types: Array = []
+		var any := false
+		if not ann.is_empty():
+			types = (ann.get("types", []) as Array).duplicate()
+		else:
+			var vt := _vartype_name(node)
+			if vt != "":
+				types = [vt]
+			else:
+				any = true
+		return {"found": true, "types": types, "any": any, "static": bool((node as Dictionary).get("is_static", false))}
+	if want == "signals" and kind == "signal" and node is Dictionary:
+		var params: Array = []
+		for p in (node as Dictionary).get("params", []):
+			if p is Dictionary:
+				var pt := _vartype_name(p)
+				if pt != "":
+					params.append({"name": str((p as Dictionary).get("name", "")), "types": [pt]})
+				else:
+					params.append({"name": str((p as Dictionary).get("name", "")), "types": []})
+		return {"found": true, "params": params}
+	if want == "enums" and kind == "enum" and node is Dictionary:
+		var vals: Array = []
+		for m in (node as Dictionary).get("members", []):
+			if m is Dictionary and str((m as Dictionary).get("type", "")) == "ENUM_MEMBER":
+				vals.append(str((m as Dictionary).get("name", "")))
+		return {"found": true, "members": vals}
+	if want == "consts" and kind == "constant" and node is Dictionary:
+		var vt2 := _vartype_name(node)
+		if vt2 != "":
+			return {"found": true, "types": [vt2], "any": false}
+		return {"found": true, "types": [], "any": true}
+	return {}
+
+
+## Engine-side impl lookup for one member name. Terminal base text
+## only (script parents were walked by the caller).
+func _impl_engine_find(base: String, mname: String, want: String) -> Dictionary:
+	var ename := base
+	if _engine_info(base).is_empty():
+		if _engine_info(_base_simple(base)).is_empty():
+			return {"found": false}
+		ename = _base_simple(base)
+	var chain := _engine_chain(ename)
+	if chain.is_empty():
+		return {"found": false}
+	for link in chain:
+		var info := _engine_info(str(link))
+		if info.is_empty():
+			continue
+		if want == "methods":
+			for m in info.get("instance_methods", []):
+				if m is Dictionary and str((m as Dictionary).get("name", "")) == mname:
+					return {"found": true, "sig": _norm_engine_method(m, false), "line": 0}
+			for m in info.get("static_methods", []):
+				if m is Dictionary and str((m as Dictionary).get("name", "")) == mname:
+					return {"found": true, "sig": _norm_engine_method(m, true), "line": 0}
+		elif want == "fields":
+			for f in info.get("members", []):
+				if f is Dictionary and str((f as Dictionary).get("name", "")) == mname:
+					return {"found": true, "sig": {"types": [str((f as Dictionary).get("type", ""))], "any": false, "static": false}, "line": 0}
+			for p in info.get("properties", []):
+				if p is Dictionary and str((p as Dictionary).get("name", "")) == mname:
+					return {"found": true, "sig": {"types": [str((p as Dictionary).get("type", ""))], "any": false, "static": false}, "line": 0}
+		elif want == "signals":
+			for s in info.get("signals", []):
+				if s is Dictionary and str((s as Dictionary).get("name", "")) == mname:
+					return {"found": true, "sig": _norm_engine_signal(s), "line": 0}
+		elif want == "enums":
+			for e in info.get("enums", []):
+				if e is Dictionary and str((e as Dictionary).get("name", "")) == mname:
+					var vals: Array = []
+					for v in (e as Dictionary).get("values", []):
+						if v is Dictionary:
+							vals.append(str((v as Dictionary).get("name", "")))
+					return {"found": true, "sig": {"members": vals}, "line": 0}
+		elif want == "consts":
+			for c in info.get("constants", []):
+				if c is Dictionary and str((c as Dictionary).get("name", "")) == mname:
+					return {"found": true, "sig": {"types": [], "any": true}, "line": 0}
+	return {"found": false}
+
+
+## Covariant check (implementations narrow): every impl type derives
+## from some required type. Either side dynamic/empty passes.
+func _types_narrower(impl_types: Array, req_types: Array) -> bool:
+	if impl_types.is_empty() or req_types.is_empty():
+		return true
+	for it in impl_types:
+		var ok := false
+		for rt in req_types:
+			if str(it) == str(rt) or _derives_from(str(it), str(rt)):
+				ok = true
+				break
+		if not ok:
+			return false
+	return true
+
+
+## Contravariant check (parameters widen): every required type derives
+## from some implementation type. Either side dynamic/empty passes.
+func _types_wider(impl_types: Array, req_types: Array) -> bool:
+	if impl_types.is_empty() or req_types.is_empty():
+		return true
+	for rt in req_types:
+		var ok := false
+		for it in impl_types:
+			if str(it) == str(rt) or _derives_from(str(rt), str(it)):
+				ok = true
+				break
+		if not ok:
+			return false
+	return true
+
+
+## Counts required (no default, non-vararg) and total params.
+static func _arity_of(params: Array) -> Array:
+	var req := 0
+	for p in params:
+		if p is Dictionary and not bool((p as Dictionary).get("has_default", false)) and not bool((p as Dictionary).get("is_vararg", false)):
+			req += 1
+	return [req, params.size()]
+
+
+## Compares one required method against an implementation. Returns an
+## error message or "".
+func _compare_method(req: Dictionary, imp: Dictionary) -> String:
+	var rname := str(req.get("name", ""))
+	if bool(req.get("static", false)) != bool(imp.get("static", false)):
+		return "method '" + rname + "' must be " + ("static" if bool(req.get("static", false)) else "an instance method")
+	var rpars: Array = req.get("params", [])
+	var ipars: Array = imp.get("params", [])
+	var ra := _arity_of(rpars)
+	var ia := _arity_of(ipars)
+	if int(ia[0]) > int(ra[0]) or int(ia[1]) < int(ra[1]):
+		return "method '" + rname + "' takes " + str(ra[0]) + ".." + str(ra[1]) + " arguments, implementation takes " + str(ia[0]) + ".." + str(ia[1])
+	for i in range(rpars.size()):
+		var rp: Dictionary = rpars[i]
+		var ip: Dictionary = ipars[i]
+		if not _types_wider((ip as Dictionary).get("types", []), (rp as Dictionary).get("types", [])):
+			return "method '" + rname + "' parameter '" + str((rp as Dictionary).get("name", "")) + "' is incompatible"
+	var rret := _ret_list(req)
+	var iret: Array = imp.get("returns", [])
+	if not _types_narrower(iret, rret):
+		return "method '" + rname + "' must return '" + str(req.get("returns", "any")) + "'"
+	return ""
+
+
+## Required-side returns as a list ([] = any/dynamic).
+static func _ret_list(req: Dictionary) -> Array:
+	var r := str(req.get("returns", "any"))
+	if r == "" or r == "any":
+		return []
+	var out: Array = []
+	for part in r.split("|"):
+		var t := str(part).strip_edges()
+		if t != "":
+			out.append(t)
+	return out
+
+
+## Resolves an @implements name to a target (no errors here; the
+## caller reports). Kinds: script (owner key), engine (type name),
+## struct, interface. Tuples resolve but are rejected by callers.
+func _implement_target(name: String, owner: String) -> Dictionary:
+	if name == "":
+		return {}
+	var sk := _script_key_of(name, owner)
+	if sk == "":
+		sk = _script_key_of(name, "")
+	if sk != "":
+		return {"kind": "script", "key": sk}
+	if _interfaces.has(name):
+		return {"kind": "interface", "name": name}
+	var info := _type_info(name)
+	if info.is_empty():
+		return {}
+	var kind := str(info.get("kind", ""))
+	if kind == "tuple":
+		return {"kind": "tuple", "name": name}
+	if kind == "struct":
+		return {"kind": "struct", "name": name}
+	if kind == "interface":
+		return {"kind": "interface", "name": name}
+	if kind == "builtin" or kind == "class" or kind == "root":
+		return {"kind": "engine", "name": name}
+	return {}
+
+
+## Required members of a target (directly declared only, never
+## inherited): {methods, fields, signals, enums, consts} with
+## normalized shapes (see _impl_sig for method normalization).
+func _implement_required(tgt: Dictionary) -> Dictionary:
+	var out := {"methods": [], "fields": [], "signals": [], "enums": [], "consts": []}
+	var kind := str(tgt.get("kind", ""))
+	if kind == "script":
+		var key := str(tgt.get("key", ""))
+		if _members.has(key):
+			for mname in (_members[key] as Dictionary).keys():
+				var rec: Dictionary = (_members[key] as Dictionary)[mname]
+				_sort_script_rec(rec, mname, out)
+		return out
+	if kind == "interface":
+		var iname := str(tgt.get("name", ""))
+		var spec := _iface_spec(iname)
+		if spec.is_empty():
+			return out
+		for m in spec.get("members", []):
+			_sort_iface_member(m, out)
+		return out
+	if kind == "struct":
+		var sname := str(tgt.get("name", ""))
+		var sdef := _struct_def(sname)
+		if sdef.is_empty():
+			return out
+		for f in (sdef.get("fields", []) as Array):
+			var fd: Dictionary = f
+			(out["fields"] as Array).append({"name": str(fd.get("name", "")), "types": (fd.get("types", []) as Array).duplicate(), "any": bool(fd.get("any", false)), "static": false})
+		return out
+	if kind == "engine":
+		var info := _engine_info(str(tgt.get("name", "")))
+		if info.is_empty():
+			return out
+		for m in info.get("instance_methods", []):
+			if m is Dictionary:
+				(out["methods"] as Array).append(_norm_engine_method(m, false))
+		for m in info.get("static_methods", []):
+			if m is Dictionary:
+				(out["methods"] as Array).append(_norm_engine_method(m, true))
+		for s in info.get("signals", []):
+			if s is Dictionary:
+				(out["signals"] as Array).append(_norm_engine_signal(s))
+		for e in info.get("enums", []):
+			if e is Dictionary:
+				var vals: Array = []
+				for v in (e as Dictionary).get("values", []):
+					if v is Dictionary:
+						vals.append(str((v as Dictionary).get("name", "")))
+				(out["enums"] as Array).append({"name": str((e as Dictionary).get("name", "")), "members": vals})
+		for c in info.get("constants", []):
+			if c is Dictionary:
+				(out["consts"] as Array).append({"name": str((c as Dictionary).get("name", ""))})
+		for p in info.get("properties", []):
+			if p is Dictionary:
+				(out["fields"] as Array).append({"name": str((p as Dictionary).get("name", "")), "types": [str((p as Dictionary).get("type", ""))], "any": false, "static": false})
+		for mb in info.get("members", []):
+			if mb is Dictionary:
+				(out["fields"] as Array).append({"name": str((mb as Dictionary).get("name", "")), "types": [str((mb as Dictionary).get("type", ""))], "any": false, "static": false})
+		return out
+	return out
+
+
+## Sorts one script member rec into the required buckets (inner
+## classes are skipped: conformance over nested types is deferred).
+func _sort_script_rec(rec: Dictionary, mname: String, out: Dictionary) -> void:
+	var kind := str(rec.get("kind", ""))
+	if kind == "function":
+		var node: Variant = rec.get("node", {})
+		if node is Dictionary:
+			(out["methods"] as Array).append(_impl_method_sig(node))
+	elif kind == "variable" or kind == "constant":
+		var n: Variant = rec.get("node", {})
+		var types: Array = []
+		var any := false
+		if n is Dictionary:
+			var ann: Dictionary = (n as Dictionary).get("var_ann", {})
+			if not ann.is_empty():
+				types = (ann.get("types", []) as Array).duplicate()
+			else:
+				var vt := _vartype_name(n)
+				if vt != "":
+					types = [vt]
+				else:
+					any = true
+		else:
+			any = true
+		(out["fields"] as Array).append({"name": mname, "types": types, "any": any, "static": bool((rec.get("node", {}) as Dictionary).get("is_static", false)) if (rec.get("node", {}) is Dictionary) else false})
+	elif kind == "signal":
+		var params: Array = []
+		var snode: Variant = rec.get("node", {})
+		if snode is Dictionary:
+			for p in (snode as Dictionary).get("params", []):
+				if p is Dictionary:
+					var pt := _vartype_name(p)
+					if pt != "":
+						params.append({"name": str((p as Dictionary).get("name", "")), "types": [pt]})
+					else:
+						params.append({"name": str((p as Dictionary).get("name", "")), "types": []})
+		(out["signals"] as Array).append({"name": mname, "params": params})
+	elif kind == "enum":
+		var vals: Array = []
+		var enode: Variant = rec.get("node", {})
+		if enode is Dictionary:
+			for m in (enode as Dictionary).get("members", []):
+				if m is Dictionary and str((m as Dictionary).get("type", "")) == "ENUM_MEMBER":
+					vals.append(str((m as Dictionary).get("name", "")))
+		(out["enums"] as Array).append({"name": mname, "members": vals})
+	elif kind == "constant":
+		(out["consts"] as Array).append({"name": mname})
+
+
+## Sorts one interface member dict into the required buckets.
+func _sort_iface_member(md: Dictionary, out: Dictionary) -> void:
+	var kind := str(md.get("kind", ""))
+	if kind == "func":
+		var params: Array = []
+		for p in (md.get("params", []) as Array):
+			var pd: Dictionary = p
+			params.append({"name": str(pd.get("name", "")), "types": (pd.get("types", []) as Array).duplicate(), "any": bool(pd.get("any", false)), "req": not bool(pd.get("has_default", false)) and not bool(pd.get("is_vararg", false))})
+		(out["methods"] as Array).append({"name": str(md.get("name", "")), "static": bool(md.get("static", false)), "params": params, "returns": str(md.get("returns", "any"))})
+	elif kind == "var":
+		(out["fields"] as Array).append({"name": str(md.get("name", "")), "types": (md.get("types", []) as Array).duplicate(), "any": bool(md.get("any", false)), "static": bool(md.get("static", false))})
+	elif kind == "signal":
+		var sparams: Array = []
+		for p in (md.get("params", []) as Array):
+			var pd: Dictionary = p
+			sparams.append({"name": str(pd.get("name", "")), "types": (pd.get("types", []) as Array).duplicate(), "any": bool(pd.get("any", false))})
+		(out["signals"] as Array).append({"name": str(md.get("name", "")), "params": sparams})
+	elif kind == "enum":
+		var vals: Array = []
+		for v in (md.get("members", []) as Array):
+			vals.append(str((v as Dictionary).get("name", "")))
+		(out["enums"] as Array).append({"name": str(md.get("name", "")), "members": vals})
+	elif kind == "const":
+		(out["consts"] as Array).append({"name": str(md.get("name", "")), "types": (md.get("types", []) as Array).duplicate(), "any": bool(md.get("any", false))})
+
+
+## Normalized engine method entry: params with types ([] = dynamic)
+## and required flags, returns string as-is.
+func _norm_engine_method(md: Dictionary, is_static: bool) -> Dictionary:
+	var params: Array = []
+	for p in (md as Dictionary).get("params", []):
+		if p is Dictionary:
+			var pt := str((p as Dictionary).get("type", ""))
+			var req := not bool((p as Dictionary).get("has_default", false))
+			if pt != "":
+				params.append({"name": str((p as Dictionary).get("name", "")), "types": [pt], "req": req})
+			else:
+				params.append({"name": str((p as Dictionary).get("name", "")), "types": [], "req": req})
+	return {"name": str(md.get("name", "")), "static": is_static, "params": params, "returns": str(md.get("returns", ""))}
+
+
+## Normalized engine signal entry.
+func _norm_engine_signal(sd: Dictionary) -> Dictionary:
+	var params: Array = []
+	for p in (sd as Dictionary).get("params", []):
+		if p is Dictionary:
+			var pt := str((p as Dictionary).get("type", ""))
+			if pt == "":
+				params.append({"name": str((p as Dictionary).get("name", "")), "types": []})
+			else:
+				params.append({"name": str((p as Dictionary).get("name", "")), "types": [pt]})
+	return {"name": str(sd.get("name", "")), "params": params}
+
+
+## Normalized impl-side method signature from a FUNC_DECL node:
+## params [{name, types, req}], returns list ([] = dynamic).
+func _impl_method_sig(node: Dictionary) -> Dictionary:
+	var params: Array = []
+	for p in node.get("params", []):
+		if p is Dictionary:
+			var ann: Dictionary = (p as Dictionary).get("param_ann", {})
+			var req := (p as Dictionary).get("default", null) == null
+			if not ann.is_empty():
+				params.append({"name": str((p as Dictionary).get("name", "")), "types": (ann.get("types", []) as Array).duplicate(), "req": req})
+				continue
+			var vt := _vartype_name(p)
+			if vt != "":
+				params.append({"name": str((p as Dictionary).get("name", "")), "types": [vt], "req": req})
+			else:
+				params.append({"name": str((p as Dictionary).get("name", "")), "types": [], "req": req})
+	var returns: Array = []
+	var arrow := _arrow_name(node.get("return_type", null))
+	if arrow != "" and arrow != "void":
+		returns = [arrow]
+	elif arrow == "void":
+		returns = ["void"]
+	elif (node as Dictionary).has("return_ann"):
+		returns = (((node as Dictionary).get("return_ann", {}) as Dictionary).get("types", []) as Array).duplicate()
+	return {"name": str(node.get("name", "")), "static": bool(node.get("is_static", false)), "params": params, "returns": returns}
+
+
 # ------------------------------------------------------- @var helpers
 
 ## Single type name behind a vartype TYPE_REF, or "" when absent or
@@ -2471,6 +3158,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_implements_tag(d):
+			if t == "CLASS_DECL":
+				_record_implements(_full_name(owner, str(d.get("name", ""))), d, int(d.get("line", 0)))
+			else:
+				_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -2495,6 +3187,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_implements_tag(d):
+			if t == "CLASS_NAME":
+				_record_implements("", d, int(d.get("line", 0)))
+			else:
+				_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "PARAM":
 		var ptag = _leading_tag(d)
@@ -2514,6 +3211,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d):
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_implements_tag(d):
+			_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if t == "LAMBDA" or t == "ACCESSOR":
 		if _has_any_deprecated_tag(d):
@@ -2546,6 +3245,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_interface_tag(d):
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_implements_tag(d):
+			_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
 		_scan(d.get("params", []), owner, false)
 		_scan(d.get("body", null), owner, false)
 		_scan(d.get("detail", null), owner, false)
@@ -2564,6 +3266,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_interface_tag(d).is_empty():
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not _has_implements_tag(d).is_empty():
+			if member_pos and owner == "":
+				_record_implements_tok("", d)
+			else:
+				_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if _has_any_tuple_tag(d):
 		if not (member_pos and owner == ""):
@@ -2745,6 +3452,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
 					_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_implements_tag(child):
+					_record_implements(_full_name(full, str((child as Dictionary).get("name", ""))), child as Dictionary, int((child as Dictionary).get("line", 0)))
 				_scan_class_body(child, full)
 			elif child is Dictionary and str((child as Dictionary).get("type", "")) in DECL_TYPES:
 				_mark_decl(child, full)
@@ -2771,6 +3480,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
 					_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_implements_tag(child):
+					_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				elif _has_any_return_tag(child):
 					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 						_mark_return_stmt(child, (child as Dictionary).get("value", null), full)
