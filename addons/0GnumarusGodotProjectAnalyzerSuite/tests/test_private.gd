@@ -23,6 +23,7 @@ func run() -> Dictionary:
 	_f_shadow_still_ok(h)
 	_f_misplaced_still_errors(h)
 	_f_json_flags(h)
+	_f_cross_script(h)
 	_f_fixture_clean(h)
 	return h.result()
 
@@ -146,6 +147,42 @@ func _f_json_flags(h) -> void:
 			flagged2 = true
 	h.check(flagged2, "inner json flags private field")
 	h.check(((res.get("errors", []) as Array).is_empty()), "no errors in flag fixture")
+
+
+func _f_cross_script(h) -> void:
+	# Library first: analyzing it writes user/TmpPrivCrossLib.json
+	# carrying the private flags the consumer checks consult.
+	var lib := "class_name TmpPrivCrossLib\nextends RefCounted\n# @private\nfunc _hidden() -> void:\n\tpass\nfunc shown() -> void:\n\tpass\n# @private\nvar _cache := 1\n"
+	var lib_res: Dictionary = h.analyze_text(lib, "res://tests/tmp_priv_cross_lib.gd")
+	h.check(h.priv_errors(lib_res).is_empty(), "lib self-analysis has no violations")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/TmpPrivCrossLib.json")
+	h.check(h.field_flagged(info, "_cache"), "lib private field flag written")
+	# Mirror of the showcase: Variant base, unguarded use, then an
+	# `is`-narrowed call and a narrowed field read.
+	var src := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tv._hidden()\n\tif v is TmpPrivCrossLib:\n\t\tv._hidden()\n\t\tprint(v._cache)\n"
+	var res: Dictionary = h.analyze_text(src, "res://tests/tmp_priv_cross_consumer.gd")
+	var lines: Array = []
+	for e in h.priv_errors(res):
+		lines.append(int((e as Dictionary).get("line", 0)))
+	h.check(lines == [5, 6], "narrowed call and read are violations")
+	h.check(h.has_priv(res, "TmpPrivCrossLib._hidden"), "cross message names member")
+	h.check(h.has_priv(res, "_cache"), "cross message names field")
+	h.check(h.err_kinds(res).has("missing_method"), "unguarded Variant use still missing_method")
+	for e in h.priv_errors(res):
+		h.check(int((e as Dictionary).get("line", 0)) != 3, "unguarded line has no private_use")
+	# Public members and unknown names on the same class stay silent.
+	var lib2 := "class_name TmpPubCrossLib\nextends RefCounted\nfunc shown2() -> void:\n\tpass\n"
+	h.analyze_text(lib2, "res://tests/tmp_pub_cross_lib.gd")
+	var res2: Dictionary = h.analyze_text("extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is TmpPubCrossLib:\n\t\tv.shown2()\n", "res://tests/tmp_pub_cross_consumer.gd")
+	h.check((res2.get("errors", []) as Array).is_empty(), "public cross-script member silent")
+	var res3: Dictionary = h.analyze_text("extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is TmpPrivCrossLib:\n\t\tv._nope_xyz()\n", "res://tests/tmp_priv_cross_unknown.gd")
+	h.check(h.priv_errors(res3).is_empty(), "unknown cross-script member silent")
+	# Static `ClassName.member` form reports too.
+	var res4: Dictionary = h.analyze_text("extends RefCounted\nfunc g() -> void:\n\tTmpPrivCrossLib._hidden()\n", "res://tests/tmp_priv_cross_static.gd")
+	h.check(h.priv_errors(res4).size() == 1, "static cross-script use is one violation")
+	# A local shadowing the class name keeps today's silence.
+	var res5: Dictionary = h.analyze_text("extends RefCounted\nfunc g(TmpPrivCrossLib) -> void:\n\tTmpPrivCrossLib._hidden()\n", "res://tests/tmp_priv_cross_shadow.gd")
+	h.check(h.priv_errors(res5).is_empty(), "shadowing param suppresses cross check")
 
 
 func _f_fixture_clean(h) -> void:

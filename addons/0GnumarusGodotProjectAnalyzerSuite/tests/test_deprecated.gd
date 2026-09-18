@@ -23,6 +23,7 @@ func run() -> Dictionary:
 	_t11(h)
 	_t12(h)
 	_t13(h)
+	_t14_cross(h)
 	return h.result()
 
 
@@ -140,3 +141,19 @@ func _t13(h) -> void:
 	var res: Dictionary = ana.analyze(ast, "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 	h.check((res.get("errors", []) as Array).is_empty(), "t13 fixture no errors")
 	h.check((res.get("warnings", []) as Array).is_empty(), "t13 fixture no warnings")
+
+
+func _t14_cross(h) -> void:
+	# Library first: analyzing it writes user/TmpDepCrossLib.json
+	# carrying the deprecated flag the consumer warns consult.
+	var lib := "class_name TmpDepCrossLib\nextends RefCounted\n# @deprecated Use fresh() instead.\nfunc old_fn() -> void:\n\tpass\nfunc fresh() -> void:\n\tpass\n"
+	h.analyze_text(lib, "res://tests/tmp_dep_cross_lib.gd")
+	var src := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tv.old_fn()\n\tif v is TmpDepCrossLib:\n\t\tv.old_fn()\n\t\tv.fresh()\n"
+	var res: Dictionary = h.analyze_text(src, "res://tests/tmp_dep_cross_consumer.gd")
+	var lines: Array = []
+	for w in res.get("warnings", []):
+		if str((w as Dictionary).get("kind", "")) == "deprecated_use":
+			lines.append(int((w as Dictionary).get("line", 0)))
+	h.check(lines == [5], "narrowed cross-script call warns once")
+	h.check(h.has_warn(res, "TmpDepCrossLib.old_fn"), "cross message names member")
+	h.check(h.has_warn(res, "Use fresh() instead."), "cross warning keeps message")

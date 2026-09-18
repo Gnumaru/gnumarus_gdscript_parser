@@ -96,7 +96,7 @@ func _i_conflicts(h) -> void:
 
 func _i_misplaced(h) -> void:
 	h.check(_kinds(h.analyze_text("extends Node\nfunc f():\n\t# @interface I\n\t# var:a:int\n\t# @endinterface\n\tpass\n", "res://tests/tmp_if_p1.gd")).has("interface_misplaced"), "body misplaced")
-	h.check(_kinds(h.analyze_text("# @interface I\n# @endinterface\nclass_name Foo\n", "res://tests/tmp_if_p2.gd")).has("interface_misplaced"), "header misplaced")
+	h.check(_kinds(h.analyze_text("# @interface I\n# @endinterface\nclass_name Foo\n", "res://tests/tmp_if_p2.gd")).is_empty(), "header definition clean")
 	h.check(_kinds(h.analyze_text("extends Node\nclass Inner:\n\t# @interface I\n\t# var:a:int\n\t# @endinterface\n\tvar x := 1\n", "res://tests/tmp_if_p3.gd")).has("interface_misplaced"), "class member leading misplaced")
 
 

@@ -82,3 +82,20 @@ func _r_analyzer(h) -> void:
 	h.check((ax1.get("warnings", []) as Array).size() > 0, "analyzer first warnings kept")
 	h.check((ax2.get("warnings", []) as Array).is_empty(), "analyzer reuse has no leaked warnings")
 	h.check((ax2.get("errors", []) as Array).is_empty(), "analyzer reuse has no leaked errors")
+	_r_order(h)
+
+
+## Errors come out in file position order (pipeline phases append
+## out of order): navigation depends on it.
+func _r_order(h) -> void:
+	var s = Syn.new()
+	var ana = Ana.new()
+	var res: Dictionary = ana.analyze(s.parse_text("extends Node\n# @tuple Late 1 int\nfunc f():\n\t# @var q Nope\n\tprint(q)\n\tvar x: Late = [1, 2, 3]\n"), "res://tests/tmp_reuse_order.gd")
+	var lines: Array = []
+	for e in res.get("errors", []):
+		lines.append(int((e as Dictionary).get("line", 0)))
+	var ordered := true
+	for i in range(1, lines.size()):
+		if int(lines[i]) < int(lines[i - 1]):
+			ordered = false
+	h.check(ordered and lines.size() >= 2, "analyzer errors sorted by line")

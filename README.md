@@ -347,7 +347,104 @@ func myfunc():
   narrowing, unreachable detection, subscript result types, operator
   checking (the semantic pass owns operators).
 
+## 7. GnumarusGodotProjectAnalyzerSuiteTextResourceParser
+
+Parses Godot scene, resource and config files (`.tscn`, `.tres`,
+`project.godot`, or any raw text in the same INI-like format).
+Unlike the GDScript pipeline it builds no abstract syntax tree: it
+converts the file straight into nested Arrays and Dictionaries that
+are easy to manipulate from code.
+
+```gdscript
+var scene := GnumarusGodotProjectAnalyzerSuiteTextResourceParser.new()
+var data: Dictionary = scene.parse("res://scene.tscn")
+print(data["kind"], (data["nodes"] as Array).size())
+var same: Dictionary = scene.parse_text("[resource]\na = 1\n")
+```
+
+- `parse(source)` accepts a file path (`res://`, `user://` or OS
+  path, when the file exists) or a raw source string;
+  `parse_text(text)` always treats the argument as source. The same
+  instance may be reused: every call resets `last_error`, the error
+  counters and the value-tokenizer cursors, so results never leak.
+- Result shape:
+  `{"kind", "header", "globals", "sections", "ext_resources",
+  "sub_resources", "nodes", "resources", "errors", "error_list",
+  "path"}`. `kind` is `"scene"` (`[gd_scene]`), `"resource"`
+  (`[gd_resource]`) or `"config"` (anything else, e.g.
+  `project.godot`). `header` holds the leading `[gd_scene]` /
+  `[gd_resource]` block (`{"section", "attrs", "line"}`); files
+  without one get an empty header. Assignments before the first
+  section (e.g. `config_version=5`) go to `globals`.
+- Every section is
+  `{"section", "attrs", "props", "line"}` in file order; the
+  `ext_resources` / `sub_resources` / `nodes` / `resources` arrays
+  reference the same Dictionaries (no copies). `attrs` holds
+  unwrapped scalars (`[node name="X" type="Node3D"]` gives
+  `{"name": "X", "type": "Node3D"}`); `props` maps each property
+  name (including slashed ones like `script/source`) to a value node.
+- Value nodes always carry `type`, `line` and `raw`: `null`,
+  `bool`, `int`, `float`, `string` (escape-decoded), `string_name`
+  (`&"..."`), `node_path` (`^"..."`), `identifier` (dotted names
+  joined), `array` (`items`), `dict` (`entries` as
+  `[{"key", "value"}]` pairs, `:` or `=` separators), `call`
+  (`name` + `args`: `Color(...)`, `Vector2(...)`,
+  `Transform3D(...)`, `ExtResource(...)`, `SubResource(...)`,
+  `PackedStringArray(...)`, ...) and `invalid` (kept, plus an error
+  entry). Nesting past 64 levels errors instead of recursing forever.
+- Comments start with `;` outside strings at bracket depth 0 and run
+  to the physical line end. Values may span physical lines inside
+  brackets or inside a quoted string (the multiline `script/source`
+  string and multi-row arrays/dicts); the starting physical line is
+  kept on every section and value node. Fault tolerant like the
+  stages above: each bad header/value becomes an entry in
+  `error_list` (`{"message", "line"}`) and parsing continues.
+
+## 8. GnumarusGodotProjectAnalyzerSuiteUidCache
+
+Reads Godot's UID cache (`.godot/uid_cache.bin`), resolving every
+resource UID to its path and back. The binary layout is tiny (see
+`ResourceUID::save/load` in `core/io/resource_uid.cpp`): uint32 LE
+entry count, then per entry int64 LE id, int32 LE UTF-8 byte length,
+and the raw path bytes. IDs convert to `"uid://..."` text as
+base-34 (alphabet `a-y`, `0-8`) masked to 63 bits.
+
+```gdscript
+var cache := GnumarusGodotProjectAnalyzerSuiteUidCache.new().parse("res://.godot/uid_cache.bin")
+print(cache["by_path"].get("res://scene.tscn", ""))
+```
+
+- `parse(path)` reads the cache file (missing/unreadable files yield
+  `errors == 1` instead of crashing); `parse_bytes(data)` parses raw
+  bytes for hermetic tests. The same instance may be reused: every
+  call resets `last_error` and the result maps. Truncated tails are
+  reported as errors while keeping the entries decoded so far.
+- Result shape:
+  `{"entries": [{"id", "uid", "path"}], "by_uid", "by_path",
+  "errors", "error_list", "path"}`. Static helpers `id_to_text()`,
+  `text_to_id()` (malformed text gives `-1`) and `encode_entry()`
+  (builds synthetic bytes) round-trip exactly against the engine:
+  all 51 local cache entries decode byte-exact and match every
+  `.uid` sidecar.
+- Pairs well with the scene parser: an `ExtResource`/`SubResource`
+  uid from a `.tscn` resolves through `by_uid` to its `res://` path.
+
 ## Annotations
+
+Available annotations at a glance (details in each subsection below):
+
+- `@generic` — declares a class generic over file templates.
+- `@template` — declares a file-local generic type variable.
+- `@interface` … `@endinterface` — declares an interface blueprint.
+- `@implements` — claims conformance to interfaces or classes.
+- `@struct` — defines a fixed-shape struct type refining `Dictionary`.
+- `@tuple` — defines a fixed-shape tuple type refining `Array`.
+- `@private` — restricts a member to its nested family; outside uses error.
+- `@deprecated` — marks a script or member as deprecated; uses warn.
+- `@alias` … `@endalias` — names a reusable type expression.
+- `@return` — declares a function or lambda return type.
+- `@param` — declares a parameter type.
+- `@var` — declares or redefines a variable type, narrowing included.
 
 Type annotations live in comments and follow the general shape:
 
@@ -411,6 +508,14 @@ the AST `header_comment` and therefore marks the whole script — see
   warning); a deprecated function calling itself still warns.
   A script marked deprecated at the root produces no internal
   warnings — the mark is recorded for cross-script use.
+- Cross-script uses warn through the target script's `user/*.json`
+  flags: once a value is provably of another script class (an
+  `is`-narrowed or explicitly typed variable, or a static
+  `ClassName.member` access), using its deprecated members warns.
+  Unknown receivers stay silent, as do public or undeclared members.
+  Only directly-declared members are followed (script JSONs list no
+  inherited members); `X.new()._m()` chains restart silent after
+  `new`.
 - Misuse is an error, not a warning:
   - `@deprecated` attached to a non-declaration (e.g. before `pass`)
     → `deprecated_misplaced`;
@@ -468,6 +573,17 @@ class Child extends Base:
   (message: `cannot use private <kind> '<name>' outside class
   '<owner>'`, kind `private_use`, as an ERROR entry, never a
   warning).
+- Cross-script uses are checked through the target script's
+  `user/*.json` flags: once a value is provably of another script
+  class (an `is`-narrowed or explicitly typed variable, or a static
+  `ClassName.member` access), calling/reading its private members
+  errors — different files are never the same family. Unknown
+  receivers stay silent (`var x: Variant` + `x._m()` only answers to
+  the flow pass), as do public or undeclared members, so cross-file
+  member checking otherwise behaves exactly as before. Only
+  directly-declared members are followed (script JSONs list no
+  inherited members); `X.new()._m()` chains restart silent after
+  `new`.
 - Misplaced tags are errors too (`private_misplaced`): file header /
   root, function parameters, function-local variables, and any
   non-declaration statement.
@@ -539,7 +655,8 @@ Types may nest with brackets
 (`# @var myvar int|tuple[int]|Dictionary[String|int,tuple[*,float]]`):
 `|` splits at the current bracket level, `,` splits generic
 arguments, whitespace is free, `*` is allowed inside brackets.
-Every name must resolve; applications of known `@tuple` types check
+Every name must resolve (`null` is a valid arm: see Nullability);
+applications of known `@tuple` types check
 arity and per-argument compatibility (see `@tuple`). Plain union arms
 still narrow the declared type one by one; anonymous `tuple[...]`
 reads as `Array` for narrowing. Full structural narrowing is future
@@ -922,6 +1039,47 @@ func f():
   `struct_unknown_type`, `struct_mismatch`). Same documented gaps as
   tuples (call args, defaults, returns, `is`/`as`, no continuation).
 
+### Nullability
+
+`null` works as a union arm in any type expression
+(`# @var x Node|null`,
+`# @alias MaybeNode Node|null @endalias`): it means the Nil type.
+Arm compatibility mirrors Godot assignability, verified against the
+language itself: `null` fits Object-derived types, `Variant` and
+untyped/dynamic slots, and nothing else (value types, arrays and
+dictionaries reject null at parse time, so `@var x int|null` on an
+inferred `int` mismatches on the `null` arm). `null` alone is valid
+too (`# @var x null` on a `Variant` means exactly null). `null` is
+lowercase-only and reserved: no tuple/struct/alias/interface/template
+may be named `null` (`*_conflict`).
+
+Flow narrowing understands null: `if x == null` (either order, with
+optional leading `not`/`!`) narrows the branch to exactly null, and
+`!=` narrows the other side the same way; `typeof(x) == TYPE_NIL`
+(and `is_instance_of(x, TYPE_NIL)`) does the same. (`x is null` is
+rejected: Godot rejects it at parse time.) Anything provably null
+errors `null_access` on member calls and reads (`cannot call method
+'m()' on null`); bare uses like `print(x)` stay legal. Plain
+nullable types stay lenient by design: `var x: Node = null` followed
+by `x.foo()` is silent, as is any unguarded `Variant` use. Generic
+null arguments compose naturally (`id(null)` against `of int`
+mismatches).
+
+A trailing `notnull` marker on `@var`/`@param`/`@return`
+(`# @var x Node notnull`) declares the slot never-null: it is stored
+on the stamp, rejects nullable types (`Node|null`, bare `null` or an
+alias expanding to one) as malformed, errors `= null` initializers,
+`null` defaults and `= null` reassignments (`var_notnull`,
+`param_notnull`), and is set by the non-null side of `==`/`!=` guards
+(a plain redefinition without the marker clears it). `@return`
+stores the marker for the next phase but does not enforce it yet.
+
+Gaps (documented): `while`/`match` patterns don't narrow null;
+subscripts on null (`x[0]`) skip; `const X = null` and `var x := null`
+are Godot parse errors, so inference never sees them; call-site
+checking against notnull parameters and `return null` enforcement
+arrive with the next phase.
+
 ## Analyzer data layout
 
 All pipeline data lives under
@@ -937,7 +1095,9 @@ it never pollutes the project tree):
   plus one dotted file per inner class (`Outer.json`,
   `Outer.Inner.json`, …). The analyzer adds `"private"` /
   `"deprecated"` flags on members plus per-file `analysis_errors` /
-  `analysis_warnings`.
+  `analysis_warnings`, and merges newly declared members into the
+  roster (existing entries keep their data; nothing is ever removed,
+  so a partially parsed re-analysis cannot wipe it).
 
 ## tests
 
@@ -977,7 +1137,23 @@ green. `GODOT_BIN` overrides the engine path.
   `test_implements.gd` (`@implements` rule),
   `test_flow.gd` (flow member checks + guards),
   `test_reuse.gd` (same instance parsing twice must give independent
-  results).
+  results),
+  `test_editor_bar.gd` (editor status-bar logic: formatting, counts,
+  navigation, hotkey, null-safe resolvers, mock-tree placement and
+  real highlight/caret on a `TextEdit`),
+  `test_scene.gd` (scene/resource/config parsing: value nodes,
+  sections, multiline values, comments, errors, reuse, plus the
+  `Node3D.tscn`, `Environment.tres`, `ProceduralSkyMaterial.tres`,
+  `Sky.tres` fixtures and `project.godot`),
+  `test_uid_cache.gd` (UID cache reading: id/text conversion,
+  synthetic binaries, truncation errors, reuse, plus the live
+  `.godot/uid_cache.bin` cross-checked against the `.uid` sidecars
+  and the scene fixtures),
+  `test_null.gd` (nullability: `null` union arms and compat, reserved
+  `null` names, `==`/`!=` narrowing, exact-null access errors and
+  generic bound violations on null arguments),
+  `test_notnull.gd` (trailing `notnull`: parse, contradiction,
+  `= null` violations, guard-set flags and redefinition clearing).
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits
@@ -994,6 +1170,66 @@ green. `GODOT_BIN` overrides the engine path.
   versa), fix the code or the test — never both silently — and
   re-run until green.
 - Test artifacts (`.godot/`, `*.uid`) are gitignored.
+
+## Editor addon (`addons/0GnumarusGodotProjectAnalyzerSuite/`)
+
+An editor plugin ("Gnumarus Analyzer") that runs this repo's analyzer
+on the script being edited and shows its errors/warnings in a status
+bar placed immediately above the script status bar: `<` previous
+message, `>` next message (both focus the error line), the current
+message in a dropdown in red (amber for warnings, both move together:
+buttons change the dropdown selection, picking an entry focuses it in
+the editor and updates the position), and on the right a white `1/3`
+position plus the console-style counters: the `StatusError` red-circle
+icon with the error count in red, and the `StatusWarning` yellow-circle
+icon with the warning count in amber (hidden when zero). Error lines get a
+red background (amber for warnings): the red is Godot's own
+`text_editor/theme/highlighting/mark_color` (amber is
+`warning_color`), read live from `EditorSettings` on every analysis,
+so the tone matches native Godot errors with or without Godot errors
+present (headless fallback is the built-in constant, then the legacy
+first-painted-line scan).
+
+- Install: open the project in Godot 4.7.2+, enable the plugin in
+  Project → Plugins. No project files are touched by the plugin.
+- Use: open any GDScript and issues show right away; after that
+  analysis is realtime with debounce (1s after the last edit, or past
+  Godot's `idle_parse_delay` when larger). Opening/switching files
+  also schedules one forced deferred pass: Godot's own validator
+  runs after our immediate paint and resets every line background,
+  so without it highlights would vanish until the next manual run.
+  **Ctrl+Shift+Alt+F5**
+  forces an immediate run that also logs to the console; automatic
+  runs update only the bar and highlights. Issues are shown in file
+  order (`analyze()` returns errors and warnings sorted by
+  line/column, so `<`/`>` always walk the file top to bottom with
+  wraparound). Same-text repeats are skipped via path + text hash.
+- Robustness first: every editor node (script editor, text editor,
+  CodeEdit, Godot's own status bar) is re-resolved from scratch on
+  every use — nothing is cached across context switches, and the bar
+  rebuilds itself if the UI went away. The watched `text_changed`
+  connection is dropped before every rewatch, so destroyed CodeEdits
+  never leak. Placement is verified and
+  repaired on every call (early-init fallback docking never sticks),
+  so a missing bar fixes itself on the next run. When
+  Godot's status bar can't be located, the bar docks at the editor
+  bottom with a one-time console warning. All CodeEdit calls are
+  `has_method`-guarded.
+- Headless coverage: `test_editor_bar.gd` checks message formatting,
+  counts, dropdown behavior, wraparound navigation, the hotkey
+  predicate, debounce interval/countdown and null-safety
+  of every resolver, plus bar placement, real highlight paint/clear
+  and caret movement on mock trees and a real `TextEdit`, and the
+  plugin-impl lifecycle on headless instances.
+- Structure: `GnumarusGodotProjectAnalyzerSuitePlugin.gd` is a dumb
+  `EditorPlugin` proxy (forwards `_enter_tree`/`_exit_tree`/`_input`
+  only); every behavior lives in
+  `GnumarusGodotProjectAnalyzerSuitePluginImpl.gd` (`RefCounted`,
+  holding the host reference for Node services), precisely so the
+  logic instantiates headless in unit tests.
+- Limitations: GDScript editors only; unsaved (`untitled`) scripts
+  analyze under a fallback path; each run writes the usual
+  `user/*.json` analysis files like any other analyze() call.
 
 ## Documentation maintenance
 

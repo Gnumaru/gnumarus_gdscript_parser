@@ -161,6 +161,9 @@ const ERR_IMPLEMENTS_UNKNOWN_TYPE := "implements_unknown_type"
 const ERR_IMPLEMENTS_MISMATCH := "implements_mismatch"
 const ERR_MISSING_METHOD := "missing_method"
 const ERR_MISSING_MEMBER := "missing_member"
+const ERR_NULL_ACCESS := "null_access"
+const ERR_VAR_NOTNULL := "var_notnull"
+const ERR_PARAM_NOTNULL := "param_notnull"
 
 ## Signal methods accepted on signal-typed bases (mirrors the semantic
 ## parser's SIGNAL_METHODS).
@@ -168,7 +171,7 @@ const SIGNAL_METHODS := ["connect", "disconnect", "is_connected", "emit", "get_c
 
 ## Variant.Type enum value -> narrowed type name ("" = not a real type).
 const VARIANT_TYPE_MAP := {
-	"TYPE_NIL": "Nil",
+	"TYPE_NIL": "null",
 	"TYPE_BOOL": "bool",
 	"TYPE_INT": "int",
 	"TYPE_FLOAT": "float",
@@ -269,6 +272,11 @@ var _pending_tree_checks: Array = []
 ## owner, pkind}]. Alias definitions resolve after the scan, so
 ## alias-vs-declared checks wait for _check_pending_alias_narrows.
 var _pending_alias_narrows: Array = []
+## Alias members awaiting notnull contradiction: [{member, what,
+## mkind, raw, line, col, owner, stamp}]. Alias trees resolve after
+## the scan; on contradiction the error fires and the premature
+## notnull stamp is erased. Evaluated by _check_pending_notnull.
+var _pending_notnull_clash: Array = []
 ## Vartype arguments awaiting bound checks: [{param, arg, head, line,
 ## col, owner}]. Template bounds resolve after the scan.
 var _pending_vartype_bounds: Array = []
@@ -297,6 +305,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_extends_args = {}
 	_pending_tree_checks = []
 	_pending_alias_narrows = []
+	_pending_notnull_clash = []
 	_pending_vartype_bounds = []
 	_script_class = ""
 	_script_extends = ""
@@ -332,15 +341,49 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_check_pending_vartype_bounds()
 	_check_pending_trees()
 	_check_pending_alias_narrows()
+	_check_pending_notnull()
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
 	_check_implements()
+	_sort_issues(_errors)
+	_sort_issues(_warnings)
 	ast["analyzer_errors"] = _errors
 	ast["analyzer_warnings"] = _warnings
 	_update_user_files(ast)
 	ast["analyzer_written"] = _written
 	return {"ast": ast, "errors": _errors, "warnings": _warnings}
+
+
+## Sorts issue entries in place by (line, column), then kind and
+## message for determinism. Pipeline passes append in phase order,
+## which is not file order — consumers (editor navigation first of
+## all) need position order, so analyze() guarantees it.
+static func _sort_issues(items: Array) -> void:
+	items.sort_custom(func(a: Variant, b: Variant) -> bool: return _issue_less(a, b))
+
+
+## Strict ordering for issue entries (non-dicts sort last).
+static func _issue_less(a: Variant, b: Variant) -> bool:
+	if not (a is Dictionary):
+		return false
+	if not (b is Dictionary):
+		return true
+	var ad: Dictionary = a
+	var bd: Dictionary = b
+	var al := int(ad.get("line", 0))
+	var bl := int(bd.get("line", 0))
+	if al != bl:
+		return al < bl
+	var ac := int(ad.get("column", 0))
+	var bc := int(bd.get("column", 0))
+	if ac != bc:
+		return ac < bc
+	var ak := str(ad.get("kind", ""))
+	var bk := str(bd.get("kind", ""))
+	if ak != bk:
+		return ak < bk
+	return str(ad.get("message", "")) < str(bd.get("message", ""))
 
 
 ## Ensures the native type database (data-dir builtin, classes,
@@ -397,16 +440,9 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_param(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
-		if not _find_tuple(str((header as Dictionary).get("value", ""))).is_empty():
-			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
-		if not _find_struct(str((header as Dictionary).get("value", ""))).is_empty():
-			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
-		if not _find_interface(str((header as Dictionary).get("value", ""))).is_empty():
-			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
-		if not _find_alias(str((header as Dictionary).get("value", ""))).is_empty():
-			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
-		if not _find_template(str((header as Dictionary).get("value", ""))).is_empty():
-			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		# NOTE: @tuple/@struct/@interface/@alias/@template definitions
+		# may live in the header (first in file); prescans collect them
+		# like any other top-level comment.
 		if not _find_generic(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		var htag := _find_implements(str((header as Dictionary).get("value", "")))
@@ -641,6 +677,15 @@ static func _rejoin_bracket_words(words: Array) -> Array:
 ## Pre-scan (before _scan): collects @tuple raw definitions from
 ## top-level standalone comments and top-level leadings so name
 ## lookups stay order-free. Full validation happens in _resolve_tuples.
+## The file header comment as a collectable token ({} when absent;
+## collectors ignore non-TYPE_INFO tokens, so this is always safe).
+static func _header_tok(ast: Dictionary) -> Dictionary:
+	var header: Variant = ast.get("header_comment", null)
+	if header is Dictionary:
+		return header
+	return {}
+
+
 func _prescan_tuples(ast: Dictionary) -> void:
 	for child in ast.get("children", []):
 		if not (child is Dictionary):
@@ -651,6 +696,7 @@ func _prescan_tuples(ast: Dictionary) -> void:
 		for c in (child as Dictionary).get("leading_comments", []):
 			if c is Dictionary:
 				_collect_tuple_node(c)
+	_collect_tuple_node(_header_tok(ast))
 
 
 ## Records every @tuple tag in one comment value as raw material.
@@ -842,6 +888,8 @@ func _parse_tuple_item_complex(word: String, line: int) -> Dictionary:
 ## JSONs (same kind) are fine: idempotent rewrites. NOTE: not via
 ## _type_known (the name itself is already registered there).
 func _tuple_conflict(tname: String) -> String:
+	if tname == "null":
+		return "reserved name 'null'"
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
 		if table.has(tname):
@@ -877,7 +925,7 @@ func _tuple_def(tname: String) -> Dictionary:
 ## Returns {"literal", "elements"} (elements may be empty for `[]`;
 ## non-literals report literal=false).
 func _tuple_lit_split(value: Variant) -> Dictionary:
-	var toks := _as_tokens(value)
+	var toks := _trim_trivia(_as_tokens(value))
 	if toks.is_empty():
 		return {"literal": false, "elements": []}
 	if not (toks[0] is Dictionary) or str((toks[0] as Dictionary).get("type", "")) != "LBRACKET":
@@ -920,7 +968,7 @@ func _tuple_lit_split(value: Variant) -> Dictionary:
 ## "" when not a single STRING/IDENT literal). Returns {"literal",
 ## "pairs"} (non-literals report literal=false).
 func _struct_lit_split(value: Variant) -> Dictionary:
-	var toks := _as_tokens(value)
+	var toks := _trim_trivia(_as_tokens(value))
 	if toks.is_empty():
 		return {"literal": false, "pairs": []}
 	if not (toks[0] is Dictionary) or str((toks[0] as Dictionary).get("type", "")) != "LBRACE":
@@ -1310,6 +1358,7 @@ func _prescan_aliases(ast: Dictionary) -> void:
 		for c in (child as Dictionary).get("leading_comments", []):
 			if c is Dictionary:
 				_collect_alias_node(c)
+	_collect_alias_node(_header_tok(ast))
 
 
 ## Records every @alias block in one comment value as raw material.
@@ -1341,6 +1390,8 @@ func _collect_alias_node(tok: Dictionary) -> void:
 ## JSONs (same kind) are fine: idempotent rewrites. NOTE: not via
 ## _type_known (the name itself is already registered there).
 func _alias_conflict(aname: String) -> String:
+	if aname == "null":
+		return "reserved name 'null'"
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
 		if table.has(aname):
@@ -1679,6 +1730,7 @@ func _prescan_templates(ast: Dictionary) -> void:
 		for c in (child as Dictionary).get("leading_comments", []):
 			if c is Dictionary:
 				_collect_template_node(c)
+	_collect_template_node(_header_tok(ast))
 
 
 ## Records every @template tag in one comment value as raw material.
@@ -1709,6 +1761,8 @@ func _collect_template_node(tok: Dictionary) -> void:
 ## variables share no namespace with concrete types on purpose: any
 ## clash is an error, never shadowing.
 func _template_conflict(tname: String) -> String:
+	if tname == "null":
+		return "reserved name 'null'"
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
 		if table.has(tname):
@@ -2288,6 +2342,7 @@ func _prescan_structs(ast: Dictionary) -> void:
 		for c in (child as Dictionary).get("leading_comments", []):
 			if c is Dictionary:
 				_collect_struct_node(c)
+	_collect_struct_node(_header_tok(ast))
 
 
 ## Records every @struct tag in one comment value as raw material.
@@ -2362,6 +2417,8 @@ func _resolve_structs() -> void:
 ## tuples: script members/classes, engine/builtin types, existing
 ## non-struct files all conflict; same-kind JSON rewrites are fine.
 func _struct_conflict(tname: String) -> String:
+	if tname == "null":
+		return "reserved name 'null'"
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
 		if table.has(tname):
@@ -2447,6 +2504,8 @@ func _extract_tok_tags(tok: Dictionary, owner: String, tagname: String, what: St
 				var entry := {"name": str(spec.get("name", "")), "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "line": tok_line + li}
 				if (spec as Dictionary).has("tree"):
 					entry["tree"] = (spec as Dictionary).get("tree", {})
+				if bool((spec as Dictionary).get("notnull", false)):
+					entry["notnull"] = true
 				out.append(entry)
 		li += 1
 	return out
@@ -2497,6 +2556,78 @@ func _canon_members(spec: Dictionary) -> Dictionary:
 	return {"ok": true, "types": out, "bad": ""}
 
 
+## True when a notnull spec can still be null: a bare `null` member
+## or a `null` arm in the top-level tree. Alias members resolve
+## post-mark, so they queue separately (see _queue_notnull_aliases).
+## Nested `Array[null]` does not count: the array itself is never null.
+func _spec_has_top_null(spec: Dictionary, members: Array) -> bool:
+	for m in members:
+		if str(m) == "null":
+			return true
+	if (spec as Dictionary).has("tree"):
+		return _tree_has_top_null((spec as Dictionary).get("tree", {}))
+	return false
+
+
+static func _tree_has_top_null(node: Variant) -> bool:
+	if not (node is Dictionary):
+		return false
+	var kind := str((node as Dictionary).get("kind", ""))
+	if kind == "name":
+		return str((node as Dictionary).get("name", "")) == "null"
+	if kind == "union":
+		for arm in ((node as Dictionary).get("arms", []) as Array):
+			if _tree_has_top_null(arm):
+				return true
+	return false
+
+
+## notnull-vs-nullable contradiction: errors with the annotation's
+## malformed kind. Returns true when contradictory (callers skip
+## stamping but keep every other check running).
+func _check_notnull_clash(what: String, malformed_kind: String, spec: Dictionary, members: Array, line: int, col: int, owner: String) -> bool:
+	if not bool(spec.get("notnull", false)):
+		return false
+	if not _spec_has_top_null(spec, members):
+		return false
+	_error(malformed_kind, what + " notnull contradicts nullable type '" + str(spec.get("raw", "")) + "'", line, col, owner)
+	return true
+
+
+## Queues alias members of a notnull spec for post-resolve
+## contradiction (alias trees only exist after _resolve_aliases).
+## Skipped when the direct check already fired, and stamp (the live
+## var_ann/param_ann/return_ann dict) is erased on contradiction.
+func _queue_notnull_aliases(spec: Dictionary, members: Array, what: String, malformed_kind: String, line: int, col: int, owner: String, stamp: Dictionary, direct_clash: bool) -> void:
+	if not bool(spec.get("notnull", false)) or direct_clash:
+		return
+	for m in members:
+		if str(m) == "null":
+			continue
+		if _aliases.has(str(m)) or not _alias_def(str(m)).is_empty():
+			_pending_notnull_clash.append({"member": str(m), "what": what, "mkind": malformed_kind, "raw": str(spec.get("raw", "")), "line": line, "col": col, "owner": owner, "stamp": stamp})
+
+
+## Evaluates queued alias contradictions once alias trees resolve.
+func _check_pending_notnull() -> void:
+	for pen in _pending_notnull_clash:
+		if not (pen is Dictionary):
+			continue
+		var member := str((pen as Dictionary).get("member", ""))
+		var def := _alias_def(member)
+		if def.is_empty():
+			continue
+		var exp := _expand_tree_aliases(def.get("tree", {}))
+		if not bool(exp.get("ok", false)):
+			continue
+		if not _tree_has_top_null(exp.get("node", {})):
+			continue
+		var stamp: Variant = (pen as Dictionary).get("stamp", {})
+		if stamp is Dictionary:
+			(stamp as Dictionary).erase("notnull")
+		_error(str((pen as Dictionary).get("mkind", "")), str((pen as Dictionary).get("what", "")) + " notnull contradicts nullable type '" + str((pen as Dictionary).get("raw", "")) + "'", int((pen as Dictionary).get("line", 0)), int((pen as Dictionary).get("col", 0)), str((pen as Dictionary).get("owner", "")))
+
+
 ## Narrows one @param pair against a PARAM node: known members
 ## narrowing the declared vartype (untyped params accept anything).
 ## Stamps pnode["param_ann"].
@@ -2517,9 +2648,15 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 				continue
 			if not _nominal_compat(str(m), ref):
 				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + str(m) + "' for parameter '" + str(pair.get("name", "")) + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
+	var notnull_clash := _check_notnull_clash("@param", ERR_PARAM_MALFORMED, pair, members, line, 0, owner)
+	if bool(pair.get("notnull", false)) and not notnull_clash and _value_is_bare_null((pnode as Dictionary).get("default", null)):
+		_error(ERR_PARAM_NOTNULL, "cannot assign null to notnull parameter '" + str(pair.get("name", "")) + "'", line, 0, owner)
 	pnode["param_ann"] = {"name": str(pair.get("name", "")), "types": members, "raw": str(pair.get("raw", "")), "line": line}
 	if (pair as Dictionary).has("tree"):
 		(pnode["param_ann"] as Dictionary)["tree"] = (pair as Dictionary).get("tree", {})
+	if bool(pair.get("notnull", false)) and not notnull_clash:
+		(pnode["param_ann"] as Dictionary)["notnull"] = true
+	_queue_notnull_aliases(pair, members, "@param", ERR_PARAM_MALFORMED, line, 0, owner, pnode.get("param_ann", {}), notnull_clash)
 
 
 ## Applies @param pairs to a whole parameter list (before-func/lambda
@@ -2604,6 +2741,7 @@ func _prescan_interfaces(ast: Dictionary) -> void:
 		for c in (child as Dictionary).get("leading_comments", []):
 			if c is Dictionary:
 				_collect_interface_tok(c)
+	_collect_interface_tok(_header_tok(ast))
 
 
 ## Collects @interface blocks from one comment token. Several blocks
@@ -2919,6 +3057,8 @@ func _parse_iface_params(text: String, line: int) -> Array:
 ## as tuples/structs: script members/classes, engine/builtin types and
 ## existing non-interface files all conflict.
 func _iface_conflict(tname: String) -> String:
+	if tname == "null":
+		return "reserved name 'null'"
 	for key in _members.keys():
 		var table: Dictionary = _members[key]
 		if table.has(tname):
@@ -3909,7 +4049,7 @@ func _mark_vartype(node: Dictionary, owner: String) -> void:
 func _infer_var_value(value: Variant) -> String:
 	if value is Dictionary and str((value as Dictionary).get("type", "")) == "LAMBDA":
 		return "Callable"
-	var toks := _as_tokens(value)
+	var toks := _trim_trivia(_as_tokens(value))
 	if toks.is_empty():
 		return ""
 	if toks.size() == 1 and toks[0] is Dictionary:
@@ -4077,11 +4217,12 @@ static func _split_words(s: String) -> Array:
 ## |-separated type identifiers. "void" cannot be combined.
 ## `what` names the annotation for messages ("@return", "@var").
 static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary:
-	var raw := raw_msg.strip_edges()
+	var nn := _split_notnull(raw_msg)
+	var raw := str(nn.get("text", ""))
 	if raw == "":
 		return {"ok": false, "error": what + " needs a type: 'void' or a type name like 'Node' (unions join with '|', e.g. 'Object|String|int')"}
 	if "[" in raw or "]" in raw or "," in raw:
-		return _parse_complex_spec(raw, what)
+		return _parse_complex_spec(raw, what, bool(nn.get("notnull", false)))
 	var parts := raw.split("|")
 	var types: Array = []
 	for p in parts:
@@ -4091,11 +4232,28 @@ static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary
 		if name == "void":
 			if parts.size() > 1:
 				return {"ok": false, "error": what + " 'void' cannot be combined with other types in '" + raw + "'"}
+			if bool(nn.get("notnull", false)):
+				return {"ok": false, "error": what + " 'notnull' cannot combine with 'void'"}
 			return {"ok": true, "types": [], "void": true, "raw": raw}
 		if not _is_type_name(name):
 			return {"ok": false, "error": what + " has an invalid type name '" + name + "'"}
 		types.append(name)
-	return {"ok": true, "types": types, "void": false, "raw": raw}
+	return {"ok": true, "types": types, "void": false, "raw": raw, "notnull": bool(nn.get("notnull", false))}
+
+
+## Splits a trailing `notnull` marker off a type expression
+## (whitespace-boundary match, case-sensitive): {"text", "notnull"}.
+## `# @var x Node notnull` flags the declaration; `Node|notnull` does
+## NOT (that parses as an unknown union arm, guiding to the spelling).
+static func _split_notnull(raw_msg: String) -> Dictionary:
+	var s := raw_msg.strip_edges()
+	if s == "notnull":
+		return {"text": "", "notnull": true}
+	if s.ends_with("notnull"):
+		var pre := s.substr(0, s.length() - 7)
+		if pre.ends_with(" ") or pre.ends_with("\t"):
+			return {"text": pre.strip_edges(), "notnull": true}
+	return {"text": s, "notnull": false}
 
 
 ## Complex-spec route (nested type expressions with brackets): parses
@@ -4104,7 +4262,7 @@ static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary
 ## `tuple[...]` (no user tuple named `tuple`) desugars to `Array`;
 ## named generics keep their head. `void` alone stays void; `void`
 ## combined or a top-level `*` keep the legacy rejections.
-static func _parse_complex_spec(raw: String, what: String) -> Dictionary:
+static func _parse_complex_spec(raw: String, what: String, notnull := false) -> Dictionary:
 	var parsed := _parse_type_expr(raw, what)
 	if not bool(parsed.get("ok", false)):
 		return {"ok": false, "error": str(parsed.get("error", ""))}
@@ -4112,6 +4270,8 @@ static func _parse_complex_spec(raw: String, what: String) -> Dictionary:
 	var voids := _count_void_names(tree)
 	if voids > 0:
 		if voids == 1 and str(tree.get("kind", "")) == "name" and str(tree.get("name", "")) == "void":
+			if notnull:
+				return {"ok": false, "error": what + " 'notnull' cannot combine with 'void'"}
 			return {"ok": true, "types": [], "void": true, "raw": raw}
 		return {"ok": false, "error": what + " 'void' cannot be combined with other types in '" + raw + "'"}
 	var arms: Array = []
@@ -4136,7 +4296,7 @@ static func _parse_complex_spec(raw: String, what: String) -> Dictionary:
 				types.append(hname)
 		else:
 			return {"ok": false, "error": what + " has an invalid type in '" + raw + "'"}
-	return {"ok": true, "types": types, "void": false, "raw": raw, "tree": tree}
+	return {"ok": true, "types": types, "void": false, "raw": raw, "tree": tree, "notnull": notnull}
 
 
 ## Counts `void` name leaves in a type tree (heads included).
@@ -4466,7 +4626,7 @@ static func _parse_var_spec(raw_msg: String, what := "@var") -> Dictionary:
 		return spec
 	if bool(spec.get("void", false)):
 		return {"ok": false, "error": what + " 'void' is not a valid variable type"}
-	var out := {"ok": true, "name": vname, "types": spec.get("types", []), "raw": str(spec.get("raw", ""))}
+	var out := {"ok": true, "name": vname, "types": spec.get("types", []), "raw": str(spec.get("raw", "")), "notnull": bool(spec.get("notnull", false))}
 	if (spec as Dictionary).has("tree"):
 		out["tree"] = (spec as Dictionary).get("tree", {})
 	return out
@@ -4501,6 +4661,8 @@ func _engine_chain(tname: String) -> Array:
 ## A @return member is known when it is the script class, a script class
 ## or enum member, or a data-dir JSON file exists for it.
 func _type_known(tname: String) -> bool:
+	if tname == "null":
+		return true
 	if tname != "" and tname == _script_class:
 		return true
 	if _tuples.has(tname):
@@ -4631,6 +4793,8 @@ func _mark_virtual_vartype(node: Dictionary, owner: String) -> void:
 ## dictionaries), or a known interface (contracts refine capabilities,
 ## never the nominal type, so they always pass narrowing).
 func _nominal_compat(member: String, ref: String) -> bool:
+	if member == "null":
+		return _null_fits(ref)
 	if member == ref or _derives_from(member, ref):
 		return true
 	if ref == "Array" and _is_tuple_name(member):
@@ -4640,6 +4804,23 @@ func _nominal_compat(member: String, ref: String) -> bool:
 	if _is_interface_name(member):
 		return true
 	return false
+
+
+## Nil assignability: null flows into Object-derived types, Variant
+## and dynamic slots only (mirrors Godot, which rejects null for
+## value types, arrays and dictionaries at parse time).
+func _null_fits(ref: String) -> bool:
+	if ref == "" or ref == "Variant" or ref == "dynamic" or ref == "null":
+		return true
+	var einfo := _engine_info(ref)
+	if not einfo.is_empty():
+		return str(einfo.get("kind", "")) == "class"
+	if ref == _script_class and ref != "":
+		return true
+	if not _iface_spec(ref).is_empty():
+		return true
+	var info := _type_info(ref)
+	return str(info.get("kind", "")) == "script"
 
 
 func _script_derives(child: String, ancestor: String) -> bool:
@@ -4692,15 +4873,18 @@ func _attach_return(fn_node: Dictionary, tag: Dictionary, owner: String) -> void
 		if not bool(cm.get("ok", false)):
 			_error(ERR_RETURN_UNKNOWN, "@return has unknown type '" + str(cm.get("bad", "")) + "'", line, col, owner)
 			return
-		var rebuilt := {"ok": true, "types": cm.get("types", []), "void": false, "raw": str(spec.get("raw", "")), "line": line}
+		var rebuilt := {"ok": true, "types": cm.get("types", []), "void": false, "raw": str(spec.get("raw", "")), "line": line, "notnull": bool(spec.get("notnull", false))}
 		if (spec as Dictionary).has("tree"):
 			rebuilt["tree"] = (spec as Dictionary).get("tree", {})
 		spec = rebuilt
 	if not _report_tree_errors(spec, ERR_RETURN_UNKNOWN, ERR_RETURN_MISMATCH, "@return", line, col, owner):
 		return
+	var notnull_clash := _check_notnull_clash("@return", ERR_RETURN_MALFORMED, spec, spec.get("types", []), line, col, owner)
 	fn_node["return_ann"] = {"types": spec.get("types", []), "void": bool(spec.get("void", false)), "raw": str(spec.get("raw", "")), "line": line}
 	if (spec as Dictionary).has("tree"):
 		(fn_node["return_ann"] as Dictionary)["tree"] = (spec as Dictionary).get("tree", {})
+	if bool(spec.get("notnull", false)) and not notnull_clash:
+		(fn_node["return_ann"] as Dictionary)["notnull"] = true
 
 
 ## Marks a FUNC_DECL node (@return allowed in any position: a nested
@@ -4746,9 +4930,15 @@ func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is
 				continue
 			if not _nominal_compat(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, col, owner)
+	var notnull_clash := _check_notnull_clash("@var", ERR_VAR_MALFORMED, spec, members, line, col, owner)
+	if bool(spec.get("notnull", false)) and not notnull_clash and _value_is_bare_null(decl_node.get("value", null)):
+		_error(ERR_VAR_NOTNULL, "cannot assign null to notnull variable '" + vname + "'", line, col, owner)
 	decl_node["var_ann"] = {"name": vname, "types": members, "raw": str(spec.get("raw", "")), "line": line}
 	if (spec as Dictionary).has("tree"):
 		(decl_node["var_ann"] as Dictionary)["tree"] = (spec as Dictionary).get("tree", {})
+	if bool(spec.get("notnull", false)) and not notnull_clash:
+		(decl_node["var_ann"] as Dictionary)["notnull"] = true
+	_queue_notnull_aliases(spec, members, "@var", ERR_VAR_MALFORMED, line, col, owner, decl_node.get("var_ann", {}), notnull_clash)
 
 
 ## Marks a VAR_DECL/CONST_DECL node (@var allowed in any position).
@@ -5848,6 +6038,32 @@ func _as_tokens(v: Variant) -> Array:
 	return []
 
 
+## Leading/trailing trivia of a token array (comments, separators and
+## indent markers). Value-shape readers (literal splitters, inference)
+## must ignore a trailing `# note` on the declaration line, or a
+## single trailing comment silently disables the whole check.
+static func _trim_trivia(toks: Array) -> Array:
+	var start := 0
+	var end := toks.size()
+	while start < end and _is_trivia(toks[start]):
+		start += 1
+	while end > start and _is_trivia(toks[end - 1]):
+		end -= 1
+	return toks.slice(start, end)
+
+
+static func _is_trivia(t: Variant) -> bool:
+	if not (t is Dictionary):
+		return false
+	return str((t as Dictionary).get("type", "")) in ["COMMENT", "DOC_COMMENT", "TYPE_INFO", "NEWLINE", "SEMICOLON", "INDENT", "DEDENT", "EOF"]
+
+
+## True for a bare `null` literal value (a trailing `# note` ignored).
+func _value_is_bare_null(value: Variant) -> bool:
+	var toks := _trim_trivia(_as_tokens(value))
+	return toks.size() == 1 and (toks[0] is Dictionary) and str((toks[0] as Dictionary).get("type", "")) == "NULL"
+
+
 func _flat_tokens(v: Variant) -> Array:
 	var out: Array = []
 	_flat_into(v, out)
@@ -6186,6 +6402,38 @@ func _decl_subtree(table_owner: String, name: String) -> String:
 	return table_owner + "." + name
 
 
+## Cross-script member flags: looks seg up in another script class'
+## user JSON (builtin/engine kinds never qualify). Returns {"kind",
+## "decl_owner", "private", "dep"} (empty Dictionaries for absent
+## flags) or {} when unknown. Only directly-declared members (script
+## JSONs list no inherited members); the analyzed script itself is
+## skipped (in-memory tables own same-file checks, so this can never
+## double-report).
+func _user_member_entry(tname: String, seg: String) -> Dictionary:
+	if tname == "" or seg == "" or seg == "_" or seg == "new":
+		return {}
+	if _script_class != "" and tname == _script_class:
+		return {}
+	var info := _type_info(tname)
+	if info.is_empty() or str(info.get("kind", "")) != "script":
+		return {}
+	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
+		return {}
+	var lists := [
+		["instance_methods", "function"],
+		["static_methods", "function"],
+		["fields", "variable"],
+		["constants", "constant"],
+		["signals", "signal"],
+		["enums", "enum"],
+	]
+	for pair in lists:
+		for m in info.get(pair[0], []):
+			if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
+				return {"kind": pair[1], "decl_owner": tname, "private": (m as Dictionary).get("private", {}), "dep": (m as Dictionary).get("deprecated", {})}
+	return {}
+
+
 func _error_private_use(qname: String, hit: Dictionary, tok: Dictionary, use_owner: String) -> void:
 	var msg = "cannot use private " + str(hit.get("kind", "")) + " '" + qname + "' outside class '" + _owner_display(str(hit.get("decl_owner", ""))) + "'"
 	_error(ERR_PRIVATE_USE, msg, int(tok.get("line", 0)), int(tok.get("column", 0)), use_owner)
@@ -6501,6 +6749,8 @@ func _infer_arg_tree(slice: Array, scope: Dictionary, fn: Variant, env: Dictiona
 			return {"kind": "name", "name": "String"}
 		if ty == "BOOL":
 			return {"kind": "name", "name": "bool"}
+		if ty == "NULL":
+			return {"kind": "name", "name": "null"}
 		if ty == "KEYWORD":
 			if val == "true" or val == "false":
 				return {"kind": "name", "name": "bool"}
@@ -7206,6 +7456,87 @@ func _verify_bare_generic(tokens: Array, i: int, j: int, scope: Dictionary, fn: 
 	return _skip_chain_verify(tokens, close + 1, scope, owner, fn, env, overlay)
 
 
+## True for a definitely-null union: non-empty and every head null.
+static func _types_all_null(types: Array) -> bool:
+	if types.is_empty():
+		return false
+	for t in types:
+		if str(t) != "null":
+			return false
+	return true
+
+
+## Exact-null member use: the receiver is provably null, so any call
+## or read errors null_access (bare uses like print(x) stay legal and
+## never reach here: no DOT segment peeks out).
+func _error_null_seg(tokens: Array, j: int, owner: String) -> void:
+	if j >= tokens.size() or not (tokens[j] is Dictionary):
+		return
+	if str((tokens[j] as Dictionary).get("type", "")) != "DOT":
+		return
+	if j + 1 >= tokens.size() or not (tokens[j + 1] is Dictionary):
+		return
+	var nt := str((tokens[j + 1] as Dictionary).get("type", ""))
+	if nt != "IDENTIFIER" and nt != "BUILTIN_TYPE" and nt != "KEYWORD":
+		return
+	var seg := str((tokens[j + 1] as Dictionary).get("value", ""))
+	var is_call := j + 2 < tokens.size() and (tokens[j + 2] is Dictionary) and str((tokens[j + 2] as Dictionary).get("type", "")) == "LPAREN"
+	if is_call:
+		_error(ERR_NULL_ACCESS, "cannot call method '" + seg + "()' on null", int((tokens[j + 1] as Dictionary).get("line", 0)), int((tokens[j + 1] as Dictionary).get("column", 0)), owner)
+	else:
+		_error(ERR_NULL_ACCESS, "cannot read member '" + seg + "' of null", int((tokens[j + 1] as Dictionary).get("line", 0)), int((tokens[j + 1] as Dictionary).get("column", 0)), owner)
+
+
+## Cross-script member probe on an otherwise-silent chain: peeks the
+## next DOT segment and consults the target script's user JSON. A
+## private flag errors private_use; a deprecated flag warns
+## deprecated_use (same messages as same-file uses). Anything else
+## stays silent (unknown receivers, public members, line-18 Variant
+## rule).
+func _check_cross_private(tname: String, tokens: Array, j: int, owner: String) -> void:
+	if j >= tokens.size() or not (tokens[j] is Dictionary):
+		return
+	if str((tokens[j] as Dictionary).get("type", "")) != "DOT":
+		return
+	if j + 1 >= tokens.size() or not (tokens[j + 1] is Dictionary):
+		return
+	var nt := str((tokens[j + 1] as Dictionary).get("type", ""))
+	if nt != "IDENTIFIER" and nt != "BUILTIN_TYPE" and nt != "KEYWORD":
+		return
+	var seg := str((tokens[j + 1] as Dictionary).get("value", ""))
+	var entry := _user_member_entry(tname, seg)
+	if entry.is_empty():
+		return
+	var tok: Dictionary = tokens[j + 1]
+	if not ((entry.get("private", {}) as Dictionary).is_empty()):
+		_error_private_use(tname + "." + seg, {"kind": str(entry.get("kind", "")), "decl_owner": str(entry.get("decl_owner", "")), "message": "", "line": 0}, tok, owner)
+	if not ((entry.get("dep", {}) as Dictionary).is_empty()):
+		_warn_use(str(entry.get("kind", "")), tname + "." + seg, {"dep": entry.get("dep", {})}, tok, owner)
+
+
+## Static cross-script probe for `ClassName.member` chains whose base
+## resolves to nothing local (shadowed names bail out exactly like
+## _verify_bare_generic: locals/params, overlays, narrowed env values
+## and member vars keep today's silence).
+func _check_cross_static(base: String, tokens: Array, j: int, scope: Dictionary, env: Dictionary, overlay: Dictionary, owner: String) -> void:
+	if base == "" or base == "_" or base == "super" or base == "self":
+		return
+	if (overlay as Dictionary).has(base):
+		return
+	if (env as Dictionary).has(base):
+		return
+	if str(_scope_kind(scope, base)) != "":
+		return
+	for o in [owner, ""]:
+		if not _member_var_node(str(o), base).is_empty():
+			return
+	if base == _script_class and base != "":
+		return
+	if _script_key_of(base, owner) != "":
+		return
+	_check_cross_private(base, tokens, j, owner)
+
+
 ## Verifies one DOT chain starting at tokens[i] (an IDENTIFIER).
 ## Links unify engine names and script owner keys: each segment is
 ## checked against script tables (own, extends walk, terminal engine
@@ -7221,6 +7552,7 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 	var j := i + 1
 	var kind := str(fb.get("kind", ""))
 	if kind == "skip":
+		_check_cross_static(base, tokens, j, scope, env, overlay, owner)
 		var bj := _verify_bare_generic(tokens, i, j, scope, fn, env, overlay, owner)
 		if bj >= 0:
 			return bj
@@ -7230,9 +7562,14 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 	var links: Array = []
 	var ctx := owner
 	if kind == "instance":
-		for t in (fb.get("types", []) as Array):
+		var itypes: Array = (fb.get("types", []) as Array).duplicate()
+		if _types_all_null(itypes):
+			_error_null_seg(tokens, j, owner)
+			return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
+		for t in itypes:
 			var l := _link_kind_of(str(t), owner)
 			if l.is_empty():
+				_check_cross_private(str(t), tokens, j, owner)
 				return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
 			links.append(l)
 		if links.size() == 1 and str(links[0].get("kind", "")) == "script":
@@ -7788,12 +8125,46 @@ func _guard_is(tokens: Array) -> Dictionary:
 	if ytype != "IDENTIFIER" and ytype != "BUILTIN_TYPE":
 		return {}
 	var yname := _vt_val(tokens, idx)
-	if yname == "" or not _type_known(yname):
+	if yname == "" or yname == "null" or not _type_known(yname):
 		return {}
 	var eq := positive
 	if neg:
 		eq = not eq
 	return {"name": _vt_val(tokens, s), "types": [yname], "eq": eq}
+
+
+## Recognizes `x == null` / `x != null` (either order, leading not/!
+## flips). Yields exact-nil heads: member access on them errors with
+## null_access, anything else stays as before. `x is null` is NOT
+## accepted (Godot rejects it at parse time).
+func _guard_null(tokens: Array) -> Dictionary:
+	var be := _guard_bounds(tokens)
+	var s := int(be[0])
+	var e := int(be[1])
+	var neg := false
+	if s < e and ((_vt_type(tokens, s) == "KEYWORD" and _vt_val(tokens, s) == "not") or (_vt_type(tokens, s) == "OPERATOR" and _vt_val(tokens, s) == "!")):
+		neg = true
+		s += 1
+	if e - s != 3:
+		return {}
+	if _vt_type(tokens, s + 1) != "OPERATOR":
+		return {}
+	var op := _vt_val(tokens, s + 1)
+	if op != "==" and op != "!=":
+		return {}
+	var vname := ""
+	if _vt_type(tokens, s) == "IDENTIFIER" and _vt_type(tokens, s + 2) == "NULL":
+		vname = _vt_val(tokens, s)
+	elif _vt_type(tokens, s) == "NULL" and _vt_type(tokens, s + 2) == "IDENTIFIER":
+		vname = _vt_val(tokens, s + 2)
+	else:
+		return {}
+	if vname == "" or vname == "_":
+		return {}
+	var eq := op == "=="
+	if neg:
+		eq = not eq
+	return {"name": vname, "types": ["null"], "eq": eq}
 
 
 ## Maps value tokens shaped like a Variant.Type constant (bare
@@ -7886,13 +8257,16 @@ func _guard_instanceof(tokens: Array, fn: Variant, scope: Dictionary, owner: Str
 	return {"name": _vt_val(tokens, s + 2), "types": [resolved], "eq": eq}
 
 
-## Any recognized guard: typeof first, then `is`, then
-## is_instance_of. Shapes are mutually exclusive; first hit wins.
+## Any recognized guard: typeof first, then `is`, then `== null`,
+## then is_instance_of. Shapes are mutually exclusive; first hit wins.
 func _flow_guard(tokens: Array, fn: Variant, scope: Dictionary, owner: String) -> Dictionary:
 	var g := _guard_typeof(tokens)
 	if not g.is_empty():
 		return g
 	g = _guard_is(tokens)
+	if not g.is_empty():
+		return g
+	g = _guard_null(tokens)
 	if not g.is_empty():
 		return g
 	return _guard_instanceof(tokens, fn, scope, owner)
@@ -7914,6 +8288,12 @@ func _flow_fn_scope(fn: Dictionary, scope: Dictionary) -> Dictionary:
 ## trees add generics for argument inference. Trees are never mutated
 ## in place, so env.duplicate() sharing is safe.
 const ENV_TREE_PREFIX := "@tree:"
+
+
+## Flow notnull marks ride under "@notnull:"<name> keys: set by
+## notnull @var facts and by the non-null side of `==`/`!=` null
+## guards, read by the `= null` assignment check.
+const ENV_NOTNULL_PREFIX := "@notnull:"
 
 
 ## Tree recorded for a name in env, {} when absent. Pure.
@@ -8005,9 +8385,39 @@ func _flow_assign_call(vname: String, vtoks: Array, target: Dictionary, scope: D
 	_env_set(env, vname, _tree_top_heads(ret), ret)
 
 
-## Tracks `name = f(...)` reassignments (see _flow_assign_call).
+## True for a null guard ({types ["null"]}, from `==`/`!=` or
+## `typeof`/`is_instance_of` NIL forms): the non-null side carries a
+## notnull mark instead of trimmed heads (plain `Node` stays lenient).
+static func _is_null_guard(g: Dictionary) -> bool:
+	var types: Array = g.get("types", [])
+	return types.size() == 1 and str(types[0]) == "null"
+
+
+## notnull state of a variable in flow: an explicit env mark (notnull
+## @var facts, non-null guard sides) or a notnull @var/@param stamp on
+## its declaration (locals, params, consts, members). Anything else
+## (including lambda-param shadowing, which this path cannot see)
+## reads as nullable.
+func _flow_notnull(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> bool:
+	if vname == "" or vname == "_":
+		return false
+	if (env as Dictionary).has(ENV_NOTNULL_PREFIX + vname):
+		return true
+	var node := _base_decl_node(vname, fn, scope, owner, env)
+	if node.is_empty():
+		return false
+	for ak in ["var_ann", "param_ann", "return_ann"]:
+		var ann: Variant = node.get(ak, {})
+		if ann is Dictionary and bool((ann as Dictionary).get("notnull", false)):
+			return true
+	return false
+
+
+## Tracks `name = ...` reassignments: generic call results (see
+## _flow_assign_call) plus the `= null` check against notnull state.
 func _flow_assign_stmt(node: Dictionary, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
 	var toks := _as_tokens(node.get("expr", null))
+	_check_null_assign(toks, node, scope, fn, env, owner)
 	if toks.size() < 4:
 		return
 	if not (toks[0] is Dictionary) or str((toks[0] as Dictionary).get("type", "")) != "IDENTIFIER":
@@ -8016,6 +8426,25 @@ func _flow_assign_stmt(node: Dictionary, scope: Dictionary, fn: Variant, env: Di
 		return
 	var vname := str((toks[0] as Dictionary).get("value", ""))
 	_flow_assign_call(vname, toks.slice(2), _assign_target(vname, fn, scope, owner, env), scope, fn, env, owner)
+
+
+## Errors `vname = null` (bare null literal, trailing notes ignored)
+## when the target is notnull by declaration or flow state. Anything
+## else (compound values, unmarked targets) stays silent.
+func _check_null_assign(toks: Array, node: Dictionary, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
+	var tt := _trim_trivia(toks)
+	if tt.size() != 3:
+		return
+	if not (tt[0] is Dictionary) or str((tt[0] as Dictionary).get("type", "")) != "IDENTIFIER":
+		return
+	if not (tt[1] is Dictionary) or str((tt[1] as Dictionary).get("type", "")) != "OPERATOR" or str((tt[1] as Dictionary).get("value", "")) != "=":
+		return
+	if not (tt[2] is Dictionary) or str((tt[2] as Dictionary).get("type", "")) != "NULL":
+		return
+	var vname := str((tt[0] as Dictionary).get("value", ""))
+	if not _flow_notnull(vname, fn, scope, owner, env):
+		return
+	_error(ERR_VAR_NOTNULL, "cannot assign null to notnull variable '" + vname + "'", int((tt[2] as Dictionary).get("line", int(node.get("line", 0)))), int((tt[2] as Dictionary).get("column", 0)), owner)
 
 
 ## Resolves an `x = ...` reassignment target to its declaration node
@@ -8055,6 +8484,10 @@ func _flow_facts(node: Dictionary, scope: Dictionary, owner: String, fn: Variant
 		if target.is_empty() or target.has("bad"):
 			continue
 		_env_set(env, vname, (spec as Dictionary).get("types", []), (spec as Dictionary).get("tree", {}))
+		if bool((spec as Dictionary).get("notnull", false)):
+			(env as Dictionary)[ENV_NOTNULL_PREFIX + vname] = true
+		else:
+			(env as Dictionary).erase(ENV_NOTNULL_PREFIX + vname)
 
 
 ## Flow pass over one statement with the current env (mutated by
@@ -8105,6 +8538,13 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 					_env_set(then_env, str(g.get("name", "")), g.get("types", []), {})
 				else:
 					_env_set(else_env, str(g.get("name", "")), g.get("types", []), {})
+				if _is_null_guard(g):
+					var nn := str(g.get("name", ""))
+					if nn != "":
+						if bool(g.get("eq", true)):
+							(else_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
+						else:
+							(then_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
 		_flow_block(node.get("then", null), scope, owner, fn, then_env)
 		for e in node.get("elifs", []):
 			if e is Dictionary:
@@ -8275,6 +8715,8 @@ func _write_class_file(file_base: String, owner: String, ast: Dictionary, root_p
 	var info: Dictionary = _read_json(path)
 	if info.is_empty():
 		info = _minimal_info(file_base, owner, root_prefix)
+	else:
+		_merge_members(info, owner)
 	info["generic"] = _generic_for_file(owner)
 	_flag_deprecated(info, owner)
 	_flag_private(info, owner)
@@ -8282,6 +8724,53 @@ func _write_class_file(file_base: String, owner: String, ast: Dictionary, root_p
 	info["analysis_warnings"] = _issues_for(owner, _warnings)
 	_write_json(path, info)
 	_written.append(path)
+
+
+## Adds current-table members missing from a loaded user file. New
+## declarations must appear for cross-script checks (private and
+## deprecated consult these rosters); existing entries keep their
+## richer semantic data untouched. Never removes: a partially parsed
+## re-analysis must not wipe the roster.
+func _merge_members(info: Dictionary, owner: String) -> void:
+	var table: Dictionary = _members.get(owner, {})
+	for mname in table.keys():
+		if not (table[mname] is Dictionary):
+			continue
+		var kind := str((table[mname] as Dictionary).get("kind", ""))
+		var list_key := _member_list_key(kind)
+		if list_key == "":
+			continue
+		if not (info.get(list_key, null) is Array):
+			info[list_key] = []
+		var items: Array = info[list_key]
+		var found := false
+		for e in items:
+			if e is Dictionary and str((e as Dictionary).get("name", "")) == mname:
+				found = true
+				break
+		if found:
+			continue
+		if kind == "class":
+			items.append({"name": mname, "full_name": mname, "file": mname + ".json"})
+		else:
+			items.append({"name": mname})
+
+
+## User-file member list for a member-table kind ("" when none).
+static func _member_list_key(kind: String) -> String:
+	if kind == "enum":
+		return "enums"
+	if kind == "constant":
+		return "constants"
+	if kind == "signal":
+		return "signals"
+	if kind == "variable":
+		return "fields"
+	if kind == "function":
+		return "instance_methods"
+	if kind == "class":
+		return "inner_classes"
+	return ""
 
 
 func _issues_for(owner: String, issues: Array) -> Array:

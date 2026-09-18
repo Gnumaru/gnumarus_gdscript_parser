@@ -76,7 +76,7 @@ func _s_def_errors(h) -> void:
 	h.check(_has_err(h.analyze_text("extends Node\n# @struct Node 1 a:int\n", "res://tests/tmp_st_e9.gd"), "struct_conflict", "existing type"), "builtin conflict")
 	h.check(_kinds(h.analyze_text("extends Node\nfunc f(\n\t\t# @struct S 1 a:int\n\t\ta: int\n\t) -> void:\n\tpass\n", "res://tests/tmp_st_e10.gd")).has("struct_misplaced"), "param misplaced")
 	h.check(_kinds(h.analyze_text("extends Node\nfunc f():\n\t# @struct S 1 a:int\n\n\tpass\n", "res://tests/tmp_st_e11.gd")).has("struct_misplaced"), "body misplaced")
-	h.check(_kinds(h.analyze_text("# @struct S 1 a:int\nclass_name Foo\n", "res://tests/tmp_st_e12.gd")).has("struct_misplaced"), "header misplaced")
+	h.check(_kinds(h.analyze_text("# @struct S 1 a:int\nclass_name Foo\n", "res://tests/tmp_st_e12.gd")).is_empty(), "header definition clean")
 
 
 func _s_sem(h) -> void:
@@ -94,6 +94,8 @@ func _s_use(h) -> void:
 	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": \"s\", \"b\": \"s\"}\n", "res://tests/tmp_st_u4.gd"), "struct_mismatch", "field 'a' expects 'int'"), "wrong value mismatches")
 	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\nvar d := {}\n# @var x S\nvar x: Dictionary = d\n", "res://tests/tmp_st_u5.gd")), "analyzer silent on non-literal")
 	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 m:Variant\n# @var x S\nvar x: Dictionary = {\"m\": 1}\n", "res://tests/tmp_st_u6.gd")), "unknown field accepts literal")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1} # trailing note\n", "res://tests/tmp_st_u7.gd"), "struct_mismatch", "expects 2 fields, got 1"), "trailing comment keeps mismatch")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"} # trailing note\n", "res://tests/tmp_st_u8.gd")), "trailing comment keeps clean literal clean")
 
 
 func _s_keys_members(h) -> void:

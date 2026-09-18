@@ -73,7 +73,7 @@ func _t_def_errors(h) -> void:
 	h.check(_kinds(h.analyze_text("extends Node\nfunc f(\n\t\t# @tuple T 1 int\n\t\ta: int\n\t) -> void:\n\tpass\n", "res://tests/tmp_tup_e10.gd")).has("tuple_misplaced"), "param misplaced")
 	h.check(_clean(h.analyze_text("extends Node\n# @tuple T 1 int\nfunc f():\n\tpass\n", "res://tests/tmp_tup_e11.gd")), "leading definition clean")
 	h.check(_kinds(h.analyze_text("extends Node\nfunc f():\n\t# @tuple T 1 int\n\n\tpass\n", "res://tests/tmp_tup_e12.gd")).has("tuple_misplaced"), "body misplaced")
-	h.check(_kinds(h.analyze_text("# @tuple T 1 int\nclass_name Foo\n", "res://tests/tmp_tup_e13.gd")).has("tuple_misplaced"), "header misplaced")
+	h.check(_kinds(h.analyze_text("# @tuple T 1 int\nclass_name Foo\n", "res://tests/tmp_tup_e13.gd")).is_empty(), "header definition clean")
 
 
 func _t_sem(h) -> void:
@@ -99,6 +99,8 @@ func _t_use(h) -> void:
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T2 2 int String\n# @var x T2\nvar x: Array = [\"a\", \"b\"]\n", "res://tests/tmp_tup_u3.gd"), "tuple_mismatch", "element 0"), "wrong element mismatches")
 	h.check(_clean(h.analyze_text("extends Node\n# @tuple T2 2 int String\nvar arr := [1]\n# @var x T2\nvar x: Array = arr\n", "res://tests/tmp_tup_u4.gd")), "analyzer silent on non-literal")
 	h.check(_clean(h.analyze_text("extends Node\n# @tuple T2 2 int String\n# @var x T2\nvar x: Array = [foo(), \"a\"]\n", "res://tests/tmp_tup_u5.gd")), "complex element skipped")
+	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T2 2 int String\n# @var x T2\nvar x: Array = [1, 2, 3] # trailing note\n", "res://tests/tmp_tup_u6.gd"), "tuple_mismatch", "expects 2 elements, got 3"), "trailing comment keeps mismatch")
+	h.check(_clean(h.analyze_text("extends Node\n# @tuple T2 2 int String\n# @var x T2\nvar x: Array = [1, \"a\"] # trailing note\n", "res://tests/tmp_tup_u7.gd")), "trailing comment keeps clean literal clean")
 
 
 func _t_index(h) -> void:

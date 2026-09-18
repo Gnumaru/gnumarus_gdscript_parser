@@ -1,0 +1,36 @@
+[gd_scene format=3 uid="uid://cpxjs8g0lkytr"]
+
+[ext_resource type="Script" uid="uid://b527whaq1bjrx" path="res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/AnnotationsShowcase1.gd" id="1_1khka"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_ytojt"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_ke8jm"]
+sky_material = SubResource("ProceduralSkyMaterial_ytojt")
+
+[sub_resource type="Environment" id="Environment_liisj"]
+background_mode = 2
+sky = SubResource("Sky_ke8jm")
+
+[sub_resource type="GDScript" id="GDScript_aqkfq"]
+script/source = "extends Node
+@export var myvar: Variant
+#last line
+"
+
+[node name="Node3D" type="Node3D" unique_id=1175113272]
+script = ExtResource("1_1khka")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1280153264]
+environment = SubResource("Environment_liisj")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=423180193]
+transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Node" type="Node" parent="." unique_id=1723117825]
+script = SubResource("GDScript_aqkfq")
+myvar = [true, 0.1, 1, "asdf", {
+"asdf": 1
+}]

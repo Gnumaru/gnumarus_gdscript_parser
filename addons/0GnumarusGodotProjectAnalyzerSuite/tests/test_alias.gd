@@ -80,6 +80,7 @@ func _a_narrow(h) -> void:
 	h.check(_has_err(h.analyze_text("extends Node\n# @alias words String @endalias\n# @param p words\nfunc f(p: int):\n\tpass\n", "res://tests/tmp_ali_n04.gd"), "param_mismatch", "from alias 'words'"), "param narrow mismatches")
 	h.check(_clean(h.analyze_text("extends Node\n# @alias answer int @endalias\n# @return answer\nfunc f() -> int:\n\treturn 1\n", "res://tests/tmp_ali_n05.gd")), "return arrow compat clean")
 	h.check(_has_err(h.analyze_text("extends Node\n# @alias answer int @endalias\n# @return answer\nfunc f() -> String:\n\treturn \"a\"\n", "res://tests/tmp_ali_n06.gd"), "return_mismatch", "'int' with '-> String'"), "return arrow mismatch errors")
+	h.check(_has_err(h.analyze_text("extends Node\n# @alias number int|float @endalias\n# @var x number\nvar x := \"a\" # trailing note\n", "res://tests/tmp_ali_n07.gd"), "var_mismatch", "from alias 'number'"), "trailing comment keeps mismatch")
 
 
 func _a_json(h) -> void:
