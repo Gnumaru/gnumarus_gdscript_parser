@@ -5701,12 +5701,322 @@ func _script_hit(rec: Dictionary, seg: String, is_call: bool) -> Dictionary:
 ## Script-side member lookup: own table, then script parents, then the
 ## terminal engine base. Objects are assumed to hold ONLY declared and
 ## inherited members (no dynamic script dispatch): script members found
-## out of the inheritance line still miss. Returns:
-## - {"status": "found", "cont"} (see _script_hit);
+## out of the inheritance line still miss. Returns:## - {"status": "found", "cont"} (see _script_hit);
 ## - {"status": "miss-skip"} (unresolvable parent: cannot prove absence);
 ## - {"status": "miss-engine", "base"} (terminal engine base: caller
 ##   runs the engine check, which errors on absence);
 ## - {"status": "miss-sure"} (existing member misused: caller errors).
+## FUNC_DECL node for a script function (same walk as _script_seg),
+## or {} when absent, not a function, or engine-backed.
+func _script_func_node(owner_key: String, seg: String) -> Dictionary:
+	var key := owner_key
+	var seen := {}
+	var guard := 0
+	while guard < 64:
+		guard += 1
+		if seen.has(key):
+			return {}
+		seen[key] = true
+		if _members.has(key):
+			var table: Dictionary = _members[key]
+			if table.has(seg):
+				var rec: Dictionary = table[seg]
+				if str(rec.get("kind", "")) == "function":
+					var n: Variant = rec.get("node", {})
+					if n is Dictionary and str((n as Dictionary).get("type", "")) == "FUNC_DECL":
+						return n
+				return {}
+		var base := ""
+		if key == "":
+			base = _script_extends
+		else:
+			base = str(_class_extends.get(key, ""))
+		if base == "":
+			base = "RefCounted"
+		var resolved := _resolve_private_owner(base, key)
+		if resolved != "" and _members.has(resolved):
+			key = resolved
+			continue
+		return {}
+	return {}
+
+
+## Rebuilds an annotation tree from a stamped *_ann ({types} flat
+## fallback when no tree was stamped): single name, union of names,
+## or {kind: any} for dynamic. Pure.
+static func _ann_tree(ann: Dictionary) -> Dictionary:
+	if ann.has("tree") and (ann["tree"] is Dictionary) and not (ann.get("tree", {}) as Dictionary).is_empty():
+		return ann.get("tree", {})
+	var types: Array = ann.get("types", [])
+	if types.is_empty():
+		return {"kind": "any"}
+	if types.size() == 1:
+		return {"kind": "name", "name": str(types[0])}
+	var arms: Array = []
+	for t in types:
+		arms.append({"kind": "name", "name": str(t)})
+	return {"kind": "union", "arms": arms}
+
+
+## Canonizes every name in a tree (typo-correction like the flat
+## pipeline). Anonymous `tuple[...]` heads are kept verbatim.
+func _canon_tree_names(node: Dictionary) -> Dictionary:
+	var kind := str(node.get("kind", ""))
+	if kind == "any":
+		return {"kind": "any"}
+	if kind == "name":
+		var nm := str(node.get("name", ""))
+		var cm := _canon_type(nm)
+		if cm != "":
+			return {"kind": "name", "name": cm}
+		return {"kind": "name", "name": nm}
+	if kind == "union":
+		var arms: Array = []
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				arms.append(_canon_tree_names(arm))
+		return {"kind": "union", "arms": arms}
+	if kind == "generic":
+		var hname := str(node.get("name", ""))
+		if not _is_anon_tuple_head(hname):
+			var cm := _canon_type(hname)
+			if cm != "":
+				hname = cm
+		var args: Array = []
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				args.append(_canon_tree_names(arg))
+		return {"kind": "generic", "name": hname, "args": args}
+	return {"kind": "any"}
+
+
+## Generic signature of a FUNC_DECL node: formals [{name, tree, req}],
+## return tree, and free template vars. {"ok": false} when the
+## signature references no template variable (plain call: existing
+## behavior untouched) or an alias fails to expand.
+func _func_template_sig(fn_node: Dictionary) -> Dictionary:
+	var formals: Array = []
+	var seen := {}
+	for p in fn_node.get("params", []):
+		if not (p is Dictionary):
+			continue
+		var pd: Dictionary = p
+		if str(pd.get("type", "")) != "PARAM":
+			continue
+		var tree := _ann_tree(pd.get("param_ann", {}))
+		tree = _canon_tree_names(tree)
+		var exp := _expand_tree_aliases(tree)
+		if not bool(exp.get("ok", false)):
+			return {"ok": false}
+		tree = exp.get("node", {})
+		formals.append({"name": str(pd.get("name", "")), "tree": tree, "req": (pd as Dictionary).get("default", null) == null})
+		for v in _template_refs(tree, _templates.keys()):
+			seen[str(v)] = true
+	var ret := {"kind": "any"}
+	if (fn_node as Dictionary).has("return_ann"):
+		ret = _ann_tree((fn_node as Dictionary).get("return_ann", {}))
+	else:
+		var arrow := _arrow_name(fn_node.get("return_type", null))
+		if arrow == "void":
+			ret = {"kind": "name", "name": "void"}
+		elif arrow != "":
+			ret = {"kind": "name", "name": arrow}
+	ret = _canon_tree_names(ret)
+	var rexp := _expand_tree_aliases(ret)
+	if not bool(rexp.get("ok", false)):
+		return {"ok": false}
+	ret = rexp.get("node", {})
+	for v in _template_refs(ret, _templates.keys()):
+		seen[str(v)] = true
+	if seen.is_empty():
+		return {"ok": false}
+	return {"ok": true, "formals": formals, "return": ret, "tvars": seen.keys()}
+
+
+## Splits call arguments (tokens between an LPAREN open_idx and its
+## match) at top-level commas. Returns an Array of token Arrays
+## (empty for `f()`; a trailing comma leaves no phantom argument).
+static func _split_arg_slices(tokens: Array, open_idx: int) -> Array:
+	var close := _match_close(tokens, open_idx)
+	if close < 0:
+		return []
+	var out: Array = []
+	var cur: Array = []
+	var depth := 0
+	var i := open_idx + 1
+	while i < close:
+		var t: Variant = tokens[i]
+		var ty := ""
+		if t is Dictionary:
+			ty = str((t as Dictionary).get("type", ""))
+		if ty == "LPAREN" or ty == "LBRACKET" or ty == "LBRACE":
+			depth += 1
+			cur.append(t)
+		elif ty == "RPAREN" or ty == "RBRACKET" or ty == "RBRACE":
+			depth -= 1
+			cur.append(t)
+		elif ty == "COMMA" and depth == 0:
+			out.append(cur)
+			cur = []
+		else:
+			cur.append(t)
+		i += 1
+	if not cur.is_empty():
+		out.append(cur)
+	return out
+
+
+## Infers one call-argument tree from a token slice: literals,
+## array/dictionary literals (elements recurse, depth-capped),
+## identifiers via flow env/scope/members, anything else dynamic.
+## Pure: reads tables, reports nothing.
+func _infer_arg_tree(slice: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, depth: int) -> Dictionary:
+	if slice.is_empty() or depth > 6:
+		return {"kind": "any"}
+	if slice.size() == 1 and slice[0] is Dictionary:
+		var t: Dictionary = slice[0]
+		var ty := str(t.get("type", ""))
+		var val := str(t.get("value", ""))
+		if ty == "INT":
+			return {"kind": "name", "name": "int"}
+		if ty == "FLOAT":
+			return {"kind": "name", "name": "float"}
+		if ty == "STRING":
+			return {"kind": "name", "name": "String"}
+		if ty == "BOOL":
+			return {"kind": "name", "name": "bool"}
+		if ty == "KEYWORD":
+			if val == "true" or val == "false":
+				return {"kind": "name", "name": "bool"}
+			return {"kind": "any"}
+		if ty == "IDENTIFIER" or ty == "BUILTIN_TYPE":
+			return _canon_tree_names(_infer_arg_name(val, scope, fn, env, overlay, owner))
+		return {"kind": "any"}
+	if (slice[0] is Dictionary) and str((slice[0] as Dictionary).get("type", "")) == "LBRACKET" and str((slice[slice.size() - 1] as Dictionary).get("type", "")) == "RBRACKET":
+		var inner: Array = []
+		var cur: Array = []
+		var depth2 := 0
+		var i := 1
+		while i < slice.size() - 1:
+			var e: Variant = slice[i]
+			var et := ""
+			if e is Dictionary:
+				et = str((e as Dictionary).get("type", ""))
+			if et == "LPAREN" or et == "LBRACKET" or et == "LBRACE":
+				depth2 += 1
+				cur.append(e)
+			elif et == "RPAREN" or et == "RBRACKET" or et == "RBRACE":
+				depth2 -= 1
+				cur.append(e)
+			elif et == "COMMA" and depth2 == 0:
+				inner.append(cur)
+				cur = []
+			else:
+				cur.append(e)
+			i += 1
+		if not cur.is_empty():
+			inner.append(cur)
+		if inner.is_empty():
+			return {"kind": "name", "name": "Array"}
+		var arms: Array = []
+		for el in inner:
+			arms.append(_infer_arg_tree(el, scope, fn, env, overlay, owner, depth + 1))
+		if arms.size() == 1:
+			return {"kind": "generic", "name": "Array", "args": arms}
+		return {"kind": "generic", "name": "Array", "args": [{"kind": "union", "arms": arms}]}
+	if (slice[0] is Dictionary) and str((slice[0] as Dictionary).get("type", "")) == "LBRACE":
+		return {"kind": "name", "name": "Dictionary"}
+	if (slice[0] is Dictionary) and str((slice[0] as Dictionary).get("type", "")) == "LPAREN" and _match_close(slice, 0) == slice.size() - 1:
+		return _infer_arg_tree(slice.slice(1, slice.size() - 1), scope, fn, env, overlay, owner, depth + 1)
+	return {"kind": "any"}
+
+
+## Name tree for one identifier argument via flow env/scope/members
+## (flat union, or dynamic when unknown). Pure.
+func _infer_arg_name(vname: String, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> Dictionary:
+	if vname == "" or vname == "_" or vname == "self" or vname == "super" or (overlay as Dictionary).has(vname):
+		return {"kind": "any"}
+	if (env as Dictionary).has(vname):
+		var et: Array = (env as Dictionary)[vname]
+		if et.is_empty():
+			return {"kind": "any"}
+		if et.size() == 1:
+			return {"kind": "name", "name": str(et[0])}
+		var arms: Array = []
+		for t in et:
+			arms.append({"kind": "name", "name": str(t)})
+		return {"kind": "union", "arms": arms}
+	var fnd: Dictionary = fn if fn is Dictionary else {}
+	var kind := _scope_kind(scope, vname)
+	if kind == "param":
+		var pnode := _find_param_node(fnd.get("params", []), vname)
+		if pnode.is_empty():
+			return {"kind": "any"}
+		return _flat_to_tree(_flow_decl_types(pnode, false, true))
+	if kind == "local" or kind == "const":
+		var decl := _find_body_decl(fnd.get("body", null), vname)
+		if decl.is_empty():
+			return {"kind": "any"}
+		return _flat_to_tree(_flow_decl_types(decl, str(decl.get("type", "")) == "CONST_DECL", false))
+	for o in [owner, ""]:
+		var n := _member_var_node(str(o), vname)
+		if not n.is_empty():
+			return _flat_to_tree(_flow_decl_types(n, str(n.get("type", "")) == "CONST_DECL", false))
+	return {"kind": "any"}
+
+
+## Flat type-name list to a tree (single name, union, or dynamic).
+static func _flat_to_tree(types: Array) -> Dictionary:
+	if types.is_empty():
+		return {"kind": "any"}
+	if types.size() == 1:
+		return {"kind": "name", "name": str(types[0])}
+	var arms: Array = []
+	for t in types:
+		arms.append({"kind": "name", "name": str(t)})
+	return {"kind": "union", "arms": arms}
+
+
+## Instantiates one generic call: unifies formal parameter trees with
+## inferred actual trees, checks bounds of bound variables, and
+## returns substituted return heads. Reports template_mismatch and
+## returns {"ok": false} on failure. No-ops ({ok, n/a}) without
+## template variables (caller keeps existing behavior).
+func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, line: int, col: int) -> Dictionary:
+	var sig := _func_template_sig(fn_node)
+	if not bool(sig.get("ok", false)):
+		return {"ok": true, "generic": false}
+	var formals: Array = sig.get("formals", [])
+	var tvars: Array = sig.get("tvars", [])
+	var req := 0
+	for f in formals:
+		if f is Dictionary and bool((f as Dictionary).get("req", true)):
+			req += 1
+	if slices.size() < req or slices.size() > formals.size():
+		var want := str(req)
+		if req != formals.size():
+			want = str(req) + ".." + str(formals.size())
+		_error(ERR_TEMPLATE_MISMATCH, "generic function " + disp + " expects " + want + " argument(s), got " + str(slices.size()), line, col, owner)
+		return {"ok": false, "generic": true}
+	var subst := {}
+	for idx in range(slices.size()):
+		var formal: Dictionary = formals[idx]
+		var actual := _infer_arg_tree(slices[idx], scope, fn, env, overlay, owner, 0)
+		var u := _unify_trees(formal.get("tree", {}), actual, subst, tvars)
+		if not bool(u.get("ok", false)):
+			_error(ERR_TEMPLATE_MISMATCH, "argument " + str(idx + 1) + " of generic function " + disp + " expects '" + _show_tree(formal.get("tree", {})) + "', got '" + _show_tree(actual) + "' (" + str(u.get("error", "")) + ")", line, col, owner)
+			return {"ok": false, "generic": true}
+		subst = u.get("subst", subst)
+	for v in tvars:
+		var vs := str(v)
+		if subst.has(vs) and not _template_bound_of(vs).is_empty():
+			if not _check_bound(_template_bound_of(vs), subst[vs]):
+				_error(ERR_TEMPLATE_MISMATCH, "type '" + _show_tree(subst[vs]) + "' for '" + vs + "' violates bound '" + _show_tree(_template_bound_of(vs)) + "' in generic function " + disp, line, col, owner)
+				return {"ok": false, "generic": true}
+	var ret := _subst_tree(sig.get("return", {}), subst)
+	return {"ok": true, "generic": true, "heads": _tree_top_heads(ret)}
+
+
 func _script_seg(owner_key: String, seg: String, is_call: bool) -> Dictionary:
 	var key := owner_key
 	var seen := {}
@@ -5969,6 +6279,64 @@ func _skip_chain_verify(tokens: Array, j: int, scope: Dictionary, owner: String,
 	return j
 
 
+## Generic instantiation for a method call on a script link: resolves
+## the callee FUNC_DECL and checks argument trees when its signature
+## references template variables. Returns {"applies": false} for
+## plain calls (caller keeps existing behavior) or {"applies": true,
+## "types": [...]} with substituted return heads (possibly dynamic).
+func _generic_link_types(key: String, seg: String, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> Dictionary:
+	var node := _script_func_node(key, seg)
+	if node.is_empty():
+		return {"applies": false}
+	if j + 1 >= tokens.size() or not (tokens[j + 1] is Dictionary) or str((tokens[j + 1] as Dictionary).get("type", "")) != "LPAREN":
+		return {"applies": false}
+	var close := _match_close(tokens, j + 1)
+	if close < 0:
+		return {"applies": false}
+	var slices := _split_arg_slices(tokens, j + 1)
+	var disp := "'" + seg + "'"
+	var r := _check_generic_call(node, disp, slices, scope, fn, env, overlay, owner, int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)))
+	if not bool(r.get("generic", false)):
+		return {"applies": false}
+	return {"applies": true, "types": r.get("heads", [])}
+
+
+## Generic instantiation for a bare call `f(...)`: only when the name
+## cannot be a value (no overlay/scope/env/member binding), resolving
+## member functions outward (owner, then root). Returns the index past
+## the call (DOT rest skipped, like _skip_chain_verify) or -1 when the
+## existing skip path owns the chain.
+func _verify_bare_generic(tokens: Array, i: int, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> int:
+	var base := str((tokens[i] as Dictionary).get("value", ""))
+	if base == "" or base == "_":
+		return -1
+	if (overlay as Dictionary).has(base):
+		return -1
+	if str(_scope_kind(scope, base)) != "":
+		return -1
+	if (env as Dictionary).has(base):
+		return -1
+	for o in [owner, ""]:
+		if not _member_var_node(str(o), base).is_empty():
+			return -1
+	if j >= tokens.size() or not (tokens[j] is Dictionary) or str((tokens[j] as Dictionary).get("type", "")) != "LPAREN":
+		return -1
+	var node := _script_func_node(owner, base)
+	if node.is_empty() and owner != "":
+		node = _script_func_node("", base)
+	if node.is_empty():
+		return -1
+	var close := _match_close(tokens, j)
+	if close < 0:
+		return -1
+	var slices := _split_arg_slices(tokens, j)
+	var r := _check_generic_call(node, "'" + base + "'", slices, scope, fn, env, overlay, owner, int((tokens[i] as Dictionary).get("line", 0)), int((tokens[i] as Dictionary).get("column", 0)))
+	if not bool(r.get("generic", false)):
+		return -1
+	_verify_span(tokens, j, scope, owner, fn, env, overlay)
+	return _skip_chain_verify(tokens, close + 1, scope, owner, fn, env, overlay)
+
+
 ## Verifies one DOT chain starting at tokens[i] (an IDENTIFIER).
 ## Links unify engine names and script owner keys: each segment is
 ## checked against script tables (own, extends walk, terminal engine
@@ -5984,6 +6352,9 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 	var j := i + 1
 	var kind := str(fb.get("kind", ""))
 	if kind == "skip":
+		var bj := _verify_bare_generic(tokens, i, j, scope, fn, env, overlay, owner)
+		if bj >= 0:
+			return bj
 		return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
 	var signal_mode := kind == "signal"
 	var static_ctx := kind == "class" or kind == "script"
@@ -6115,6 +6486,11 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 				if status == "found":
 					found = true
 					var cont: Dictionary = r.get("cont", {})
+					var cont_types: Array = (cont.get("types", []) as Array).duplicate()
+					if is_call:
+						var go := _generic_link_types(str(L.get("key", "")), seg, tokens, j, scope, fn, env, overlay, owner)
+						if bool(go.get("applies", false)):
+							cont_types = go.get("types", [])
 					if not (cont.get("enumvals", []) as Array).is_empty():
 						next_links.append({"kind": "enumvals", "vals": (cont.get("enumvals", []) as Array).duplicate(), "dname": str(cont.get("enumname", seg))})
 					elif cont.has("signal"):
@@ -6123,7 +6499,7 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 						next_links.append({"kind": "script", "key": str(cont.get("script", ""))})
 						next_ctx = str(cont.get("script", ""))
 					else:
-						for cn in (cont.get("types", []) as Array):
+						for cn in cont_types:
 							var cl := _link_kind_of(str(cn), next_ctx)
 							if cl.is_empty():
 								silent = true
@@ -6272,6 +6648,10 @@ func _verify_tokens(tokens: Array, scope: Dictionary, owner: String, fn: Variant
 				i = _verify_chain(tokens, i, scope, owner, fn, env, overlay)
 				continue
 			if nxt_ty == "LPAREN" and nxt_v == "(":
+				var bj := _verify_bare_generic(tokens, i, i + 1, scope, fn, env, overlay, owner)
+				if bj >= 0:
+					i = bj
+					continue
 				i = _verify_span(tokens, i + 1, scope, owner, fn, env, overlay) + 1
 				continue
 			if nxt_ty == "LBRACKET":

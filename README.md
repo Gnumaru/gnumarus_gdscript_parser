@@ -720,12 +720,20 @@ var x: Variant              # OK: known name, narrowing deferred
   duplicates and clashes with script/engine/template types error
   (`template_conflict`); bad shapes error (`template_malformed`,
   `template_unknown_type`, `template_mismatch`). Template names in
-  `@var`/`@param`/`@return` resolve as known (opaque until
-  generics instantiates them).
-- Infra only: `_subst_tree`/`_unify_trees`/`_same_tree`/
-  `_template_refs`/`_check_bound` are pure static helpers ready for
-  call-site instantiation. Gaps (documented): nothing substitutes
-  yet — uses stay opaque; `@generic` classes come next.
+  `@var`/`@param`/`@return` resolve as known.
+- Calls to functions whose `@param`/`@return` reference template
+  variables instantiate per call site (bare, `self.` and instance
+  calls): arity with defaults, positional unification (one
+  substitution per call, conflicting bindings error), bound checks,
+  all as `template_mismatch`. The substituted return type flows into
+  member chains (`self.id(1).bogus()` errors on `int`); unbound
+  variables stay opaque (chain rest skipped, like unknown types).
+  Argument inference covers literals, array/dictionary literals
+  (`Array[T]` binds from `[1, 2]`), annotated/inferred locals and
+  params; nested calls, member reads and operators read dynamic.
+  Non-generic calls are unchecked exactly as before.
+- Gaps (documented): `@generic` classes come next; `env` still
+  carries flat heads (no tree flow across statements).
 
 ### `@interface`
 
@@ -874,6 +882,7 @@ green. `GODOT_BIN` overrides the engine path.
   applications),
   `test_alias.gd` (`@alias` rule),
   `test_template.gd` (`@template` file-local variables + subst/unify IR),
+  `test_generic_call.gd` (generic call instantiation),
   `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
   `test_implements.gd` (`@implements` rule),
