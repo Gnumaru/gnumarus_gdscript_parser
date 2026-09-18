@@ -154,6 +154,7 @@ const ERR_INTERFACE_MISPLACED := "interface_misplaced"
 const ERR_INTERFACE_MALFORMED := "interface_malformed"
 const ERR_INTERFACE_UNKNOWN_TYPE := "interface_unknown_type"
 const ERR_INTERFACE_CONFLICT := "interface_conflict"
+const ERR_INTERFACE_MISMATCH := "interface_mismatch"
 const ERR_IMPLEMENTS_MISPLACED := "implements_misplaced"
 const ERR_IMPLEMENTS_MALFORMED := "implements_malformed"
 const ERR_IMPLEMENTS_UNKNOWN_TYPE := "implements_unknown_type"
@@ -3144,6 +3145,64 @@ func _iface_field(ispec: Dictionary, mname: String) -> Dictionary:
 		if m is Dictionary and str((m as Dictionary).get("kind", "")) == "var" and str((m as Dictionary).get("name", "")) == mname:
 			return {"types": ((m as Dictionary).get("types", []) as Array).duplicate(), "any": bool((m as Dictionary).get("any", false))}
 	return {}
+
+
+## Required parameters of an interface method (defaults and varargs
+## excluded), total count, and vararg flag. Handles both spec shapes
+## (parsed members carry has_default/is_vararg; JSON members carry req).
+static func _iface_arity(fentry: Dictionary) -> Array:
+	var req := 0
+	var pars: Array = fentry.get("params", [])
+	for p in pars:
+		if not (p is Dictionary):
+			continue
+		var pd: Dictionary = p
+		if pd.has("req"):
+			if bool(pd.get("req", true)):
+				req += 1
+		elif not bool(pd.get("has_default", false)) and not bool(pd.get("is_vararg", false)):
+			req += 1
+	return [req, pars.size(), bool(fentry.get("vararg", false))]
+
+
+## Checks one interface method call (arity with defaults/vararg,
+## then per-argument types like real methods). True when clean;
+## reports interface_mismatch and returns false otherwise. Callers
+## keep existence handling (found links stay empty on failure, so the
+## chain rest skips instead of cascading).
+func _check_iface_call(iname: String, seg: String, fentry: Dictionary, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> bool:
+	var line := int((tokens[j] as Dictionary).get("line", 0))
+	var col := int((tokens[j] as Dictionary).get("column", 0))
+	if _match_close(tokens, j + 1) < 0:
+		return true
+	var slices := _split_arg_slices(tokens, j + 1)
+	var shape := _iface_arity(fentry)
+	var req: int = shape[0]
+	var total: int = shape[1]
+	var vararg := bool(shape[2])
+	if slices.size() < req or (not vararg and slices.size() > total):
+		var want := str(req)
+		if not vararg and req != total:
+			want = str(req) + ".." + str(total)
+		elif vararg:
+			want = str(req) + "+"
+		_error(ERR_INTERFACE_MISMATCH, "interface '" + iname + "' method '" + seg + "' takes " + want + " argument(s), got " + str(slices.size()), line, col, owner)
+		return false
+	var fpars: Array = fentry.get("params", [])
+	for idx in range(mini(slices.size(), fpars.size())):
+		if not (fpars[idx] is Dictionary):
+			continue
+		var fp: Dictionary = fpars[idx]
+		var actual := _infer_arg_tree(slices[idx], scope, fn, env, overlay, owner, 0)
+		var item := {"types": (fp.get("types", []) as Array).duplicate(), "any": bool(fp.get("any", false)) or ((fp.get("types", []) as Array).is_empty())}
+		if _tree_arg_fits(actual, item):
+			continue
+		var want := "|".join(item.get("types", []))
+		if str(want) == "":
+			want = "dynamic"
+		_error(ERR_INTERFACE_MISMATCH, "interface '" + iname + "' method '" + seg + "' argument '" + str(fp.get("name", "")) + "' expects '" + want + "', got '" + _show_tree(actual) + "'", line, col, owner)
+		return false
+	return true
 
 
 ## Interface func returns as a list ([] = void/dynamic: the chain
@@ -7307,6 +7366,8 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 						dnames.append(iname)
 						continue
 					found = true
+					if not _check_iface_call(iname, seg, fentry, tokens, j, scope, fn, env, overlay, owner):
+						continue
 					var rtypes := _iface_returns(fentry)
 					if rtypes.is_empty():
 						silent = true

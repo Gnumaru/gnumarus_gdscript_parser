@@ -834,20 +834,21 @@ mynode.bogus()           # ERROR: nobody has 'bogus()'
   the analyzer's view the value is a union of the interface and the
   real class used.
 - Member chains check every union arm: interface methods (any
-  staticness, lenient) and fields resolve; returns continue the
-  chain (`void`/dynamic skip the rest, like engine calls); absence
-  everywhere errors `missing_method`/`missing_member`. Interface
-  arms skip narrowing (contracts refine capabilities, never the
-  nominal type).
+  staticness, lenient) and fields resolve, with call checking like
+  real methods — arity with defaults/vararg plus per-argument types
+  (`interface_mismatch`); returns continue the chain (`void`/
+  dynamic skip the rest, like engine calls); absence everywhere
+  errors `missing_method`/`missing_member`. Interface arms skip
+  narrowing (contracts refine capabilities, never the nominal type).
 - Definitions live top-level only; duplicates and clashes error
   (`interface_conflict`); bad shapes error (`interface_malformed`,
   `interface_unknown_type`). Written as `kind: "interface"` JSONs
   reusing class entry shapes (methods split static/instance, enum
   values and const values null). A `void` func return stays `"void"`
   (not `any`), so `@implements` can require it.
-- Gaps (documented): no arity/argument checking on interface calls
-  (existence only, like engine calls); signals/consts/enums don't
-  resolve through unions yet.
+- Gaps (documented): signals/consts/enums don't resolve through
+  unions yet; disk interfaces assume fixed arity (vararg lives only
+  in same-file definitions).
 
 ### `@implements`
 
