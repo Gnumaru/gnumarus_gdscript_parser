@@ -136,6 +136,11 @@ const ERR_ALIAS_MALFORMED := "alias_malformed"
 const ERR_ALIAS_UNKNOWN_TYPE := "alias_unknown_type"
 const ERR_ALIAS_CONFLICT := "alias_conflict"
 const ERR_ALIAS_MISMATCH := "alias_mismatch"
+const ERR_TEMPLATE_MISPLACED := "template_misplaced"
+const ERR_TEMPLATE_MALFORMED := "template_malformed"
+const ERR_TEMPLATE_UNKNOWN_TYPE := "template_unknown_type"
+const ERR_TEMPLATE_CONFLICT := "template_conflict"
+const ERR_TEMPLATE_MISMATCH := "template_mismatch"
 const ERR_STRUCT_MISPLACED := "struct_misplaced"
 const ERR_STRUCT_MALFORMED := "struct_malformed"
 const ERR_STRUCT_UNKNOWN_TYPE := "struct_unknown_type"
@@ -238,6 +243,10 @@ var _interfaces: Dictionary = {}
 ## @implements raw uses: owner -> [{names, line}]. Checked in
 ## _check_implements after the walk (tables complete by then).
 var _implements: Dictionary = {}
+## @template type variables: name -> {"resolved": bool, "raws": [...],
+## "spec": {...}}. File-local only: never written to JSON, never read
+## from disk. Prescan collects raws, _resolve_templates validates.
+var _templates: Dictionary = {}
 ## @alias definitions: name -> {"resolved": bool, "raws": [...],
 ## "spec": {...}}. Prescan collects raws, _resolve_aliases validates.
 var _aliases: Dictionary = {}
@@ -269,6 +278,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_interfaces = {}
 	_implements = {}
 	_aliases = {}
+	_templates = {}
 	_pending_tree_checks = []
 	_pending_alias_narrows = []
 	_script_class = ""
@@ -294,11 +304,13 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_prescan_structs(ast)
 	_prescan_interfaces(ast)
 	_prescan_aliases(ast)
+	_prescan_templates(ast)
 	_scan_children(ast.get("children", []), "")
 	_resolve_tuples()
 	_resolve_structs()
 	_resolve_interfaces()
 	_resolve_aliases()
+	_resolve_templates()
 	_check_pending_trees()
 	_check_pending_alias_narrows()
 	var scope = _new_scope(null)
@@ -374,6 +386,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_alias(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_template(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		var htag := _find_implements(str((header as Dictionary).get("value", "")))
 		if not htag.is_empty():
 			_record_implements_words("", _split_words(str(htag.get("message", ""))), int((header as Dictionary).get("line", 0)))
@@ -1536,8 +1550,7 @@ func _tree_top_heads(tree: Dictionary) -> Array:
 
 ## Post-resolve pass: alias members queued at attach narrow against
 ## the declared type through their expanded heads.
-func _check_pending_alias_narrows() -> void:
-	for pen in _pending_alias_narrows:
+func _check_pending_alias_narrows() -> void:	for pen in _pending_alias_narrows:
 		if not (pen is Dictionary):
 			continue
 		var pd: Dictionary = pen
@@ -1556,6 +1569,367 @@ func _check_pending_alias_narrows() -> void:
 					_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + hs + "' (from alias '" + member + "') for parameter '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), 0, str(pd.get("owner", "")))
 				else:
 					_error(ERR_VAR_MISMATCH, "cannot use @var type '" + hs + "' (from alias '" + member + "') for variable '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
+
+
+# ----------------------------------------------------- @template helpers
+#
+# File-local generic type variables ("# @template T",
+# "# @template T of Bound"). Names work file-wide regardless of order
+# but never leave the file: no JSON is written or read. Uses resolve
+# as known names today; instantiation (substitution/unification below)
+# lands with generics. Bounds must be concrete (no template vars).
+
+func _find_template(value: String) -> Dictionary:
+	return _find_tag(value, "template")
+
+
+func _has_template_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_template(str(tok.get("value", "")))
+
+
+func _has_any_template_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_template_tag(c).is_empty():
+			return true
+	return false
+
+
+## Parses an @template message ("Name" or "Name of Bound") into
+## {"ok","name","bound","raw"} or {"ok": false, "error"}. The bound is
+## raw text here (single line, like every tag message); it is parsed
+## at resolve time.
+static func _parse_template_spec(raw_msg: String) -> Dictionary:
+	var raw := raw_msg.strip_edges()
+	if raw == "":
+		return {"ok": false, "error": "@template needs a name: '# @template T' or '# @template T of Bound'"}
+	var words := _split_words(raw)
+	var tname := str(words[0])
+	if not _is_type_name(tname):
+		return {"ok": false, "error": "@template has an invalid name '" + tname + "'"}
+	var rest := raw.substr(tname.length()).strip_edges()
+	if rest == "":
+		return {"ok": true, "name": tname, "bound": "", "raw": raw}
+	if rest == "of":
+		return {"ok": false, "error": "@template needs a bound after 'of': '# @template T of Bound'"}
+	if rest.begins_with("of ") or rest.begins_with("of\t") or rest.begins_with("of\n"):
+		var bound := rest.substr(2).strip_edges()
+		if bound == "":
+			return {"ok": false, "error": "@template needs a bound after 'of': '# @template T of Bound'"}
+		return {"ok": true, "name": tname, "bound": bound, "raw": raw}
+	return {"ok": false, "error": "@template needs 'of' before the bound: '# @template T of Bound'"}
+
+
+## Pre-scan (before _scan): collects @template raw definitions from
+## top-level standalone comments and top-level leadings so name
+## lookups stay order-free. Full validation happens in
+## _resolve_templates.
+func _prescan_templates(ast: Dictionary) -> void:
+	for child in ast.get("children", []):
+		if not (child is Dictionary):
+			continue
+		if str((child as Dictionary).get("type", "")) == "TYPE_INFO":
+			_collect_template_node(child as Dictionary)
+			continue
+		for c in (child as Dictionary).get("leading_comments", []):
+			if c is Dictionary:
+				_collect_template_node(c)
+
+
+## Records every @template tag in one comment value as raw material.
+## Malformed tags error immediately and are dropped; valid ones queue
+## under their name (duplicates resolved in _resolve_templates).
+func _collect_template_node(tok: Dictionary) -> void:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return
+	var tok_line := int(tok.get("line", 0))
+	var li := 0
+	for line in str(tok.get("value", "")).split("\n"):
+		var tag := _find_tag(line, "template")
+		if not tag.is_empty():
+			var spec := _parse_template_spec(str(tag.get("message", "")))
+			if not bool(spec.get("ok", false)):
+				_error(ERR_TEMPLATE_MALFORMED, str(spec.get("error", "")), tok_line + li, 0, "")
+			else:
+				var tname := str(spec.get("name", ""))
+				var raw := {"spec": spec, "line": tok_line + li}
+				if not _templates.has(tname):
+					_templates[tname] = {"resolved": false, "raws": [raw]}
+				else:
+					((_templates[tname] as Dictionary).get("raws", []) as Array).append(raw)
+		li += 1
+
+
+## Why a template name cannot be defined ("" when free). Template
+## variables share no namespace with concrete types on purpose: any
+## clash is an error, never shadowing.
+func _template_conflict(tname: String) -> String:
+	for key in _members.keys():
+		var table: Dictionary = _members[key]
+		if table.has(tname):
+			return "script member '" + tname + "' (" + str((table[tname] as Dictionary).get("kind", "")) + ")"
+	if _members.has(tname):
+		return "script class '" + tname + "'"
+	if tname == _script_class and tname != "":
+		return "the script class name"
+	if _tuples.has(tname) or _structs.has(tname) or _interfaces.has(tname) or _aliases.has(tname):
+		return "an existing template type '" + tname + "'"
+	if _type_file_exists(tname):
+		return "an existing type '" + tname + "'"
+	return ""
+
+
+## Second pass (after _scan, before _walk): validates definitions
+## (duplicates, conflicts, bounds) into specs. No JSON is written:
+## templates are file-local.
+func _resolve_templates() -> void:
+	for tname in _templates.keys():
+		var entry: Dictionary = _templates[tname]
+		if bool(entry.get("resolved", false)):
+			continue
+		var raws: Array = entry.get("raws", [])
+		if raws.is_empty():
+			continue
+		var first: Dictionary = raws[0]
+		var spec: Dictionary = first.get("spec", {})
+		if raws.size() > 1:
+			_error(ERR_TEMPLATE_CONFLICT, "@template '" + tname + "' is defined more than once", int(first.get("line", 0)), 0, "")
+			continue
+		var clash := _template_conflict(tname)
+		if clash != "":
+			_error(ERR_TEMPLATE_CONFLICT, "@template '" + tname + "' conflicts with " + clash, int(first.get("line", 0)), 0, "")
+			continue
+		var bound_tree := {}
+		if str(spec.get("bound", "")) != "":
+			var parsed := _parse_type_expr(str(spec.get("bound", "")), "@template")
+			if not bool(parsed.get("ok", false)):
+				_error(ERR_TEMPLATE_MALFORMED, str(parsed.get("error", "")), int(first.get("line", 0)), 0, "")
+				continue
+			bound_tree = parsed.get("node", {})
+			if _count_void_names(bound_tree) > 0:
+				_error(ERR_TEMPLATE_MALFORMED, "@template 'void' is not a valid bound", int(first.get("line", 0)), 0, "")
+				continue
+			var rn := _resolve_tree_names(bound_tree)
+			if not bool(rn.get("ok", false)):
+				_error(ERR_TEMPLATE_UNKNOWN_TYPE, "@template has unknown type '" + str(rn.get("bad", "")) + "'", int(first.get("line", 0)), 0, "")
+				continue
+			if not _template_refs(bound_tree, _templates.keys()).is_empty():
+				_error(ERR_TEMPLATE_MALFORMED, "@template bounds must be concrete (no template variables)", int(first.get("line", 0)), 0, "")
+				continue
+			var tv := _check_tree_tuples(bound_tree)
+			if not bool(tv.get("ok", false)):
+				_error(ERR_TEMPLATE_MISMATCH, "@template " + str(tv.get("mismatch", "")), int(first.get("line", 0)), 0, "")
+				continue
+		entry["resolved"] = true
+		entry["spec"] = {"ok": true, "name": tname, "bound": bound_tree, "raw": str(spec.get("raw", "")), "line": int(first.get("line", 0))}
+
+
+## Bound tree of a resolved template ({} when unbounded or unknown).
+## File-local only: in-memory, never disk.
+func _template_bound_of(tname: String) -> Dictionary:
+	if _templates.has(tname):
+		var entry: Dictionary = _templates[tname]
+		if bool(entry.get("resolved", false)):
+			return (entry.get("spec", {}) as Dictionary).get("bound", {})
+	return {}
+
+
+## Deep structural equality of two type trees.
+static func _same_tree(a: Dictionary, b: Dictionary) -> bool:
+	if str(a.get("kind", "")) != str(b.get("kind", "")):
+		return false
+	var kind := str(a.get("kind", ""))
+	if kind == "any":
+		return true
+	if kind == "name":
+		return str(a.get("name", "")) == str(b.get("name", ""))
+	if kind == "union":
+		var aa: Array = a.get("arms", [])
+		var ba: Array = b.get("arms", [])
+		if aa.size() != ba.size():
+			return false
+		for i in range(aa.size()):
+			if not (aa[i] is Dictionary) or not (ba[i] is Dictionary):
+				return false
+			if not _same_tree(aa[i], ba[i]):
+				return false
+		return true
+	if kind == "generic":
+		if str(a.get("name", "")) != str(b.get("name", "")):
+			return false
+		var ga: Array = a.get("args", [])
+		var gb: Array = b.get("args", [])
+		if ga.size() != gb.size():
+			return false
+		for i in range(ga.size()):
+			if not (ga[i] is Dictionary) or not (gb[i] is Dictionary):
+				return false
+			if not _same_tree(ga[i], gb[i]):
+				return false
+		return true
+	return false
+
+
+## Deep copy of a type tree (substitutions share nothing).
+static func _copy_tree(node: Dictionary) -> Dictionary:
+	var kind := str(node.get("kind", ""))
+	if kind == "any":
+		return {"kind": "any"}
+	if kind == "name":
+		return {"kind": "name", "name": str(node.get("name", ""))}
+	if kind == "union":
+		var arms: Array = []
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				arms.append(_copy_tree(arm))
+		return {"kind": "union", "arms": arms}
+	if kind == "generic":
+		var args: Array = []
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				args.append(_copy_tree(arg))
+		return {"kind": "generic", "name": str(node.get("name", "")), "args": args}
+	return {}
+
+
+## Template variables referenced by a tree, deduplicated, against an
+## explicit tvar list (keeps the core static and testable).
+static func _template_refs(tree: Dictionary, tvars: Array) -> Array:
+	var out: Array = []
+	_collect_template_refs(tree, tvars, out, {})
+	return out
+
+
+static func _collect_template_refs(node: Dictionary, tvars: Array, out: Array, seen: Dictionary) -> void:
+	var kind := str(node.get("kind", ""))
+	if kind == "name":
+		var nm := str(node.get("name", ""))
+		if tvars.has(nm) and not seen.has(nm):
+			seen[nm] = true
+			out.append(nm)
+	elif kind == "union":
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				_collect_template_refs(arm, tvars, out, seen)
+	elif kind == "generic":
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				_collect_template_refs(arg, tvars, out, seen)
+
+
+## Substitutes template variables: name-leaves present in subst are
+## replaced by deep copies of the value trees. Pure.
+static func _subst_tree(node: Dictionary, subst: Dictionary) -> Dictionary:
+	var kind := str(node.get("kind", ""))
+	if kind == "name":
+		var nm := str(node.get("name", ""))
+		if subst.has(nm) and (subst[nm] is Dictionary):
+			return _copy_tree(subst[nm])
+		return {"kind": "name", "name": nm}
+	if kind == "any":
+		return {"kind": "any"}
+	if kind == "union":
+		var arms: Array = []
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				arms.append(_subst_tree(arm, subst))
+		return {"kind": "union", "arms": arms}
+	if kind == "generic":
+		var args: Array = []
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				args.append(_subst_tree(arg, subst))
+		return {"kind": "generic", "name": str(node.get("name", "")), "args": args}
+	return {}
+
+
+## Structural unification of a formal tree against an actual tree.
+## `tvars` are the bindable names. `any` matches anything without
+## binding; concrete names must match; generics need equal heads and
+## arity (a bare actual name matches its own head leniently, like the
+## flat pipeline); unions match when some arm matches (first success
+## wins). Returns {"ok", "subst"} or {"ok": false, "error"}.
+static func _unify_trees(formal: Dictionary, actual: Dictionary, subst: Dictionary, tvars: Array) -> Dictionary:
+	var fk := str(formal.get("kind", ""))
+	if fk == "any":
+		return {"ok": true, "subst": subst}
+	if fk == "name":
+		var fn := str(formal.get("name", ""))
+		if tvars.has(fn):
+			if subst.has(fn) and (subst[fn] is Dictionary):
+				if _same_tree(subst[fn], actual):
+					return {"ok": true, "subst": subst}
+				return {"ok": false, "error": "conflicting types for '" + fn + "'"}
+			var bound := subst.duplicate()
+			bound[fn] = _copy_tree(actual)
+			return {"ok": true, "subst": bound}
+		var ak2 := str(actual.get("kind", ""))
+		if ak2 == "any":
+			return {"ok": true, "subst": subst}
+		var aname := ""
+		if ak2 == "name":
+			aname = str(actual.get("name", ""))
+		elif ak2 == "generic":
+			aname = str(actual.get("name", ""))
+		if tvars.has(aname):
+			return {"ok": true, "subst": subst}
+		if aname == fn:
+			return {"ok": true, "subst": subst}
+		return {"ok": false, "error": "'" + _show_tree(actual) + "' is not '" + fn + "'"}
+	if fk == "union":
+		for arm in (formal.get("arms", []) as Array):
+			if arm is Dictionary:
+				var trial := _unify_trees(arm, actual, subst.duplicate(), tvars)
+				if bool(trial.get("ok", false)):
+					return trial
+		return {"ok": false, "error": "no union arm of '" + _show_tree(formal) + "' matches '" + _show_tree(actual) + "'"}
+	if fk == "generic":
+		var fh := str(formal.get("name", ""))
+		var ak := str(actual.get("kind", ""))
+		if ak == "any":
+			return {"ok": true, "subst": subst}
+		if ak == "name":
+			if str(actual.get("name", "")) == fh:
+				return {"ok": true, "subst": subst}
+			return {"ok": false, "error": "'" + _show_tree(actual) + "' is not '" + _show_tree(formal) + "'"}
+		if ak == "union":
+			var cur: Dictionary = subst
+			for arm in (actual.get("arms", []) as Array):
+				if not (arm is Dictionary):
+					return {"ok": false, "error": "'" + _show_tree(actual) + "' is not '" + _show_tree(formal) + "'"}
+				var step := _unify_trees(formal, arm, cur, tvars)
+				if not bool(step.get("ok", false)):
+					return step
+				cur = step.get("subst", cur)
+			return {"ok": true, "subst": cur}
+		if ak == "generic":
+			if str(actual.get("name", "")) != fh:
+				return {"ok": false, "error": "'" + _show_tree(actual) + "' is not '" + _show_tree(formal) + "'"}
+			var fa: Array = formal.get("args", [])
+			var aa: Array = actual.get("args", [])
+			if fa.size() != aa.size():
+				return {"ok": false, "error": "'" + _show_tree(formal) + "' takes " + str(fa.size()) + " arguments, got " + str(aa.size())}
+			var cur: Dictionary = subst
+			for i in range(fa.size()):
+				if not ((fa[i] is Dictionary) and (aa[i] is Dictionary)):
+					return {"ok": false, "error": "bad type argument"}
+				var step := _unify_trees(fa[i], aa[i], cur, tvars)
+				if not bool(step.get("ok", false)):
+					return step
+				cur = step.get("subst", cur)
+			return {"ok": true, "subst": cur}
+		return {"ok": false, "error": "'" + _show_tree(actual) + "' is not '" + _show_tree(formal) + "'"}
+	return {"ok": false, "error": "bad type node"}
+
+
+## Bound check: an actual tree fits an (already validated, concrete)
+## bound tree. `any` bounds pass everything. Pure.
+static func _check_bound(bound: Dictionary, actual: Dictionary) -> bool:
+	if bound.is_empty() or str(bound.get("kind", "")) == "any":
+		return true
+	var r := _unify_trees(bound, actual, {}, [])
+	return bool(r.get("ok", false))
 
 
 # ------------------------------------------------------- @struct helpers
@@ -3658,6 +4032,8 @@ func _type_known(tname: String) -> bool:
 		return true
 	if _tuples.has(tname):
 		return true
+	if _templates.has(tname):
+		return true
 	if _aliases.has(tname):
 		return true
 	if _structs.has(tname):
@@ -4154,6 +4530,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_alias_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_template_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
@@ -4187,6 +4565,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_alias_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_template_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
@@ -4210,6 +4590,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_alias_tag(d):
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_template_tag(d):
+			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d):
@@ -4244,6 +4626,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			return
 		if _has_any_alias_tag(d):
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_template_tag(d):
+			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
@@ -4270,6 +4654,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_alias_tag(d).is_empty():
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not member_pos and not _has_template_tag(d).is_empty():
+			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_struct_tag(d).is_empty():
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_interface_tag(d).is_empty():
@@ -4290,6 +4676,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		# Top level: already collected by _prescan_aliases; falls through.
+	if _has_any_template_tag(d):
+		if not (member_pos and owner == ""):
+			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
+		# Top level: already collected by _prescan_templates; falls through.
 	if _has_any_struct_tag(d):
 		if not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
@@ -4466,6 +4857,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_alias_tag(child):
 					_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_template_tag(child):
+					_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
@@ -4496,6 +4889,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_alias_tag(child):
 					_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_template_tag(child):
+					_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):

@@ -699,6 +699,34 @@ var y := "a"               # ERROR: neither int nor float is String
   (`Num[int]` errors); no vartype (`var x: number`) support — the
   semantic parser is untouched.
 
+### `@template`
+
+Declares a file-local generic type variable: `# @template T` or
+`# @template T of Bound`. Names work file-wide regardless of order
+but never leave the file (no JSON is written or read). A bound, when
+present, must be concrete (no template variables) and is validated
+like any type expression:
+
+```gdscript
+extends Node
+
+# @template TplT of int|float
+
+# @var x TplT
+var x: Variant              # OK: known name, narrowing deferred
+```
+
+- Definitions live top-level only (`template_misplaced` elsewhere);
+  duplicates and clashes with script/engine/template types error
+  (`template_conflict`); bad shapes error (`template_malformed`,
+  `template_unknown_type`, `template_mismatch`). Template names in
+  `@var`/`@param`/`@return` resolve as known (opaque until
+  generics instantiates them).
+- Infra only: `_subst_tree`/`_unify_trees`/`_same_tree`/
+  `_template_refs`/`_check_bound` are pure static helpers ready for
+  call-site instantiation. Gaps (documented): nothing substitutes
+  yet — uses stay opaque; `@generic` classes come next.
+
 ### `@interface`
 
 Declares an interface blueprint between `@interface Name` and a
@@ -844,7 +872,9 @@ green. `GODOT_BIN` overrides the engine path.
   `test_tuple.gd` (`@tuple` rule),
   `test_type_expr.gd` (nested type-expression mini-parser + tuple
   applications),
-  `test_alias.gd` (`@alias` rule), `test_struct.gd` (`@struct` rule),
+  `test_alias.gd` (`@alias` rule),
+  `test_template.gd` (`@template` file-local variables + subst/unify IR),
+  `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
   `test_implements.gd` (`@implements` rule),
   `test_flow.gd` (flow member checks + guards),
