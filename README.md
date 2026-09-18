@@ -732,8 +732,14 @@ var x: Variant              # OK: known name, narrowing deferred
   (`Array[T]` binds from `[1, 2]`), annotated/inferred locals and
   params; nested calls, member reads and operators read dynamic.
   Non-generic calls are unchecked exactly as before.
-- Gaps (documented): `@generic` classes come next; `env` still
-  carries flat heads (no tree flow across statements).
+- The flow `env` also carries trees (`@tree:<name>` keys beside the
+  flat heads, same last-write-wins discipline): `var y := id(1)`
+  records the substituted return, so later uses of `y` check as
+  `int`; reassignments (`y = id2(..)`) update it. Declarations own
+  their type (vartype/`@var`/inference beat call results), guards
+  erase trees when narrowing, dynamic results never widen.
+- Gaps (documented): `@generic` classes come next; only bare and
+  `self.` call values feed assignments (no `obj.m()` results yet).
 
 ### `@generic`
 

@@ -6148,6 +6148,9 @@ func _infer_arg_name(vname: String, scope: Dictionary, fn: Variant, env: Diction
 	if vname == "" or vname == "_" or vname == "self" or vname == "super" or (overlay as Dictionary).has(vname):
 		return {"kind": "any"}
 	if (env as Dictionary).has(vname):
+		var tt := _env_tree(env, vname)
+		if not tt.is_empty():
+			return tt
 		var et: Array = (env as Dictionary)[vname]
 		if et.is_empty():
 			return {"kind": "any"}
@@ -6220,11 +6223,12 @@ static func _flat_to_tree(types: Array) -> Dictionary:
 
 ## Instantiates one generic call: unifies formal parameter trees with
 ## inferred actual trees, checks bounds of bound variables, and
-## returns substituted return heads. Reports template_mismatch and
-## returns {"ok": false} on failure. No-ops ({ok, n/a}) without
-## template variables (caller keeps existing behavior). `pre` seeds
+## returns the substituted return tree and heads. Pure: reports
+## nothing (messages come fully formatted in "error"), callers decide.
+## {"ok", "generic", "subst", "ret", "heads"} plus "error" when !ok.
+## No-ops ({ok, n/a}) without template variables. `pre` seeds
 ## class-level bindings (generic methods on instantiated classes).
-func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, line: int, col: int, pre := {}) -> Dictionary:
+func _instantiate_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, pre := {}) -> Dictionary:
 	var sig := _func_template_sig(fn_node)
 	if not bool(sig.get("ok", false)):
 		return {"ok": true, "generic": false}
@@ -6252,25 +6256,34 @@ func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope
 		var want := str(req)
 		if req != formals.size():
 			want = str(req) + ".." + str(formals.size())
-		_error(ERR_TEMPLATE_MISMATCH, "generic function " + disp + " expects " + want + " argument(s), got " + str(slices.size()), line, col, owner)
-		return {"ok": false, "generic": true}
+		return {"ok": false, "generic": true, "error": "generic function " + disp + " expects " + want + " argument(s), got " + str(slices.size())}
 	var subst := pre.duplicate()
 	for idx in range(slices.size()):
 		var formal: Dictionary = formals[idx]
 		var actual := _infer_arg_tree(slices[idx], scope, fn, env, overlay, owner, 0)
 		var u := _unify_trees(formal.get("tree", {}), actual, subst, free)
 		if not bool(u.get("ok", false)):
-			_error(ERR_TEMPLATE_MISMATCH, "argument " + str(idx + 1) + " of generic function " + disp + " expects '" + _show_tree(formal.get("tree", {})) + "', got '" + _show_tree(actual) + "' (" + str(u.get("error", "")) + ")", line, col, owner)
-			return {"ok": false, "generic": true}
+			return {"ok": false, "generic": true, "error": "argument " + str(idx + 1) + " of generic function " + disp + " expects '" + _show_tree(formal.get("tree", {})) + "', got '" + _show_tree(actual) + "' (" + str(u.get("error", "")) + ")"}
 		subst = u.get("subst", subst)
 	for v in free:
 		var vs := str(v)
-		if subst.has(vs) and _template_refs(subst[vs], free).is_empty() and not _template_bound_of(vs).is_empty():
+		if subst.has(vs) and (subst[vs] is Dictionary) and _template_refs(subst[vs], free).is_empty() and not _template_bound_of(vs).is_empty():
 			if not _check_bound(_template_bound_of(vs), subst[vs]):
-				_error(ERR_TEMPLATE_MISMATCH, "type '" + _show_tree(subst[vs]) + "' for '" + vs + "' violates bound '" + _show_tree(_template_bound_of(vs)) + "' in generic function " + disp, line, col, owner)
-				return {"ok": false, "generic": true}
+				return {"ok": false, "generic": true, "error": "type '" + _show_tree(subst[vs]) + "' for '" + vs + "' violates bound '" + _show_tree(_template_bound_of(vs)) + "' in generic function " + disp}
 	var ret2 := _subst_tree(ret, subst)
-	return {"ok": true, "generic": true, "heads": _tree_top_heads(ret2)}
+	return {"ok": true, "generic": true, "subst": subst, "ret": ret2, "heads": _tree_top_heads(ret2)}
+
+
+## Reporting wrapper over _instantiate_generic_call: template_mismatch
+## on failure, {ok, generic, heads} either way (heads feed chaining).
+func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String, line: int, col: int, pre := {}) -> Dictionary:
+	var r := _instantiate_generic_call(fn_node, disp, slices, scope, fn, env, overlay, owner, pre)
+	if not bool(r.get("generic", false)):
+		return {"ok": true, "generic": false}
+	if not bool(r.get("ok", false)):
+		_error(ERR_TEMPLATE_MISMATCH, str(r.get("error", "")), line, col, owner)
+		return {"ok": false, "generic": true}
+	return {"ok": true, "generic": true, "heads": r.get("heads", [])}
 
 
 ## Substitutes class-parameter heads in a script hit with instance
@@ -7352,11 +7365,133 @@ func _flow_fn_scope(fn: Dictionary, scope: Dictionary) -> Dictionary:
 	return fs
 
 
-## Applies free-@var facts from one statement: leading specs on
-## non-declaration statements plus the statement itself when it is a
-## standalone @var TYPE_INFO. Before-decl VAR/CONST leading is skipped
-## (already the initial reference via var_ann). Malformed or
-## unresolvable specs are skipped (the walk pass already reported).
+## Flow env trees ride under "@tree:"<name> keys (plain identifiers
+## can never collide): flat heads stay the source of truth for links,
+## trees add generics for argument inference. Trees are never mutated
+## in place, so env.duplicate() sharing is safe.
+const ENV_TREE_PREFIX := "@tree:"
+
+
+## Tree recorded for a name in env, {} when absent. Pure.
+static func _env_tree(env: Dictionary, vname: String) -> Dictionary:
+	var t: Variant = env.get(ENV_TREE_PREFIX + vname, {})
+	if t is Dictionary:
+		return t
+	return {}
+
+
+## Records flat heads plus an optional tree for a name. Pure storage.
+static func _env_set(env: Dictionary, vname: String, heads: Array, tree: Dictionary) -> void:
+	(env as Dictionary)[vname] = heads.duplicate()
+	if tree.is_empty():
+		(env as Dictionary).erase(ENV_TREE_PREFIX + vname)
+	else:
+		(env as Dictionary)[ENV_TREE_PREFIX + vname] = tree
+
+
+## True when a declaration node already owns a usable type (explicit
+## annotation, vartype or value inference): call-result tracking only
+## fills genuinely unknown targets, never shadows declarations.
+func _decl_has_type(node: Dictionary) -> bool:
+	if node.is_empty():
+		return false
+	if node.has("var_ann") or node.has("param_ann") or node.has("vartype_ann"):
+		return true
+	if _vartype_name(node) != "":
+		return true
+	if str(node.get("type", "")) == "CONST_DECL" or str(node.get("op", "")) == ":=":
+		if _infer_var_value(node.get("value", null)) != "":
+			return true
+	return false
+
+
+## Resolves a bare-call callee for assignment tracking (same guards as
+## _verify_bare_generic): {} when the name can be a value.
+func _assign_callee(name: String, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> Dictionary:
+	if name == "" or name == "_":
+		return {}
+	if str(_scope_kind(scope, name)) != "":
+		return {}
+	if (env as Dictionary).has(name):
+		return {}
+	for o in [owner, ""]:
+		if not _member_var_node(str(o), name).is_empty():
+			return {}
+	var node := _script_func_node(owner, name)
+	if node.is_empty() and owner != "":
+		node = _script_func_node("", name)
+	return node
+
+
+## Tracks `name = f(...)` / `var name[ :=] f(...)` call results in env
+## (flat heads plus tree) when the target has no declared type and the
+## substituted return is non-dynamic. Bare and self calls only; pure
+## (the statement's own verification reports call errors).
+func _flow_assign_call(vname: String, vtoks: Array, target: Dictionary, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
+	if vname == "" or vtoks.size() < 4:
+		return
+	if not (vtoks[0] is Dictionary):
+		return
+	var node := {}
+	var slices: Array = []
+	var disp := ""
+	var t0 := str((vtoks[0] as Dictionary).get("type", ""))
+	if t0 == "IDENTIFIER" and vtoks.size() > 1 and (vtoks[1] is Dictionary) and str((vtoks[1] as Dictionary).get("type", "")) == "LPAREN" and _match_close(vtoks, 1) == vtoks.size() - 1:
+		node = _assign_callee(str((vtoks[0] as Dictionary).get("value", "")), scope, fn, env, owner)
+		if node.is_empty():
+			return
+		slices = _split_arg_slices(vtoks, 1)
+		disp = "'" + str((vtoks[0] as Dictionary).get("value", "")) + "'"
+	elif t0 == "KEYWORD" and str((vtoks[0] as Dictionary).get("value", "")) == "self" and vtoks.size() > 3 and (vtoks[1] is Dictionary) and str((vtoks[1] as Dictionary).get("type", "")) == "DOT" and (vtoks[2] is Dictionary) and (vtoks[3] is Dictionary) and str((vtoks[3] as Dictionary).get("type", "")) == "LPAREN" and _match_close(vtoks, 3) == vtoks.size() - 1:
+		node = _script_func_node(owner, str((vtoks[2] as Dictionary).get("value", "")))
+		if node.is_empty():
+			return
+		slices = _split_arg_slices(vtoks, 3)
+		disp = "'" + str((vtoks[2] as Dictionary).get("value", "")) + "'"
+	else:
+		return
+	var r := _instantiate_generic_call(node, disp, slices, scope, fn, env, {}, owner)
+	if not bool(r.get("ok", false)) or not bool(r.get("generic", false)):
+		return
+	var ret: Dictionary = r.get("ret", {})
+	if ret.is_empty() or str(ret.get("kind", "")) == "any":
+		return
+	if _decl_has_type(target):
+		return
+	_env_set(env, vname, _tree_top_heads(ret), ret)
+
+
+## Tracks `name = f(...)` reassignments (see _flow_assign_call).
+func _flow_assign_stmt(node: Dictionary, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
+	var toks := _as_tokens(node.get("expr", null))
+	if toks.size() < 4:
+		return
+	if not (toks[0] is Dictionary) or str((toks[0] as Dictionary).get("type", "")) != "IDENTIFIER":
+		return
+	if not (toks[1] is Dictionary) or str((toks[1] as Dictionary).get("type", "")) != "OPERATOR" or str((toks[1] as Dictionary).get("value", "")) != "=":
+		return
+	var vname := str((toks[0] as Dictionary).get("value", ""))
+	_flow_assign_call(vname, toks.slice(2), _assign_target(vname, fn, scope, owner, env), scope, fn, env, owner)
+
+
+## Resolves an `x = ...` reassignment target to its declaration node
+## ({} when dynamic/unknown: the call result is fresh information).
+func _assign_target(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> Dictionary:
+	if vname == "" or (env as Dictionary).has(vname):
+		return {}
+	var fnd: Dictionary = fn if fn is Dictionary else {}
+	var kind := _scope_kind(scope, vname)
+	if kind == "param":
+		return _find_param_node(fnd.get("params", []), vname)
+	if kind == "local" or kind == "const":
+		return _find_body_decl(fnd.get("body", null), vname)
+	if kind != "":
+		return {}
+	for o in [owner, ""]:
+		var n := _member_var_node(str(o), vname)
+		if not n.is_empty():
+			return n
+	return {}
 func _flow_facts(node: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
 	if str(node.get("type", "")) == "VAR_DECL" or str(node.get("type", "")) == "CONST_DECL":
 		return
@@ -7375,7 +7510,7 @@ func _flow_facts(node: Dictionary, scope: Dictionary, owner: String, fn: Variant
 		var target := _free_var_target(vname, fnd, scope, owner)
 		if target.is_empty() or target.has("bad"):
 			continue
-		(env as Dictionary)[vname] = ((spec as Dictionary).get("types", []) as Array).duplicate()
+		_env_set(env, vname, (spec as Dictionary).get("types", []), (spec as Dictionary).get("tree", {}))
 
 
 ## Flow pass over one statement with the current env (mutated by
@@ -7397,6 +7532,7 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 		return
 	if t == "VAR_DECL" or t == "CONST_DECL":
 		_verify_tokens(_as_tokens(node.get("value", null)), scope, owner, fn, env, {})
+		_flow_assign_call(str(node.get("name", "")), _as_tokens(node.get("value", null)), node, scope, fn, env, owner)
 		_flow_lambda_value(node.get("value", null), scope, owner)
 		var acc: Variant = node.get("accessors", null)
 		if acc is Dictionary:
@@ -7405,6 +7541,7 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 	if t == "EXPR_STMT":
 		_flow_facts(node, scope, owner, fn, env)
 		_verify_tokens(_as_tokens(node.get("expr", null)), scope, owner, fn, env, {})
+		_flow_assign_stmt(node, scope, fn, env, owner)
 		_flow_lambda_value(node.get("expr", null), scope, owner)
 		return
 	if t == "TYPE_INFO":
@@ -7421,9 +7558,9 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 			var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
 			if not target.is_empty() and not target.has("bad"):
 				if bool(g.get("eq", true)):
-					then_env[str(g.get("name", ""))] = (g.get("types", []) as Array).duplicate()
+					_env_set(then_env, str(g.get("name", "")), g.get("types", []), {})
 				else:
-					else_env[str(g.get("name", ""))] = (g.get("types", []) as Array).duplicate()
+					_env_set(else_env, str(g.get("name", "")), g.get("types", []), {})
 		_flow_block(node.get("then", null), scope, owner, fn, then_env)
 		for e in node.get("elifs", []):
 			if e is Dictionary:

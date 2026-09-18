@@ -16,6 +16,7 @@ func run() -> Dictionary:
 	_g_bounds(h)
 	_g_returns(h)
 	_g_boundaries(h)
+	_g_flow(h)
 	return h.result()
 
 
@@ -62,3 +63,11 @@ func _g_boundaries(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\nfunc gcplain(a: int):\n\tpass\nfunc f():\n\tself.gcplain(\"a\")\n", "res://tests/tmp_gcl_x01.gd")), "plain calls unchecked")
 	h.check(_clean(h.analyze_text("extends Node\n# @template GcT13\n# @param x GcT13\nfunc gcdyn2(x):\n\tpass\nfunc f():\n\tvar u\n\tgcdyn2(u)\n", "res://tests/tmp_gcl_x02.gd")), "dynamic actual lenient")
 	h.check(_clean(h.analyze_text("extends Node\n# @template GcT14\nclass GcInner:\n\t# @param x GcT14\n\tfunc gcown(x):\n\t\tpass\nfunc f():\n\tvar o := GcInner.new()\n\to.gcown(1)\n", "res://tests/tmp_gcl_x03.gd")), "method on instance checks")
+
+
+func _g_flow(h) -> void:
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GcT20\n# @param x GcT20\n# @return GcT20\nfunc gcid(x):\n\treturn x\nfunc f():\n\tvar y := gcid(1)\n\ty.bogus()\n", "res://tests/tmp_gcl_f01.gd"), "missing_method", "has no method 'bogus()'"), "call result flows to use")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GcT21\n# @param x GcT21\n# @return GcT21\nfunc gcid2(x):\n\treturn x\nfunc f():\n\tvar y := gcid2(1)\n\tprint(y)\n", "res://tests/tmp_gcl_f02.gd")), "flow clean stays clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GcT22\n# @param x GcT22\n# @return GcT22\nfunc gcid3(x):\n\treturn x\nfunc f():\n\tvar y\n\ty = gcid3(\"a\")\n\ty.bogus()\n", "res://tests/tmp_gcl_f03.gd"), "missing_method", "has no method 'bogus()'"), "reassignment flows")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GcT23\n# @param x GcT23\n# @return GcT23\nfunc gcid4(x):\n\treturn x\nfunc f():\n\tvar y: Array = gcid4(1)\n\ty.bogus()\n", "res://tests/tmp_gcl_f04.gd"), "missing_method", "type 'Array' has no method"), "declaration wins over call")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GcT24\n# @param x GcT24\n# @return GcT24\nfunc gcid5(x):\n\treturn x\nfunc takes_int(a: int):\n\tpass\nfunc f():\n\tvar y := gcid5(1)\n\tself.takes_int(y)\n", "res://tests/tmp_gcl_f05.gd")), "flowed value feeds calls")
