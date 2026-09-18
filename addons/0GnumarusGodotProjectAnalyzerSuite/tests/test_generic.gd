@@ -13,6 +13,8 @@ func run() -> Dictionary:
 	_g_decl(h)
 	_g_vartype(h)
 	_g_subst(h)
+	_g_extends(h)
+	_g_new(h)
 	_g_json(h)
 	return h.result()
 
@@ -68,3 +70,17 @@ func _g_json(h) -> void:
 	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/tests_tmp_ggx_j01.GxBox30.json")
 	h.check(str(info.get("kind", "")) == "script", "json kind script")
 	h.check((info.get("generic", []) as Array) == ["GxT30"], "json generic kept")
+
+
+func _g_extends(h) -> void:
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT40\n# @generic GxT40\nclass GxBox40:\n\t# @var v GxT40\n\tvar v\nclass GxKid40 extends GxBox40[int]:\n\tpass\n", "res://tests/tmp_ggx_e01.gd")), "parameterized extends clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT41\n# @generic GxT41\nclass GxBox41:\n\tpass\nclass GxKid41 extends GxBox41[int, String]:\n\tpass\n", "res://tests/tmp_ggx_e02.gd"), "generic_mismatch", "takes 1 type argument(s), got 2"), "extends arity errors")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT42 of int\n# @generic GxT42\nclass GxBox42:\n\tpass\nclass GxKid42 extends GxBox42[String]:\n\tpass\n", "res://tests/tmp_ggx_e03.gd"), "generic_mismatch", "violates bound"), "extends bound errors")
+	h.check(_clean(h.analyze_text("extends Node\nclass GxKid44 extends Node:\n\tpass\n", "res://tests/tmp_ggx_e04.gd")), "plain extends untouched")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT45\n# @generic GxT45\nclass GxBox45:\n\t# @var v GxT45\n\tvar v\nclass GxKid45 extends GxBox45[int]:\n\tpass\nfunc f():\n\tvar k := GxKid45.new()\n\tk.v.push_back(1)\n", "res://tests/tmp_ggx_e05.gd"), "missing_method", "has no method 'push_back()'"), "inherited field substitutes")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT46\n# @generic GxT46\nclass GxBox46:\n\t# @param x GxT46\n\tfunc setv(x):\n\t\tpass\nclass GxKid46 extends GxBox46[int]:\n\tpass\nfunc f():\n\tvar k := GxKid46.new()\n\tk.setv(1)\n\tk.setv(\"a\")\n", "res://tests/tmp_ggx_e06.gd"), "template_mismatch", "expects 'int', got 'String'"), "inherited method binds class arg")
+
+
+func _g_new(h) -> void:
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT50\n# @param x Array[GxT50]\n# @return GxT50\nfunc gxfirst(x):\n\treturn x[0]\nfunc f():\n\tgxfirst(Array[int]([1, 2]))\n", "res://tests/tmp_ggx_n01.gd")), "typed constructor binds")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT51\n# @generic GxT51\nclass GxBox51:\n\tpass\nfunc f():\n\tvar b := GxBox51.new()\n", "res://tests/tmp_ggx_n02.gd")), "bare new opaque")

@@ -774,17 +774,24 @@ func f():
   by class parameters read substituted, and method calls pre-bind
   class arguments before unifying the method's own variables
   (nested generics like `Box[TplU]` inside generic functions fall
-  out). Inherited members stay opaque (no extends-with-args in v1),
-  as do cross-file generic classes (in-memory only for now).
+  out). Single-level inheritance substitutes too: `class Kid
+  extends GBox[int]` validates arity/bounds at declaration
+  (`generic_mismatch`) and members inherited from `GBox` read with
+  `TplT = int`; deeper chains, unparameterized children and
+  cross-file generic classes stay lenient.
+- Typed constructors infer generically: `gxfirst(Array[int]([1, 2]))`
+  binds through `Array[TplT]` (engine heads only; script-class
+  `Box[int](...)` and unknown heads read dynamic). `Box.new()`
+  stays bare (opaque, as before).
 - Definitions accept classes at root or nested (`generic_misplaced`
   elsewhere); bad shapes error (`generic_malformed`: empty,
   duplicates, non-template names).
 - Gaps (documented): the script root itself cannot be generic (no
-  `CLASS_DECL` to attach to); `extends Box[int]` is unchecked;
-  bare template names in vartypes/arrows (`var x: TplT`) error in
-  the semantic pass (untouched) — use applications or annotations;
-  methods cannot carry `@return` (pre-existing rule), so generic
-  method returns flow only via `->` arrows.
+  `CLASS_DECL` to attach to); bare template names in vartypes/arrows
+  (`var x: TplT`) error in the semantic pass (untouched) — use
+  applications or annotations; methods cannot carry `@return`
+  (pre-existing rule), so generic method returns flow only via
+  `->` arrows.
 
 ### `@interface`
 

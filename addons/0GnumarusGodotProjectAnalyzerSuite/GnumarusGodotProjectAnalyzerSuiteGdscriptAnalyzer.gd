@@ -253,6 +253,12 @@ var _templates: Dictionary = {}
 ## @alias definitions: name -> {"resolved": bool, "raws": [...],
 ## "spec": {...}}. Prescan collects raws, _resolve_aliases validates.
 var _aliases: Dictionary = {}
+## Raw parameterized extends per class key: {head, inner, line, owner}.
+## Collected at scan (order-free), validated post-resolve into
+## _extends_args ({key: parent_key, args}).
+var _extends_raw: Dictionary = {}
+## Validated extends arguments: child key -> {key: parent key, args}.
+var _extends_args: Dictionary = {}
 ## Complex annotation trees awaiting tuple validation: [{tree, mm_kind,
 ## what, line, col, owner}]. Attach runs before _resolve_tuples, so
 ## arity/compatibility waits for _check_pending_trees (post-resolve).
@@ -285,6 +291,8 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_implements = {}
 	_aliases = {}
 	_templates = {}
+	_extends_raw = {}
+	_extends_args = {}
 	_pending_tree_checks = []
 	_pending_alias_narrows = []
 	_pending_vartype_bounds = []
@@ -318,6 +326,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_resolve_interfaces()
 	_resolve_aliases()
 	_resolve_templates()
+	_check_pending_extends()
 	_check_pending_vartype_bounds()
 	_check_pending_trees()
 	_check_pending_alias_narrows()
@@ -2019,7 +2028,172 @@ func _class_generic(key: String) -> Array:
 	var rec: Dictionary = (_members[pkey] as Dictionary).get(pname, {})
 	if rec.is_empty():
 		return []
-	return (rec.get("generic", []) as Array).duplicate()
+	var out: Array = (rec.get("generic", []) as Array).duplicate()
+	return out
+
+
+## Records raw parameterized extends for a class (called once per
+## CLASS_DECL from _scan_class_body): head text plus inner-argument
+## text when brackets are present, else nothing. Validation waits
+## for _check_pending_extends (post-resolve, order-free).
+func _record_extends_args(full: String, node: Dictionary, owner: String) -> void:
+	var toks := _extends_tokens_of(node)
+	var open := -1
+	for i in range(toks.size()):
+		if toks[i] is Dictionary and str((toks[i] as Dictionary).get("type", "")) == "LBRACKET":
+			open = i
+			break
+	if open < 0:
+		return
+	var head := ""
+	for i in range(open):
+		if toks[i] is Dictionary and (str((toks[i] as Dictionary).get("type", "")) == "IDENTIFIER" or str((toks[i] as Dictionary).get("type", "")) == "BUILTIN_TYPE"):
+			head += str((toks[i] as Dictionary).get("value", ""))
+		elif toks[i] is Dictionary and str((toks[i] as Dictionary).get("type", "")) == "DOT":
+			head += "."
+	head = head.strip_edges().trim_prefix(".").trim_suffix(".")
+	if head == "":
+		return
+	var close := _match_bracket(toks, open)
+	if close < 0:
+		return
+	var inner := ""
+	for i in range(open + 1, close):
+		if toks[i] is Dictionary:
+			inner += str((toks[i] as Dictionary).get("value", ""))
+	_extends_raw[full] = {"head": head, "inner": inner.strip_edges(), "line": int(node.get("line", 0)), "col": int(node.get("column", 0)), "owner": owner}
+
+
+## Extends token list of a class node (inline extends_type first,
+## then block-form EXTENDS children), [] when absent.
+func _extends_tokens_of(node: Dictionary) -> Array:
+	var ext: Variant = node.get("extends_type", null)
+	if ext is Dictionary and ((ext as Dictionary).get("tokens", []) as Array).size() > 0:
+		return (ext as Dictionary).get("tokens", [])
+	var body: Variant = node.get("body", null)
+	if body is Dictionary:
+		for child in (body as Dictionary).get("children", []):
+			if child is Dictionary and str((child as Dictionary).get("type", "")) == "EXTENDS":
+				return (child as Dictionary).get("path", [])
+	return []
+
+
+## Index of the bracket matching toks[open_idx] (any of ()/[]/{}),
+## or -1. Like _match_close but over an arbitrary token array.
+static func _match_bracket(toks: Array, open_idx: int) -> int:
+	if open_idx < 0 or open_idx >= toks.size() or not (toks[open_idx] is Dictionary):
+		return -1
+	var o := str((toks[open_idx] as Dictionary).get("type", ""))
+	var want := ""
+	if o == "LPAREN":
+		want = "RPAREN"
+	elif o == "LBRACKET":
+		want = "RBRACKET"
+	elif o == "LBRACE":
+		want = "RBRACE"
+	else:
+		return -1
+	var depth := 0
+	var i := open_idx
+	while i < toks.size():
+		if toks[i] is Dictionary:
+			var ty := str((toks[i] as Dictionary).get("type", ""))
+			if ty == o:
+				depth += 1
+			elif ty == want:
+				depth -= 1
+				if depth == 0:
+					return i
+		i += 1
+	return -1
+
+
+## Splits text at top-level commas (bracket-aware). Pure.
+static func _split_top_commas(text: String) -> Array:
+	var out: Array = []
+	var cur := ""
+	var depth := 0
+	for i in range(text.length()):
+		var ch := text.substr(i, 1)
+		if ch == "[" or ch == "(" or ch == "{":
+			depth += 1
+			cur += ch
+		elif ch == "]" or ch == ")" or ch == "}":
+			depth -= 1
+			cur += ch
+		elif ch == "," and depth == 0:
+			out.append(cur)
+			cur = ""
+		else:
+			cur += ch
+	out.append(cur)
+	return out
+
+
+## Post-resolve pass: validates parameterized extends (arity against
+## @generic classes, template bounds on arguments). Anything else
+## (plain bases, engine heads, unknown heads, unbalanced brackets)
+## stays silent exactly like today.
+func _check_pending_extends() -> void:
+	for full in _extends_raw.keys():
+		var raw: Dictionary = _extends_raw[full]
+		var head := str(raw.get("head", ""))
+		var owner := str(raw.get("owner", ""))
+		var line := int(raw.get("line", 0))
+		var col := int(raw.get("col", 0))
+		var key := _script_key_of(head, owner)
+		if key == "":
+			continue
+		var params := _class_generic(key)
+		if params.is_empty():
+			continue
+		var args: Array = []
+		var broken := false
+		for part in _split_top_commas(str(raw.get("inner", ""))):
+			var text := str(part).strip_edges()
+			if text == "":
+				continue
+			var parsed := _parse_type_expr(text, "extends")
+			if not bool(parsed.get("ok", false)):
+				broken = true
+				break
+			args.append(parsed.get("node", {}))
+		if broken:
+			continue
+		if args.size() != params.size():
+			_error(ERR_GENERIC_MISMATCH, "extends '" + head + "' takes " + str(params.size()) + " type argument(s), got " + str(args.size()), line, col, owner)
+			continue
+		var bad := false
+		for i in range(args.size()):
+			if not (args[i] is Dictionary):
+				continue
+			var bound := _template_bound_of(str(params[i]))
+			if bound.is_empty():
+				continue
+			if not _template_refs(args[i], _templates.keys()).is_empty():
+				continue
+			if not _check_bound(bound, args[i]):
+				_error(ERR_GENERIC_MISMATCH, "type '" + _show_tree(args[i]) + "' for '" + str(params[i]) + "' violates bound '" + _show_tree(bound) + "' in extends '" + head + "'", line, col, owner)
+				bad = true
+				break
+		if bad:
+			continue
+		var tapp := false
+		for arg in args:
+			if not (arg is Dictionary):
+				continue
+			var earg: Dictionary = arg
+			var eexp := _expand_tree_aliases(arg)
+			if bool(eexp.get("ok", false)):
+				earg = eexp.get("node", {})
+			var tv := _check_tree_tuples(earg)
+			if not bool(tv.get("ok", false)):
+				_error(ERR_GENERIC_MISMATCH, "@generic " + str(tv.get("mismatch", "")), line, col, owner)
+				tapp = true
+				break
+		if tapp:
+			continue
+		_extends_args[full] = {"key": key, "args": args}
 
 
 # ------------------------------------------------------- @struct helpers
@@ -5046,6 +5220,7 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 	var base = _extends_text(node)
 	if base != "":
 		_class_extends[full] = base
+	_record_extends_args(full, node, owner)
 	var body: Variant = node.get("body", null)
 	if body is Dictionary:
 		for child in (body as Dictionary).get("children", []):
@@ -5123,8 +5298,15 @@ func _extends_text(node: Dictionary) -> String:
 	if ext is Dictionary:
 		var parts: Array = []
 		for t in (ext as Dictionary).get("tokens", []):
-			if t is Dictionary and (str((t as Dictionary).get("type", "")) == "IDENTIFIER" or str((t as Dictionary).get("type", "")) == "BUILTIN_TYPE"):
+			if not (t is Dictionary):
+				continue
+			var ty := str((t as Dictionary).get("type", ""))
+			if ty == "IDENTIFIER" or ty == "BUILTIN_TYPE":
 				parts.append(str((t as Dictionary).get("value", "")))
+			elif ty == "DOT":
+				continue
+			else:
+				break
 		if not parts.is_empty():
 			var out = str(parts[0])
 			for i in range(1, parts.size()):
@@ -5136,8 +5318,15 @@ func _extends_text(node: Dictionary) -> String:
 			if child is Dictionary and str((child as Dictionary).get("type", "")) == "EXTENDS":
 				var p2: Array = []
 				for t in (child as Dictionary).get("path", []):
-					if t is Dictionary and (str((t as Dictionary).get("type", "")) == "IDENTIFIER" or str((t as Dictionary).get("type", "")) == "BUILTIN_TYPE"):
+					if not (t is Dictionary):
+						continue
+					var ty2 := str((t as Dictionary).get("type", ""))
+					if ty2 == "IDENTIFIER" or ty2 == "BUILTIN_TYPE":
 						p2.append(str((t as Dictionary).get("value", "")))
+					elif ty2 == "DOT":
+						continue
+					else:
+						break
 				if not p2.is_empty():
 					var out2 = str(p2[0])
 					for i in range(1, p2.size()):
@@ -5912,7 +6101,8 @@ func _script_hit(rec: Dictionary, seg: String, is_call: bool) -> Dictionary:
 ## Script-side member lookup: own table, then script parents, then the
 ## terminal engine base. Objects are assumed to hold ONLY declared and
 ## inherited members (no dynamic script dispatch): script members found
-## out of the inheritance line still miss. Returns:## - {"status": "found", "cont"} (see _script_hit);
+## out of the inheritance line still miss. Returns:
+## - {"status": "found", "cont"} (see _script_hit);
 ## - {"status": "miss-skip"} (unresolvable parent: cannot prove absence);
 ## - {"status": "miss-engine", "base"} (terminal engine base: caller
 ##   runs the engine check, which errors on absence);
@@ -6139,7 +6329,50 @@ func _infer_arg_tree(slice: Array, scope: Dictionary, fn: Variant, env: Dictiona
 		return {"kind": "name", "name": "Dictionary"}
 	if (slice[0] is Dictionary) and str((slice[0] as Dictionary).get("type", "")) == "LPAREN" and _match_close(slice, 0) == slice.size() - 1:
 		return _infer_arg_tree(slice.slice(1, slice.size() - 1), scope, fn, env, overlay, owner, depth + 1)
+	var ctor := _infer_ctor_tree(slice, owner, depth)
+	if not ctor.is_empty():
+		return ctor
 	return {"kind": "any"}
+
+
+## Generic tree for an `Head[args](...)` constructor call slice, {}
+## when the shape misses. Engine heads only (script constructors take
+## no type arguments): leaves resolve leniently, anything unknown
+## collapses the whole inference to dynamic. Pure.
+func _infer_ctor_tree(slice: Array, owner: String, depth: int) -> Dictionary:
+	if depth > 6 or slice.size() < 6:
+		return {}
+	if not (slice[0] is Dictionary):
+		return {}
+	var t0 := str((slice[0] as Dictionary).get("type", ""))
+	if t0 != "IDENTIFIER" and t0 != "BUILTIN_TYPE":
+		return {}
+	if not (slice[1] is Dictionary) or str((slice[1] as Dictionary).get("type", "")) != "LBRACKET":
+		return {}
+	var rbr := _match_bracket(slice, 1)
+	if rbr < 0 or rbr + 1 >= slice.size():
+		return {}
+	if not (slice[rbr + 1] is Dictionary) or str((slice[rbr + 1] as Dictionary).get("type", "")) != "LPAREN":
+		return {}
+	if _match_close(slice, rbr + 1) != slice.size() - 1:
+		return {}
+	var head := str((slice[0] as Dictionary).get("value", ""))
+	if _engine_info(head).is_empty():
+		return {}
+	var inner := ""
+	for i in range(2, rbr):
+		if slice[i] is Dictionary:
+			inner += str((slice[i] as Dictionary).get("value", ""))
+	var args: Array = []
+	for part in _split_top_commas(inner):
+		var text := str(part).strip_edges()
+		if text == "":
+			return {}
+		var parsed := _parse_type_expr(text, "vartype")
+		if not bool(parsed.get("ok", false)):
+			return {}
+		args.append(_canon_tree_names(parsed.get("node", {})))
+	return {"kind": "generic", "name": head, "args": args}
 
 
 ## Name tree for one identifier argument via flow env/scope/members
@@ -6287,28 +6520,36 @@ func _check_generic_call(fn_node: Dictionary, disp: String, slices: Array, scope
 
 
 ## Substitutes class-parameter heads in a script hit with instance
-## type arguments: only variable/constant hits owned by the link's own
-## class (inherited members stay opaque: no extends-with-args in v1),
-## and only when arities line up (validated at declaration; guarded).
+## type arguments: direct hits use the link args; inherited hits use
+## the child's validated extends arguments (single level: deeper
+## chains and extends-without-args stay opaque). Arity guarded.
 func _subst_hit_types(hut: Dictionary, rec: Dictionary, key: String, start_key: String, link_args: Array) -> Dictionary:
-	if link_args.is_empty() or key != start_key:
-		return hut
 	if str(rec.get("kind", "")) not in ["variable", "constant"]:
 		return hut
-	if str(rec.get("owner", "")) != start_key:
+	if str(rec.get("owner", "")) != key:
 		return hut
 	var params := _class_generic(key)
-	if params.is_empty() or params.size() != link_args.size():
+	var args := link_args
+	if key != start_key:
+		if link_args.is_empty():
+			var e := _extends_args.get(start_key, {})
+			if e is Dictionary and str((e as Dictionary).get("key", "")) == key:
+				args = (e as Dictionary).get("args", [])
+			else:
+				return hut
+		else:
+			return hut
+	if params.is_empty() or params.size() != args.size():
 		return hut
 	var cont: Dictionary = hut.get("cont", {})
 	var out: Array = []
 	var changed := false
 	for t in (cont.get("types", []) as Array):
 		var idx := params.find(str(t))
-		if idx < 0 or not (link_args[idx] is Dictionary):
+		if idx < 0 or not (args[idx] is Dictionary):
 			out.append(t)
 			continue
-		var hs := _tree_top_heads(link_args[idx])
+		var hs := _tree_top_heads(args[idx])
 		if hs.is_empty():
 			out.append(t)
 		else:
@@ -6318,6 +6559,42 @@ func _subst_hit_types(hut: Dictionary, rec: Dictionary, key: String, start_key: 
 	if changed:
 		cont["types"] = out
 	return hut
+
+
+## Owner key holding a script function (same walk as _script_func_node),
+## "" when absent. Used to bind the right class parameters for
+## inherited generic methods.
+func _script_func_owner(owner_key: String, seg: String) -> String:
+	var key := owner_key
+	var seen := {}
+	var guard := 0
+	while guard < 64:
+		guard += 1
+		if seen.has(key):
+			return ""
+		seen[key] = true
+		if _members.has(key):
+			var table: Dictionary = _members[key]
+			if table.has(seg):
+				var rec: Dictionary = table[seg]
+				if str(rec.get("kind", "")) == "function":
+					var n: Variant = rec.get("node", {})
+					if n is Dictionary and str((n as Dictionary).get("type", "")) == "FUNC_DECL":
+						return key
+				return ""
+		var base := ""
+		if key == "":
+			base = _script_extends
+		else:
+			base = str(_class_extends.get(key, ""))
+		if base == "":
+			base = "RefCounted"
+		var resolved := _resolve_private_owner(base, key)
+		if resolved != "" and _members.has(resolved):
+			key = resolved
+			continue
+		return ""
+	return ""
 
 
 func _script_seg(owner_key: String, seg: String, is_call: bool, link_args := []) -> Dictionary:
@@ -6645,7 +6922,15 @@ func _generic_link_types(key: String, seg: String, tokens: Array, j: int, scope:
 		return {"applies": false}
 	var slices := _split_arg_slices(tokens, j + 1)
 	var disp := "'" + seg + "'"
-	var pre := _class_prebindings(key, link_args)
+	var pre := {}
+	var mowner := _script_func_owner(key, seg)
+	if mowner != "":
+		if mowner == key:
+			pre = _class_prebindings(key, link_args)
+		else:
+			var e := _extends_args.get(key, {})
+			if e is Dictionary and str((e as Dictionary).get("key", "")) == mowner:
+				pre = _class_prebindings(mowner, (e as Dictionary).get("args", []))
 	var r := _check_generic_call(node, disp, slices, scope, fn, env, overlay, owner, int((tokens[j] as Dictionary).get("line", 0)), int((tokens[j] as Dictionary).get("column", 0)), pre)
 	if not bool(r.get("generic", false)):
 		return {"applies": false}
