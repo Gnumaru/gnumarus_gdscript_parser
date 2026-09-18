@@ -660,6 +660,45 @@ func f():
   tuple names without misuse checking; no subscript continuation
   (`t[0].foo()` skips the rest); `Tuple.new()` silently skipped.
 
+### `@alias`
+
+Declares a named type alias: `# @alias Name <type-expr> @endalias`.
+The expression runs to `@endalias`, so it may span lines and hold
+whitespace (after the first whitespace run comes the name, after the
+second comes the expression). Any type expression the mini-parser
+accepts works, including other aliases:
+
+```gdscript
+extends Node
+
+# @alias number int|float @endalias
+# @alias pairs
+# tuple[int, String]
+# @endalias
+
+# @var x number
+var x := 1                 # OK: int is in the alias
+
+# @var y number
+var y := "a"               # ERROR: neither int nor float is String
+```
+
+- Aliases are global: one `kind: "alias"` JSON per name under
+  `user/`, usable from any file once written (use before that
+  errors `*_unknown_type`, like any missing type). Definitions live
+  top-level only (`alias_misplaced` elsewhere); duplicates, clashes
+  with script/engine/template types and circular definitions error
+  (`alias_conflict`); bad shapes error (`alias_malformed`,
+  `alias_unknown_type`); tuple applications inside the expression
+  check arity/compatibility (`alias_mismatch`). `void` is rejected.
+- Uses narrow through expansion: `@var`/`@param` members and
+  `@return`/`->` compatibility see the expanded heads, and tuple
+  applications validate through aliases. Downstream stamps keep the
+  alias name (opaque); `@implements` does not resolve aliases yet.
+  Gaps (documented): alias heads never take arguments
+  (`Num[int]` errors); no vartype (`var x: number`) support — the
+  semantic parser is untouched.
+
 ### `@interface`
 
 Declares an interface blueprint between `@interface Name` and a
@@ -804,7 +843,8 @@ green. `GODOT_BIN` overrides the engine path.
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
   `test_tuple.gd` (`@tuple` rule),
   `test_type_expr.gd` (nested type-expression mini-parser + tuple
-  applications), `test_struct.gd` (`@struct` rule),
+  applications),
+  `test_alias.gd` (`@alias` rule), `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
   `test_implements.gd` (`@implements` rule),
   `test_flow.gd` (flow member checks + guards),

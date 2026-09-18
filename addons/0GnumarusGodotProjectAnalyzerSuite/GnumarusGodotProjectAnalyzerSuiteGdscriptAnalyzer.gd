@@ -131,6 +131,11 @@ const ERR_TUPLE_UNKNOWN_TYPE := "tuple_unknown_type"
 const ERR_TUPLE_CONFLICT := "tuple_conflict"
 const ERR_TUPLE_MISMATCH := "tuple_mismatch"
 const ERR_TUPLE_BOUNDS := "tuple_bounds"
+const ERR_ALIAS_MISPLACED := "alias_misplaced"
+const ERR_ALIAS_MALFORMED := "alias_malformed"
+const ERR_ALIAS_UNKNOWN_TYPE := "alias_unknown_type"
+const ERR_ALIAS_CONFLICT := "alias_conflict"
+const ERR_ALIAS_MISMATCH := "alias_mismatch"
 const ERR_STRUCT_MISPLACED := "struct_misplaced"
 const ERR_STRUCT_MALFORMED := "struct_malformed"
 const ERR_STRUCT_UNKNOWN_TYPE := "struct_unknown_type"
@@ -233,10 +238,17 @@ var _interfaces: Dictionary = {}
 ## @implements raw uses: owner -> [{names, line}]. Checked in
 ## _check_implements after the walk (tables complete by then).
 var _implements: Dictionary = {}
+## @alias definitions: name -> {"resolved": bool, "raws": [...],
+## "spec": {...}}. Prescan collects raws, _resolve_aliases validates.
+var _aliases: Dictionary = {}
 ## Complex annotation trees awaiting tuple validation: [{tree, mm_kind,
 ## what, line, col, owner}]. Attach runs before _resolve_tuples, so
 ## arity/compatibility waits for _check_pending_trees (post-resolve).
 var _pending_tree_checks: Array = []
+## Alias members awaiting narrowing: [{member, ref, label, line, col,
+## owner, pkind}]. Alias definitions resolve after the scan, so
+## alias-vs-declared checks wait for _check_pending_alias_narrows.
+var _pending_alias_narrows: Array = []
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -256,7 +268,9 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_structs = {}
 	_interfaces = {}
 	_implements = {}
+	_aliases = {}
 	_pending_tree_checks = []
+	_pending_alias_narrows = []
 	_script_class = ""
 	_script_extends = ""
 	for child in ast.get("children", []):
@@ -279,11 +293,14 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_prescan_tuples(ast)
 	_prescan_structs(ast)
 	_prescan_interfaces(ast)
+	_prescan_aliases(ast)
 	_scan_children(ast.get("children", []), "")
 	_resolve_tuples()
 	_resolve_structs()
 	_resolve_interfaces()
+	_resolve_aliases()
 	_check_pending_trees()
+	_check_pending_alias_narrows()
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
@@ -355,6 +372,8 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_interface(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+		if not _find_alias(str((header as Dictionary).get("value", ""))).is_empty():
+			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		var htag := _find_implements(str((header as Dictionary).get("value", "")))
 		if not htag.is_empty():
 			_record_implements_words("", _split_words(str(htag.get("message", ""))), int((header as Dictionary).get("line", 0)))
@@ -668,7 +687,11 @@ func _resolve_tuples() -> void:
 		var dspec: Dictionary = done.get("spec", {})
 		for item in (dspec.get("items", []) as Array):
 			if item is Dictionary and (item as Dictionary).has("tree"):
-				var tv := _check_tree_tuples((item as Dictionary).get("tree", {}))
+				var itree: Dictionary = (item as Dictionary).get("tree", {})
+				var iexp := _expand_tree_aliases(itree)
+				if bool(iexp.get("ok", false)):
+					itree = iexp.get("node", {})
+				var tv := _check_tree_tuples(itree)
 				if not bool(tv.get("ok", false)):
 					_error(ERR_TUPLE_MISMATCH, "@tuple " + str(tv.get("mismatch", "")), int(dspec.get("line", 0)), 0, "")
 
@@ -1077,6 +1100,464 @@ func _write_tuple_file(tname: String) -> void:
 	_written.append(_write_base + "/user/" + tname + ".json")
 
 
+# ------------------------------------------------------- @alias helpers
+
+func _find_alias(value: String) -> Dictionary:
+	return _find_tag(value, "alias")
+
+
+func _has_alias_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_alias(str(tok.get("value", "")))
+
+
+func _has_any_alias_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_alias_tag(c).is_empty():
+			return true
+	return false
+
+
+## Left-boundary rule for @alias/@endalias scanning: start of value,
+## or #/space/tab/newline before the @ (multi-line tokens included).
+func _at_alias_left(value: String, i: int) -> bool:
+	if i <= 0:
+		return true
+	var left := value.unicode_at(i - 1)
+	return left == 35 or left == 32 or left == 9 or left == 10 or left == 13
+
+
+func _is_alias_ws(c: int) -> bool:
+	return c == 32 or c == 9 or c == 10 or c == 13
+
+
+## 0-based line offset of pos inside value.
+func _alias_line_of(value: String, pos: int) -> int:
+	var line := 0
+	var p := 0
+	while p < pos and p < value.length():
+		if value.unicode_at(p) == 10:
+			line += 1
+		p += 1
+	return line
+
+
+## Finds "@endalias" at a tag boundary from pos: returns the @ position
+## or -1. Stray text (including nested @alias words) is skipped.
+func _find_endalias(value: String, from: int) -> int:
+	var n := value.length()
+	var i := from
+	while i < n:
+		if value.unicode_at(i) == 64 and _at_alias_left(value, i):
+			var j := i + 1
+			var word := ""
+			while j < n and _is_tag_char(value.unicode_at(j)):
+				word += value.substr(j, 1)
+				j += 1
+			if word == "endalias":
+				return i
+		i += 1
+	return -1
+
+
+## Strips GDScript comment markers from a raw alias expression span:
+## per line, one leading `#` goes (continuation lines) and anything
+## from a later `#` is a trailing comment. Lines rejoin with spaces
+## (insignificant to _parse_type_expr).
+static func _clean_alias_expr(raw: String) -> String:
+	var parts: Array = []
+	for line in raw.split("\n"):
+		var t := str(line).strip_edges()
+		if t.begins_with("#"):
+			t = t.substr(1).strip_edges()
+		var ci := t.find("#")
+		if ci >= 0:
+			t = t.substr(0, ci).strip_edges()
+		if t != "":
+			parts.append(t)
+	return " ".join(parts)
+
+
+## Scans a whole comment value for "@alias NAME expr @endalias"
+## blocks. The expression runs to @endalias, so it may span lines and
+## hold whitespace. Returns [{name, expr, line}] plus
+## [{error, line}] for unterminated blocks. Stray @endalias words and
+## text between blocks are ignored.
+func _extract_alias_blocks(value: String) -> Array:
+	var out: Array = []
+	var n := value.length()
+	var i := 0
+	while i < n:
+		if value.unicode_at(i) != 64 or not _at_alias_left(value, i):
+			i += 1
+			continue
+		var j := i + 1
+		var word := ""
+		while j < n and _is_tag_char(value.unicode_at(j)):
+			word += value.substr(j, 1)
+			j += 1
+		if word == "endalias":
+			i = j
+			continue
+		if word != "alias":
+			i += 1
+			continue
+		var tline := _alias_line_of(value, i)
+		var k := j
+		while k < n and _is_alias_ws(value.unicode_at(k)):
+			k += 1
+		if k <= j or k >= n:
+			out.append({"error": "@alias needs a name and a type expression: '# @alias Name int|float @endalias'", "line": tline})
+			i = j
+			continue
+		var nword := ""
+		while k < n and _is_tag_char(value.unicode_at(k)):
+			nword += value.substr(k, 1)
+			k += 1
+		if nword == "":
+			out.append({"error": "@alias has an invalid name ''", "line": tline})
+			i = k
+			continue
+		var k2 := k
+		while k2 < n and _is_alias_ws(value.unicode_at(k2)):
+			k2 += 1
+		if k2 <= k or k2 >= n:
+			out.append({"error": "@alias '" + nword + "' needs a type expression before @endalias", "line": tline})
+			i = k
+			continue
+		var epos := _find_endalias(value, k2)
+		if epos < 0:
+			out.append({"error": "@alias '" + nword + "' is missing @endalias", "line": tline})
+			i = n
+			continue
+		var expr := _clean_alias_expr(value.substr(k2, epos - k2))
+		if expr == "":
+			out.append({"error": "@alias '" + nword + "' needs a type expression before @endalias", "line": tline})
+			i = epos + 9
+			continue
+		out.append({"name": nword, "expr": expr, "line": tline})
+		i = epos + 9
+	return out
+
+
+## Pre-scan (before _scan): collects @alias raw definitions from
+## top-level standalone comments and top-level leadings so name
+## lookups stay order-free. Full validation happens in _resolve_aliases.
+func _prescan_aliases(ast: Dictionary) -> void:
+	for child in ast.get("children", []):
+		if not (child is Dictionary):
+			continue
+		if str((child as Dictionary).get("type", "")) == "TYPE_INFO":
+			_collect_alias_node(child as Dictionary)
+			continue
+		for c in (child as Dictionary).get("leading_comments", []):
+			if c is Dictionary:
+				_collect_alias_node(c)
+
+
+## Records every @alias block in one comment value as raw material.
+## Malformed blocks error immediately and are dropped; valid ones queue
+## under their name (duplicates resolved in _resolve_aliases).
+func _collect_alias_node(tok: Dictionary) -> void:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return
+	var tok_line := int(tok.get("line", 0))
+	for b in _extract_alias_blocks(str(tok.get("value", ""))):
+		if not (b is Dictionary):
+			continue
+		var bd: Dictionary = b
+		if bd.has("error"):
+			_error(ERR_ALIAS_MALFORMED, str(bd.get("error", "")), tok_line + int(bd.get("line", 0)), 0, "")
+			continue
+		var aname := str(bd.get("name", ""))
+		if not _is_type_name(aname):
+			_error(ERR_ALIAS_MALFORMED, "@alias has an invalid name '" + aname + "'", tok_line + int(bd.get("line", 0)), 0, "")
+			continue
+		var raw := {"name": aname, "expr": str(bd.get("expr", "")), "line": tok_line + int(bd.get("line", 0))}
+		if not _aliases.has(aname):
+			_aliases[aname] = {"resolved": false, "raws": [raw]}
+		else:
+			((_aliases[aname] as Dictionary).get("raws", []) as Array).append(raw)
+
+
+## Why an alias name cannot be defined ("" when free). Existing alias
+## JSONs (same kind) are fine: idempotent rewrites. NOTE: not via
+## _type_known (the name itself is already registered there).
+func _alias_conflict(aname: String) -> String:
+	for key in _members.keys():
+		var table: Dictionary = _members[key]
+		if table.has(aname):
+			return "script member '" + aname + "' (" + str((table[aname] as Dictionary).get("kind", "")) + ")"
+	if _members.has(aname):
+		return "script class '" + aname + "'"
+	if aname == _script_class and aname != "":
+		return "the script class name"
+	if _type_file_exists(aname):
+		var info := _read_json(_write_base + "/user/" + aname + ".json")
+		if not info.is_empty() and str(info.get("kind", "")) == "alias":
+			return ""
+		return "an existing type '" + aname + "'"
+	return ""
+
+
+## Alias names referenced by a tree (name-kind leaves registered as
+## in-memory aliases), deduplicated. Disk-only aliases cannot cycle
+## back into a validating set, so they are skipped here.
+func _alias_tree_refs(tree: Dictionary) -> Array:
+	var out: Array = []
+	_collect_alias_refs(tree, out, {})
+	return out
+
+
+func _collect_alias_refs(node: Dictionary, out: Array, seen: Dictionary) -> void:
+	var kind := str(node.get("kind", ""))
+	if kind == "name":
+		var nm := str(node.get("name", ""))
+		if _aliases.has(nm) and not seen.has(nm):
+			seen[nm] = true
+			out.append(nm)
+	elif kind == "union":
+		for arm in (node.get("arms", []) as Array):
+			if arm is Dictionary:
+				_collect_alias_refs(arm, out, seen)
+	elif kind == "generic":
+		for arg in (node.get("args", []) as Array):
+			if arg is Dictionary:
+				_collect_alias_refs(arg, out, seen)
+
+
+## True when aname reaches itself through in-memory alias references
+## (parsed on demand: definitions validate in one loop, so later
+## definitions are still raw here).
+func _alias_circular(aname: String) -> bool:
+	return _alias_reaches(aname, aname, {aname: true})
+
+
+func _alias_reaches(target: String, cur: String, path: Dictionary) -> bool:
+	var raw := _alias_first_expr(cur)
+	if raw == "":
+		return false
+	var parsed := _parse_type_expr(raw, "@alias")
+	if not bool(parsed.get("ok", false)):
+		return false
+	for ref in _alias_tree_refs(parsed.get("node", {})):
+		var r := str(ref)
+		if r == target:
+			return true
+		if not path.has(r):
+			path[r] = true
+			if _alias_reaches(target, r, path):
+				return true
+			path.erase(r)
+	return false
+
+
+## Raw expression of the first queued block for an alias, "" when none.
+func _alias_first_expr(aname: String) -> String:
+	if not _aliases.has(aname):
+		return ""
+	var raws: Array = (_aliases[aname] as Dictionary).get("raws", [])
+	if raws.is_empty() or not (raws[0] is Dictionary):
+		return ""
+	return str((raws[0] as Dictionary).get("expr", ""))
+
+
+## Second pass (after _scan, before _walk): validates definitions
+## (duplicates, conflicts, syntax, names, cycles) and writes their
+## JSON files. Tuple applications inside alias trees wait for the
+## _resolve_tuples item loop (all definitions exist by then).
+func _resolve_aliases() -> void:
+	_ensure_user_dir()
+	for aname in _aliases.keys():
+		var entry: Dictionary = _aliases[aname]
+		if bool(entry.get("resolved", false)):
+			continue
+		var raws: Array = entry.get("raws", [])
+		if raws.is_empty():
+			continue
+		var first: Dictionary = raws[0]
+		if raws.size() > 1:
+			_error(ERR_ALIAS_CONFLICT, "@alias '" + aname + "' is defined more than once", int(first.get("line", 0)), 0, "")
+			continue
+		var clash := _alias_conflict(aname)
+		if clash != "":
+			_error(ERR_ALIAS_CONFLICT, "@alias '" + aname + "' conflicts with " + clash, int(first.get("line", 0)), 0, "")
+			continue
+		var parsed := _parse_type_expr(str(first.get("expr", "")), "@alias")
+		if not bool(parsed.get("ok", false)):
+			_error(ERR_ALIAS_MALFORMED, str(parsed.get("error", "")), int(first.get("line", 0)), 0, "")
+			continue
+		var tree: Dictionary = parsed.get("node", {})
+		if _count_void_names(tree) > 0:
+			_error(ERR_ALIAS_MALFORMED, "@alias 'void' is not a valid type", int(first.get("line", 0)), 0, "")
+			continue
+		var rn := _resolve_tree_names(tree)
+		if not bool(rn.get("ok", false)):
+			_error(ERR_ALIAS_UNKNOWN_TYPE, "@alias has unknown type '" + str(rn.get("bad", "")) + "'", int(first.get("line", 0)), 0, "")
+			continue
+		if _alias_circular(aname):
+			_error(ERR_ALIAS_CONFLICT, "@alias '" + aname + "' is circular", int(first.get("line", 0)), 0, "")
+			continue
+		entry["resolved"] = true
+		entry["spec"] = {"ok": true, "name": aname, "tree": tree, "raw": str(first.get("expr", "")), "line": int(first.get("line", 0))}
+		_write_alias_file(aname)
+	for aname in _aliases.keys():
+		var done: Dictionary = _aliases[aname]
+		if not bool(done.get("resolved", false)):
+			continue
+		var dspec: Dictionary = done.get("spec", {})
+		var dtree: Dictionary = dspec.get("tree", {})
+		var dexp := _expand_tree_aliases(dtree)
+		if bool(dexp.get("ok", false)):
+			dtree = dexp.get("node", {})
+		var tv := _check_tree_tuples(dtree)
+		if not bool(tv.get("ok", false)):
+			_error(ERR_ALIAS_MISMATCH, "@alias " + str(tv.get("mismatch", "")), int(dspec.get("line", 0)), 0, "")
+
+
+## Writes one user/<Name>.json per resolved alias (class-compatible
+## keys plus the alias tree, so every JSON reader keeps working).
+func _write_alias_file(aname: String) -> void:
+	var entry: Dictionary = _aliases[aname]
+	var spec: Dictionary = entry.get("spec", {})
+	var info := {
+		"name": aname,
+		"kind": "alias",
+		"class_name": "",
+		"resource_path": _script_resource_path,
+		"parent": "",
+		"inheritance_chain": [aname],
+		"alias_tree": spec.get("tree", {}),
+		"alias_raw": str(spec.get("raw", "")),
+		"enums": [],
+		"constants": [],
+		"signals": [],
+		"fields": [],
+		"static_methods": [],
+		"instance_methods": [],
+		"inner_classes": [],
+	}
+	_write_json(_write_base + "/user/" + aname + ".json", info)
+	_written.append(_write_base + "/user/" + aname + ".json")
+
+
+## Resolved alias definition {tree, raw} or {} (in-memory first,
+## then same-kind JSON files, both cached).
+func _alias_def(aname: String) -> Dictionary:
+	if _aliases.has(aname):
+		var entry: Dictionary = _aliases[aname]
+		if bool(entry.get("resolved", false)):
+			var spec: Dictionary = entry.get("spec", {})
+			if bool(spec.get("ok", false)) and spec.has("tree"):
+				return {"tree": spec.get("tree", {}), "raw": str(spec.get("raw", ""))}
+	var info := _type_info(aname)
+	if not info.is_empty() and str(info.get("kind", "")) == "alias":
+		var dtree: Dictionary = info.get("alias_tree", {})
+		if not dtree.is_empty():
+			return {"tree": dtree, "raw": str(info.get("alias_raw", ""))}
+	return {}
+
+
+## Expands alias name-leaves in a tree (post-resolve). Heads are never
+## aliases: applying arguments to an alias fails closed. Cycles fail
+## closed too (resolve rejects them; disk edits stay defensive).
+## Returns {"ok", "node"} or {"ok": false, "error"}.
+func _expand_tree_aliases(tree: Dictionary) -> Dictionary:
+	return _expand_tree_node(tree, [])
+
+
+func _expand_tree_node(node: Dictionary, stack: Array) -> Dictionary:
+	var kind := str(node.get("kind", ""))
+	if kind == "any":
+		return {"ok": true, "node": node}
+	if kind == "name":
+		var nm := str(node.get("name", ""))
+		var def := _alias_def(nm)
+		if def.is_empty():
+			return {"ok": true, "node": node}
+		if nm in stack:
+			return {"ok": false, "error": "circular alias '" + nm + "'"}
+		var sub := _expand_tree_node((def as Dictionary).get("tree", {}), stack + [nm])
+		if not bool(sub.get("ok", false)):
+			return sub
+		return {"ok": true, "node": sub.get("node", {})}
+	if kind == "union":
+		var arms: Array = []
+		for arm in (node.get("arms", []) as Array):
+			if not (arm is Dictionary):
+				return {"ok": false, "error": "bad union arm"}
+			var ex := _expand_tree_node(arm, stack)
+			if not bool(ex.get("ok", false)):
+				return ex
+			arms.append(ex.get("node", {}))
+		return {"ok": true, "node": {"kind": "union", "arms": arms}}
+	if kind == "generic":
+		var hname := str(node.get("name", ""))
+		if not _alias_def(hname).is_empty():
+			return {"ok": false, "error": "cannot apply type arguments to alias '" + hname + "'"}
+		var args: Array = []
+		for arg in (node.get("args", []) as Array):
+			if not (arg is Dictionary):
+				return {"ok": false, "error": "bad type argument"}
+			var ex := _expand_tree_node(arg, stack)
+			if not bool(ex.get("ok", false)):
+				return ex
+			args.append(ex.get("node", {}))
+		return {"ok": true, "node": {"kind": "generic", "name": hname, "args": args}}
+	return {"ok": false, "error": "bad type node"}
+
+
+## Top-level head names of a tree (anonymous `tuple[...]` reads as
+## `Array`; `*` arms are dynamic and skipped).
+func _tree_top_heads(tree: Dictionary) -> Array:
+	var arms: Array = []
+	if str(tree.get("kind", "")) == "union":
+		arms = (tree.get("arms", []) as Array).duplicate()
+	else:
+		arms = [tree]
+	var out: Array = []
+	for arm in arms:
+		if not (arm is Dictionary):
+			continue
+		var kind := str((arm as Dictionary).get("kind", ""))
+		if kind == "any":
+			continue
+		if kind == "name":
+			out.append(str((arm as Dictionary).get("name", "")))
+		elif kind == "generic":
+			var hname := str((arm as Dictionary).get("name", ""))
+			if hname == "tuple" and _tuple_def("tuple").is_empty():
+				out.append("Array")
+			else:
+				out.append(hname)
+	return out
+
+
+## Post-resolve pass: alias members queued at attach narrow against
+## the declared type through their expanded heads.
+func _check_pending_alias_narrows() -> void:
+	for pen in _pending_alias_narrows:
+		if not (pen is Dictionary):
+			continue
+		var pd: Dictionary = pen
+		var member := str(pd.get("member", ""))
+		var ref := str(pd.get("ref", ""))
+		var def := _alias_def(member)
+		if def.is_empty():
+			continue
+		var exp := _expand_tree_aliases(def.get("tree", {}))
+		if not bool(exp.get("ok", false)):
+			continue
+		for h in _tree_top_heads(exp.get("node", {})):
+			var hs := str(h)
+			if hs != ref and not _derives_from(hs, ref):
+				if str(pd.get("pkind", "")) == "param":
+					_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + hs + "' (from alias '" + member + "') for parameter '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), 0, str(pd.get("owner", "")))
+				else:
+					_error(ERR_VAR_MISMATCH, "cannot use @var type '" + hs + "' (from alias '" + member + "') for variable '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
+
+
 # ------------------------------------------------------- @struct helpers
 
 ## Parses an @struct message ("Name COUNT field...") into {"ok",
@@ -1368,6 +1849,9 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 	var ref := _vartype_name(pnode)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
 		for m in members:
+			if _aliases.has(str(m)) or not _alias_def(str(m)).is_empty():
+				_pending_alias_narrows.append({"member": str(m), "ref": ref, "label": str(pair.get("name", "")), "line": line, "col": 0, "owner": owner, "pkind": "param"})
+				continue
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_PARAM_MISMATCH, "cannot use @param type '" + str(m) + "' for parameter '" + str(pair.get("name", "")) + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, 0, owner)
 	pnode["param_ann"] = {"name": str(pair.get("name", "")), "types": members, "raw": str(pair.get("raw", "")), "line": line}
@@ -2995,12 +3479,17 @@ func _report_tree_errors(spec: Dictionary, unk_kind: String, mm_kind: String, wh
 
 ## Post-resolve pass: tuple applications queued by _report_tree_errors
 ## (attach runs before _resolve_tuples, when definitions are still
-## raw, so arity/compatibility waits until here).
+## raw, so arity/compatibility waits until here). Alias leaves expand
+## first, so applications through aliases validate transparently.
 func _check_pending_trees() -> void:
 	for pen in _pending_tree_checks:
 		if not (pen is Dictionary):
 			continue
-		var tv := _check_tree_tuples((pen as Dictionary).get("tree", {}))
+		var tree: Dictionary = (pen as Dictionary).get("tree", {})
+		var exp := _expand_tree_aliases(tree)
+		if bool(exp.get("ok", false)):
+			tree = exp.get("node", {})
+		var tv := _check_tree_tuples(tree)
 		if not bool(tv.get("ok", false)):
 			_error(str((pen as Dictionary).get("mm_kind", "")), str((pen as Dictionary).get("what", "")) + " " + str(tv.get("mismatch", "")), int((pen as Dictionary).get("line", 0)), int((pen as Dictionary).get("col", 0)), str((pen as Dictionary).get("owner", "")))
 
@@ -3169,6 +3658,8 @@ func _type_known(tname: String) -> bool:
 		return true
 	if _tuples.has(tname):
 		return true
+	if _aliases.has(tname):
+		return true
 	if _structs.has(tname):
 		return true
 	if _interfaces.has(tname):
@@ -3307,6 +3798,9 @@ func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is
 	var ref := _var_reference(decl_node, is_const)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
 		for m in members:
+			if _aliases.has(str(m)) or not _alias_def(str(m)).is_empty():
+				_pending_alias_narrows.append({"member": str(m), "ref": ref, "label": vname, "line": line, "col": col, "owner": owner, "pkind": "var"})
+				continue
 			if str(m) != ref and not _derives_from(str(m), ref):
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + str(m) + "' for variable '" + vname + "' declared as '" + ref + "' ('" + str(m) + "' is neither '" + ref + "' nor a subclass of it)", line, col, owner)
 	decl_node["var_ann"] = {"name": vname, "types": members, "raw": str(spec.get("raw", "")), "line": line}
@@ -3558,7 +4052,18 @@ func _check_return_ann(fn_node: Variant, owner: String) -> void:
 			_error(ERR_RETURN_MISMATCH, "cannot use @return '" + str(ann.get("raw", "")) + "' with '-> void' on function " + disp, int(fn.get("line", 0)), int(fn.get("column", 0)), owner)
 			return
 		if not ann_void and arrow != "Variant":
+			var atypes: Array = []
 			for m in ann.get("types", []):
+				if _aliases.has(str(m)) or not _alias_def(str(m)).is_empty():
+					var adef := _alias_def(str(m))
+					if not adef.is_empty():
+						var aexp := _expand_tree_aliases(adef.get("tree", {}))
+						if bool(aexp.get("ok", false)):
+							for ah in _tree_top_heads(aexp.get("node", {})):
+								atypes.append(str(ah))
+							continue
+				atypes.append(str(m))
+			for m in atypes:
 				if str(m) != arrow and not _derives_from(str(m), arrow):
 					_error(ERR_RETURN_MISMATCH, "cannot use @return '" + str(m) + "' with '-> " + arrow + "' on function " + disp + " ('" + str(m) + "' is neither '" + arrow + "' nor a subclass of it)", int(fn.get("line", 0)), int(fn.get("column", 0)), owner)
 	var rets := _collect_returns(fn.get("body", null))
@@ -3647,6 +4152,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 				_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_tuple_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_alias_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
@@ -3678,6 +4185,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_tuple_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_alias_tag(d) and not (member_pos and owner == ""):
+			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
@@ -3699,6 +4208,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_apply_param_single(_extract_param_tags(d, owner), d, owner)
 		if _has_any_tuple_tag(d):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_alias_tag(d):
+			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d):
@@ -3731,6 +4242,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_tuple_tag(d):
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_alias_tag(d):
+			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
@@ -3754,6 +4268,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_tuple_tag(d).is_empty():
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not member_pos and not _has_alias_tag(d).is_empty():
+			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_struct_tag(d).is_empty():
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_interface_tag(d).is_empty():
@@ -3769,6 +4285,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		# Top level: already collected by _prescan_tuples; falls through.
+	if _has_any_alias_tag(d):
+		if not (member_pos and owner == ""):
+			_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
+		# Top level: already collected by _prescan_aliases; falls through.
 	if _has_any_struct_tag(d):
 		if not (member_pos and owner == ""):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
@@ -3943,6 +4464,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_tuple_tag(child):
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_alias_tag(child):
+					_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
@@ -3971,6 +4494,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 						_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_tuple_tag(child):
 					_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_alias_tag(child):
+					_error(ERR_ALIAS_MISPLACED, "@alias definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
@@ -5950,6 +6475,10 @@ func _write_json(path: String, data: Dictionary) -> void:
 		return
 	file.store_string(JSON.stringify(data, "\t"))
 	file.close()
+	# Drop any cached miss for this file: same-run conflict checks
+	# (_tuple_conflict and friends cache negative lookups) must see
+	# freshly written type files.
+	_type_cache.erase(path.get_file().get_basename())
 
 
 func _ensure_user_dir() -> void:
