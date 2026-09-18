@@ -50,9 +50,9 @@ func _sem_kinds(src: String, path: String) -> Array:
 
 
 func _i_blocks(h) -> void:
-	var multi := "extends Node\n# @interface MyI\n# static var:myprop:int|bool\n# func:myfunc:void:a:int,b:int|bool;c:String,...rest:String\n# const:myconstA\n# const:myc:float\n# enum:MyEnum:m1,m2\n# signal:mysigA\n# signal:mysigB:x:int\n# @endinterface\nvar v: MyI\n"
+	var multi := "extends Node\n# @interface MyI\n# static var:myprop:int|bool\n# func:myfunc:void:a:int,b:int|bool;c:String,...rest:String\n# const:myconstA\n# const:myc:float\n# enum:MyEnum:m1,m2\n# signal:mysigA\n# signal:mysigB:x:int\n# @endinterface\n# @var v MyI\nvar v: Variant\n"
 	h.check(_clean(h.analyze_text(multi, "res://tests/tmp_if_b1.gd")), "multi-line full clean")
-	h.check(_clean(h.analyze_text("extends Node\n# @interface SI var:a:int func:f:void @endinterface\nvar v: SI\n", "res://tests/tmp_if_b2.gd")), "single-line clean")
+	h.check(_clean(h.analyze_text("extends Node\n# @interface SI var:a:int func:f:void @endinterface\n# @var v SI\nvar v: Variant\n", "res://tests/tmp_if_b2.gd")), "single-line clean")
 	h.check(_clean(h.analyze_text("extends Node\n# @interface EI\n# @endinterface\n", "res://tests/tmp_if_b3.gd")), "empty interface clean")
 	h.check(_has_err(h.analyze_text("extends Node\n# @interface I\n# var:a:int\nvar v := 1\n", "res://tests/tmp_if_b4.gd"), "interface_malformed", "missing @endinterface"), "missing endinterface errors")
 	h.check(_has_err(h.analyze_text("extends Node\n# @interface I\n# var:a:int\n# @endinterface\n# @interface J\n# var:b:int\n# @endinterface\n", "res://tests/tmp_if_b5.gd"), "interface_malformed", "missing @endinterface") == false, "two blocks clean")

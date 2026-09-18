@@ -3129,6 +3129,37 @@ func _iface_method_from_json(md: Dictionary, is_static: bool) -> Dictionary:
 	return {"kind": "func", "static": is_static, "name": str(md.get("name", "")), "returns": str(md.get("returns", "any")), "params": params}
 
 
+## Interface func member by name (any staticness: instance calls
+## stay lenient), {} when absent.
+func _iface_method(ispec: Dictionary, mname: String) -> Dictionary:
+	for m in (ispec.get("members", []) as Array):
+		if m is Dictionary and str((m as Dictionary).get("kind", "")) == "func" and str((m as Dictionary).get("name", "")) == mname:
+			return m
+	return {}
+
+
+## Interface var member by name ({types, any}), {} when absent.
+func _iface_field(ispec: Dictionary, mname: String) -> Dictionary:
+	for m in (ispec.get("members", []) as Array):
+		if m is Dictionary and str((m as Dictionary).get("kind", "")) == "var" and str((m as Dictionary).get("name", "")) == mname:
+			return {"types": ((m as Dictionary).get("types", []) as Array).duplicate(), "any": bool((m as Dictionary).get("any", false))}
+	return {}
+
+
+## Interface func returns as a list ([] = void/dynamic: the chain
+## rest skips, like engine void).
+static func _iface_returns(fentry: Dictionary) -> Array:
+	var r := str(fentry.get("returns", "any"))
+	if r == "" or r == "any" or r == "void":
+		return []
+	var out: Array = []
+	for part in r.split("|"):
+		var t := str(part).strip_edges()
+		if t != "":
+			out.append(t)
+	return out
+
+
 ## Finds an implemented member by name walking the class, its script
 ## parents and the terminal engine chain. Returns {"found", "sig",
 ## "static", "line"} or {"found": false}. `want` selects the table
@@ -4485,10 +4516,22 @@ func _is_alias_name(nm: String) -> bool:
 	return not info.is_empty() and str(info.get("kind", "")) == "alias"
 
 
-## True when a name is virtual (tuple/struct/alias): annotation-only
-## types that can never appear as a declared GDScript type.
+## True for an @interface name (resolved in-memory or same-kind
+## JSON on disk). Order-free like the tuple/struct twins.
+func _is_interface_name(nm: String) -> bool:
+	if nm == "":
+		return false
+	if _interfaces.has(nm):
+		return true
+	var info := _type_info(nm)
+	return not info.is_empty() and str(info.get("kind", "")) == "interface"
+
+
+## True when a name is virtual (tuple/struct/alias/interface):
+## annotation-only types that can never appear as a declared GDScript
+## type (vartypes, `->` arrows, base classes).
 func _is_virtual_name(nm: String) -> bool:
-	return _is_tuple_name(nm) or _is_struct_name(nm) or _is_alias_name(nm)
+	return _is_tuple_name(nm) or _is_struct_name(nm) or _is_alias_name(nm) or _is_interface_name(nm)
 
 
 ## Head type name of a vartype (before any brackets), "" when absent
@@ -4524,15 +4567,18 @@ func _mark_virtual_vartype(node: Dictionary, owner: String) -> void:
 
 
 ## True when an annotation member fits a declared reference: equal,
-## derived, or a nominal tuple/struct against its Array/Dictionary
-## root (tuples ARE fixed-shape arrays, structs ARE fixed-key
-## dictionaries, so they narrow those roots).
+## derived, a nominal tuple/struct against its Array/Dictionary root
+## (tuples ARE fixed-shape arrays, structs ARE fixed-key
+## dictionaries), or a known interface (contracts refine capabilities,
+## never the nominal type, so they always pass narrowing).
 func _nominal_compat(member: String, ref: String) -> bool:
 	if member == ref or _derives_from(member, ref):
 		return true
 	if ref == "Array" and _is_tuple_name(member):
 		return true
 	if ref == "Dictionary" and _is_struct_name(member):
+		return true
+	if _is_interface_name(member):
 		return true
 	return false
 
@@ -6913,6 +6959,8 @@ func _link_kind_of(tname: String, ctx: String) -> Dictionary:
 		return {"kind": "tuple", "name": tname}
 	if not _struct_def(tname).is_empty():
 		return {"kind": "struct", "name": tname}
+	if not _iface_spec(tname).is_empty():
+		return {"kind": "interface", "name": tname}
 	if _engine_info(tname).is_empty():
 		return {}
 	return {"kind": "engine", "name": tname}
@@ -7245,6 +7293,46 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 					else:
 						sure_miss = true
 				dnames.append(sname)
+				continue
+			if str(L.get("kind", "")) == "interface":
+				var iname := str(L.get("name", ""))
+				var ispec := _iface_spec(iname)
+				if ispec.is_empty():
+					silent = true
+					dnames.append(iname)
+					continue
+				if is_call:
+					var fentry := _iface_method(ispec, seg)
+					if fentry.is_empty():
+						dnames.append(iname)
+						continue
+					found = true
+					var rtypes := _iface_returns(fentry)
+					if rtypes.is_empty():
+						silent = true
+					else:
+						for cn in rtypes:
+							var cl := _link_kind_of(str(cn), next_ctx)
+							if cl.is_empty():
+								silent = true
+							else:
+								next_links.append(cl)
+				else:
+					var fld := _iface_field(ispec, seg)
+					if fld.is_empty():
+						dnames.append(iname)
+						continue
+					found = true
+					if bool(fld.get("any", false)) or ((fld.get("types", []) as Array).is_empty()):
+						silent = true
+					else:
+						for cn in (fld.get("types", []) as Array):
+							var cl := _link_kind_of(str(cn), next_ctx)
+							if cl.is_empty():
+								silent = true
+							else:
+								next_links.append(cl)
+				dnames.append(iname)
 				continue
 			if str(L.get("kind", "")) == "script":
 				var r := _script_seg(str(L.get("key", "")), seg, is_call, (L.get("args", []) as Array).duplicate())

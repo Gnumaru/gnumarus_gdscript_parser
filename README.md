@@ -819,23 +819,35 @@ varargs. Funcs with `:` but empty return/params are invalid (write
 ```gdscript
 extends Node
 
-# @interface Drawable
-# var:visible:bool
-# func:draw:void:canvas:CanvasItem
-# signal:redrawn
+# @interface IDamageable
+# func:apply_damage:void:dmg:int|float
 # @endinterface
-var d: Drawable     # OK: known name; assignments stay lenient
-                    # until @implements checks conformance
+# @var mynode Node|IDamageable
+var mynode: Node = get_node('some_path')
+mynode.apply_damage(1)   # OK: Node lacks it, IDamageable has it
+mynode.bogus()           # ERROR: nobody has 'bogus()'
 ```
 
+- Interfaces are virtual types (like tuples): `var v: Drawable` is
+  `virtual_vartype` — declare a general `Object` class (`Object`,
+  `Node`, ...) or `Variant`/untyped, and refine with `@var`. From
+  the analyzer's view the value is a union of the interface and the
+  real class used.
+- Member chains check every union arm: interface methods (any
+  staticness, lenient) and fields resolve; returns continue the
+  chain (`void`/dynamic skip the rest, like engine calls); absence
+  everywhere errors `missing_method`/`missing_member`. Interface
+  arms skip narrowing (contracts refine capabilities, never the
+  nominal type).
 - Definitions live top-level only; duplicates and clashes error
   (`interface_conflict`); bad shapes error (`interface_malformed`,
   `interface_unknown_type`). Written as `kind: "interface"` JSONs
   reusing class entry shapes (methods split static/instance, enum
   values and const values null). A `void` func return stays `"void"`
-  (not `any`), so `@implements` can require it. No use checking yet:
-  names resolve, assignments pass, member verification skips
-  interface types.
+  (not `any`), so `@implements` can require it.
+- Gaps (documented): no arity/argument checking on interface calls
+  (existence only, like engine calls); signals/consts/enums don't
+  resolve through unions yet.
 
 ### `@implements`
 
