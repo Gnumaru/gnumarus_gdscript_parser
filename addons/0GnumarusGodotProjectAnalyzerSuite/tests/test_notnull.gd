@@ -16,6 +16,7 @@ func run() -> Dictionary:
 	_n_guard(h)
 	_n_param(h)
 	_n_return(h)
+	_n_callsite(h)
 	return h.result()
 
 
@@ -79,5 +80,42 @@ func _n_param(h) -> void:
 
 func _n_return(h) -> void:
 	h.check(_clean(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc f() -> Node:\n\tpass\n", "res://tests/tmp_nn_r1.gd")), "return flag clean")
-	h.check(_clean(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc f() -> Node:\n\treturn null\n", "res://tests/tmp_nn_r2.gd")), "return null not yet enforced")
+	h.check(_has_err(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc f() -> Node:\n\treturn null\n", "res://tests/tmp_nn_r2.gd"), "return_notnull", "'f'"), "return null enforced")
+	h.check(_has_err(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc f() -> Node:\n\treturn null # trailing note\n", "res://tests/tmp_nn_r4.gd"), "return_notnull", "'f'"), "trailing comment keeps enforcement")
+	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc g() -> void:\n\t# @return Node notnull\n\tvar f = func() -> Node:\n\t\treturn null\n", "res://tests/tmp_nn_r5.gd"), "return_notnull", "lambda"), "lambda return null enforced")
+	h.check(_clean(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc f() -> Node:\n\treturn Node.new()\n", "res://tests/tmp_nn_r6.gd")), "value return clean")
 	h.check(_has_err(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc f() -> Node:\n\treturn\n", "res://tests/tmp_nn_r3.gd"), "return_value", "bare return"), "bare return still fires")
+	h.check(_clean(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc make() -> Node:\n\treturn Node.new()\n# @param p Node notnull\nfunc take(p: Node):\n\tpass\nfunc f() -> void:\n\ttake(make())\n", "res://tests/tmp_nn_r7.gd")), "call result trusted at call site")
+	h.check(_clean(h.analyze_text("extends RefCounted\n# @return Node notnull\nfunc make() -> Node:\n\treturn Node.new()\nfunc f() -> void:\n\tvar v = make()\n\tv.queue_free()\n", "res://tests/tmp_nn_r8.gd")), "call result trusted in flow")
+
+
+func _nn_kinds(res: Dictionary) -> Array:
+	var out: Array = []
+	for e in res.get("errors", []):
+		if str((e as Dictionary).get("kind", "")) == "param_notnull":
+			out.append(int((e as Dictionary).get("line", 0)))
+	return out
+
+
+func _n_callsite(h) -> void:
+	var decl := "extends RefCounted\n# @param p Node notnull\nfunc take(p: Node):\n\tpass\n"
+	h.check(_nn_kinds(h.analyze_text(decl + "func f() -> void:\n\ttake(null)\n", "res://tests/tmp_nn_s01.gd")) == [6], "bare null arg errors on its line")
+	var res: Dictionary = h.analyze_text(decl + "func f() -> void:\n\ttake(\n\t\tnull\n\t)\n", "res://tests/tmp_nn_s02.gd")
+	h.check(_nn_kinds(res) == [7], "multiline null arg pins arg line")
+	h.check(_has_err(res, "param_notnull", "of 'take()'"), "message names callee")
+	h.check(_clean(h.analyze_text("extends RefCounted\n# @var x Node notnull\nvar x: Node\n# @param p Node notnull\nfunc take(p: Node):\n\tpass\nfunc f() -> void:\n\ttake(x)\n", "res://tests/tmp_nn_s03.gd")), "notnull var arg clean")
+	h.check(_clean(h.analyze_text(decl + "func f(v: Variant) -> void:\n\ttake(v)\n", "res://tests/tmp_nn_s04.gd")), "maybe-null arg stays silent")
+	h.check(_clean(h.analyze_text(decl + "func f() -> void:\n\ttake(Node.new())\n", "res://tests/tmp_nn_s05.gd")), "fresh instance arg clean")
+	h.check(_clean(h.analyze_text("extends RefCounted\n# @param p Node\nfunc take(p: Node):\n\tpass\nfunc f() -> void:\n\ttake(null)\n", "res://tests/tmp_nn_s06.gd")), "plain param accepts null")
+	h.check(_nn_kinds(h.analyze_text("extends RefCounted\n# @param p Node notnull\nfunc take(p: Node):\n\tpass\nfunc f() -> void:\n\tself.take(null)\n", "res://tests/tmp_nn_s07.gd")) == [6], "self null arg errors")
+	h.check(_clean(h.analyze_text("extends RefCounted\n# @param p Node notnull\nfunc take(p: Node):\n\tpass\nfunc f() -> void:\n\tself.take(Node.new())\n", "res://tests/tmp_nn_s08.gd")), "self non-null arg clean")
+	h.check(_nn_kinds(h.analyze_text("extends RefCounted\nclass Box:\n\t# @param x Node notnull\n\tfunc store(x: Node) -> void:\n\t\tpass\nfunc f() -> void:\n\tvar b := Box.new()\n\tb.store(null)\n", "res://tests/tmp_nn_s09.gd")) == [8], "instance null arg errors")
+	h.check(_clean(h.analyze_text("extends RefCounted\nclass Box:\n\t# @param x Node notnull\n\tfunc store(x: Node) -> void:\n\t\tpass\nfunc f() -> void:\n\tvar b := Box.new()\n\tb.store(Node.new())\n", "res://tests/tmp_nn_s10.gd")), "instance non-null arg clean")
+	h.check(_nn_kinds(h.analyze_text("extends RefCounted\n# @param a int\n# @param p Node notnull\nfunc take2(a: int, p: Node):\n\tpass\nfunc f() -> void:\n\ttake2(1, null)\n", "res://tests/tmp_nn_s11.gd")) == [7], "positional mapping errors")
+	h.check(_nn_kinds(h.analyze_text("extends RefCounted\nfunc f(take: int) -> void:\n\ttake(null)\n", "res://tests/tmp_nn_s12.gd")).is_empty(), "shadowing param suppresses")
+	h.check(_nn_kinds(h.analyze_text("extends RefCounted\nclass Box2:\n\t# @param x Node notnull\n\tstatic func put(x: Node) -> void:\n\t\tpass\nfunc f() -> void:\n\tBox2.put(null)\n", "res://tests/tmp_nn_s13.gd")) == [7], "static null arg errors")
+	var gen := "extends RefCounted\n# @template TG\n# @param x TG\n# @param y Node notnull\nfunc g(x, y):\n\tpass\nfunc f() -> void:\n\tg(1, null)\n"
+	h.check(_nn_kinds(h.analyze_text(gen, "res://tests/tmp_nn_s14.gd")) == [8], "generic complement fires once")
+	var lib := "class_name TmpNullCallLib\nextends RefCounted\n# @param m Node notnull\nfunc take2(m: Node):\n\tpass\n"
+	h.analyze_text(lib, "res://tests/tmp_null_call_lib.gd")
+	h.check(_nn_kinds(h.analyze_text("extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is TmpNullCallLib:\n\t\tv.take2(null)\n", "res://tests/tmp_null_call_consumer.gd")).is_empty(), "cross-script call stays silent")

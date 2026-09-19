@@ -52,7 +52,7 @@ var flag_ok := true # OK: bool matches the alias
 
 
 # @var num_bad show_number
-var num_bad := "a" # ERROR: neither int nor float is String
+var num_bad := "a" # ERROR on the tag above: neither int nor float is String
 
 
 # @template ShowTNum of int|float
@@ -163,3 +163,34 @@ class ShowBadImpl:
 
 # @alias show_broken int|float
 var filler := 0 # ERROR on the tag above: missing @endalias
+
+
+# @alias ShowMaybeNode Node|null @endalias
+# @var nn_node Node notnull
+var nn_node: Node
+
+
+func nn_demo() -> void:
+	nn_node = null # ERROR: cannot assign null to notnull
+
+
+# @param p Node notnull
+func need_node(p: Node = null): # ERROR on the tag above: null default
+	pass
+
+
+func call_demo() -> void:
+	need_node(null) # ERROR: null argument
+	need_node(Node.new()) # OK
+
+
+# @return Node notnull
+func make_node() -> Node:
+	return null # ERROR: cannot return null
+
+
+func guard_demo(n: Node) -> void:
+	if n == null:
+		n.queue_free() # ERROR: provably null
+	if n != null:
+		n.queue_free() # OK: proven non-null

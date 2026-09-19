@@ -1,10 +1,13 @@
-# gnumarus_gdscript_parser
+# Gnumaru's Godot Project Analyser Suite
 
-A GDScript parser made in GDScript: tokenizer, syntactic parser, semantic
-analyzer and comment-annotation analyzer for Godot 4.x GDScript files.
+A suite of tools written in gdscript for making static analysis of godot 4 projects.
+Can be run from the CLI without oppening the editor, but need a godot executable anyways
+for headlessly running the gdscripts. Generate artifact files with analysis information
+and found errors. Also implements and editor addon to show errors in real time.
 
 All classes are `RefCounted` and expose `class_name`, so they are usable
-from any script in the project without preloads.
+from any script in the project without preloads. Declared class names are verbose so almost
+guaranteed to not clash with your own class names.
 
 ## Pipeline
 
@@ -798,12 +801,13 @@ accepts works, including other aliases:
 extends Node
 
 # @alias number int|float @endalias
+# @alias whole int @endalias
 # @alias pairs
 # tuple[int, String]
 # @endalias
 
-# @var x number
-var x := 1                 # OK: int is in the alias
+# @var x whole
+var x := 1                 # OK: exact match
 
 # @var y number
 var y := "a"               # ERROR: neither int nor float is String
@@ -1071,14 +1075,22 @@ on the stamp, rejects nullable types (`Node|null`, bare `null` or an
 alias expanding to one) as malformed, errors `= null` initializers,
 `null` defaults and `= null` reassignments (`var_notnull`,
 `param_notnull`), and is set by the non-null side of `==`/`!=` guards
-(a plain redefinition without the marker clears it). `@return`
-stores the marker for the next phase but does not enforce it yet.
+(a plain redefinition without the marker clears it). Call sites are
+checked too: passing a `null` literal to a notnull parameter errors
+(`param_notnull`) for bare, `self.` and same-file instance/static
+calls, one error per offending argument at its own line; maybe-null
+arguments stay silent, template-typed parameters belong to generic
+machinery (no doubles), and cross-script calls stay silent (no
+signature data). `@return notnull` errors `return null`
+(`return_notnull`, lambdas included); call results are trusted
+downstream — passing them to notnull parameters or using them needs
+no guard.
 
 Gaps (documented): `while`/`match` patterns don't narrow null;
 subscripts on null (`x[0]`) skip; `const X = null` and `var x := null`
-are Godot parse errors, so inference never sees them; call-site
-checking against notnull parameters and `return null` enforcement
-arrive with the next phase.
+are Godot parse errors, so inference never sees them; `super` calls
+and lambdas holding notnull signatures stay silent; parenthesized
+`return (null)` skips the check.
 
 ## Analyzer data layout
 

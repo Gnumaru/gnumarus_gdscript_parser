@@ -24,6 +24,7 @@ func run() -> Dictionary:
 	_f_misplaced_still_errors(h)
 	_f_json_flags(h)
 	_f_cross_script(h)
+	_f_no_local_leak(h)
 	_f_fixture_clean(h)
 	return h.result()
 
@@ -183,6 +184,23 @@ func _f_cross_script(h) -> void:
 	# A local shadowing the class name keeps today's silence.
 	var res5: Dictionary = h.analyze_text("extends RefCounted\nfunc g(TmpPrivCrossLib) -> void:\n\tTmpPrivCrossLib._hidden()\n", "res://tests/tmp_priv_cross_shadow.gd")
 	h.check(h.priv_errors(res5).is_empty(), "shadowing param suppresses cross check")
+
+
+func _f_no_local_leak(h) -> void:
+	# Function locals must not pollute member tables: the JSON roster
+	# holds members only, and a shadowing local must not clobber its
+	# member record (pre-fix it wiped deprecation flags).
+	var src := "extends Node\n# @private\nvar _cache := 1\nfunc f() -> void:\n\tvar tmp_local_xyz := 2\n\tprint(_cache)\n\tprint(tmp_local_xyz)\n"
+	var res: Dictionary = h.analyze_text(src, "res://tests/tmp_fam_noleak.gd")
+	h.check(h.priv_errors(res).is_empty(), "shadowing local use allowed")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/tests_tmp_fam_noleak.json")
+	var fields: Array = []
+	for f in info.get("fields", []):
+		fields.append(str((f as Dictionary).get("name", "")))
+	h.check(fields == ["_cache"], "json roster excludes locals")
+	var src2 := "extends Node\nclass Outer:\n\t# @deprecated Use other.\n\tvar _v := 1\n\tfunc f() -> void:\n\t\tvar _v := 2\n\t\tprint(_v)\nclass Sib:\n\tfunc g() -> void:\n\t\tprint(Outer._v)\n"
+	var res2: Dictionary = h.analyze_text(src2, "res://tests/tmp_fam_nowipe.gd")
+	h.check(h.has_warn(res2, "Outer._v"), "sibling use still warns after shadowing local")
 
 
 func _f_fixture_clean(h) -> void:

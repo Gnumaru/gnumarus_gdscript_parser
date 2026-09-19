@@ -63,3 +63,13 @@ func interface_demo() -> void:
 	# @var mynode ShowDrawable
 	mynode.ping() # OK: ShowDrawable provides ping
 	mynode.bogus() # ERROR: nobody provides bogus
+
+
+func null_demo() -> void:
+	var other: Variant = GnumarusGodotProjectAnalyzerSuiteAnnotationsShowcase2.new()
+	if other == null:
+		other.queue_free() # ERROR: provably null
+	# @var okay ShowMaybeNode
+	var okay: Node # OK: both arms fit Node
+	# @var bad ShowMaybeNode
+	var bad := 1 # ERROR on the tag above: neither arm fits int

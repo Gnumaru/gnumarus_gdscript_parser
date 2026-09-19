@@ -164,6 +164,7 @@ const ERR_MISSING_MEMBER := "missing_member"
 const ERR_NULL_ACCESS := "null_access"
 const ERR_VAR_NOTNULL := "var_notnull"
 const ERR_PARAM_NOTNULL := "param_notnull"
+const ERR_RETURN_NOTNULL := "return_notnull"
 
 ## Signal methods accepted on signal-typed bases (mirrors the semantic
 ## parser's SIGNAL_METHODS).
@@ -5167,8 +5168,9 @@ func _fn_display(fn_node: Dictionary) -> String:
 
 
 ## Runs the @return checks for one function/lambda node: "->"
-## compatibility first, then value/bare return presence. No-op without
-## a recorded return_ann. Takes Variant: statement values may be null.
+## compatibility first, then value/bare/null return presence. No-op
+## without a recorded return_ann. Takes Variant: statement values may
+## be null.
 func _check_return_ann(fn_node: Variant, owner: String) -> void:
 	if not (fn_node is Dictionary) or not (fn_node as Dictionary).has("return_ann"):
 		return
@@ -5206,9 +5208,12 @@ func _check_return_ann(fn_node: Variant, owner: String) -> void:
 				_error(ERR_RETURN_VALUE, "cannot return a value from void function " + disp, int((r as Dictionary).get("line", 0)), int((r as Dictionary).get("column", 0)), owner)
 	else:
 		var expect := str(ann.get("raw", ""))
+		var notnull_ret := bool(ann.get("notnull", false))
 		for r in rets:
 			if (r as Dictionary).get("value", null) == null:
 				_error(ERR_RETURN_VALUE, "bare return in non-void function " + disp + " (expects '" + expect + "')", int((r as Dictionary).get("line", 0)), int((r as Dictionary).get("column", 0)), owner)
+			elif notnull_ret and _value_is_bare_null((r as Dictionary).get("value", null)):
+				_error(ERR_RETURN_NOTNULL, "cannot return null from notnull function " + disp, int((r as Dictionary).get("line", 0)), int((r as Dictionary).get("column", 0)), owner)
 
 
 # ------------------------------------------------------- collect passes
@@ -5257,7 +5262,14 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		_scan_children(d.get("children", []), owner, true)
 		return
 	if t in DECL_TYPES:
-		_mark_decl(d, owner)
+		# Function-local vars/consts are not members: scopes own them
+		# (bindings are pre-collected, so member fallback never fires
+		# for them). Recording them here leaked locals into member
+		# tables, user JSONs and cross-script lookups, and a shadowing
+		# local even clobbered its member record. Other decl kinds
+		# (local classes included) keep today's behavior.
+		if member_pos or (t != "VAR_DECL" and t != "CONST_DECL"):
+			_mark_decl(d, owner)
 		if member_pos:
 			_mark_private(d, owner)
 		elif _has_any_private_tag(d):
@@ -5661,7 +5673,7 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_mark_vartype_on((child as Dictionary).get("return_type", null), child, full)
 					_mark_virtual_vartype(child, full)
 					_mark_param_carrier(child, child, full)
-					_scan((child as Dictionary).get("body", null), full)
+					_scan((child as Dictionary).get("body", null), full, false)
 				if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 					_mark_var_decl(child, full)
 					_mark_vartype(child, full)
@@ -7420,6 +7432,94 @@ func _class_prebindings(key: String, link_args: Array) -> Dictionary:
 	return out
 
 
+## True when a FUNC_DECL has any notnull parameter.
+static func _func_has_notnull(node: Dictionary) -> bool:
+	for p in (node as Dictionary).get("params", []):
+		if p is Dictionary:
+			var ann: Variant = (p as Dictionary).get("param_ann", {})
+			if ann is Dictionary and bool((ann as Dictionary).get("notnull", false)):
+				return true
+	return false
+
+
+## First null-literal violation of a call against one callee: {} when
+## every provided notnull parameter gets a non-null argument (missing
+## args rely on defaults, already def-checked; extra args skipped).
+## Maybe-null arguments stay silent (lenient); template machinery
+## owns nothing here (it never reads notnull flags, so no doubles).
+func _notnull_call_violation(node: Dictionary, slices: Array) -> Dictionary:
+	var params: Array = (node as Dictionary).get("params", [])
+	var n := mini(params.size(), slices.size())
+	for i in range(n):
+		var p: Variant = params[i]
+		if not (p is Dictionary):
+			continue
+		var ann: Variant = (p as Dictionary).get("param_ann", {})
+		if not (ann is Dictionary) or not bool((ann as Dictionary).get("notnull", false)):
+			continue
+		if i >= slices.size() or not (slices[i] is Array):
+			continue
+		var tt := _trim_trivia(slices[i])
+		if tt.size() == 1 and (tt[0] is Dictionary) and str((tt[0] as Dictionary).get("type", "")) == "NULL":
+			return {"param": str((p as Dictionary).get("name", "")), "line": int((tt[0] as Dictionary).get("line", 0)), "col": int((tt[0] as Dictionary).get("column", 0))}
+	return {}
+
+
+## Errors one callee's first null-literal violation, if any.
+func _error_notnull_call(node: Dictionary, seg: String, slices: Array, owner: String) -> void:
+	var v := _notnull_call_violation(node, slices)
+	if v.is_empty():
+		return
+	_error(ERR_PARAM_NOTNULL, "cannot pass null to notnull parameter '" + str(v.get("param", "")) + "' of '" + seg + "()'", int(v.get("line", 0)), int(v.get("col", 0)), owner)
+
+
+## Bare-call site check (mirrors _verify_bare_generic resolution:
+## member functions outward; shadowed names bail like there).
+func _check_notnull_bare(tokens: Array, i: int, open_idx: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> void:
+	var base := str((tokens[i] as Dictionary).get("value", ""))
+	if base == "" or base == "_":
+		return
+	if (overlay as Dictionary).has(base):
+		return
+	if str(_scope_kind(scope, base)) != "":
+		return
+	if (env as Dictionary).has(base):
+		return
+	var node := _script_func_node(owner, base)
+	if node.is_empty() and owner != "":
+		node = _script_func_node("", base)
+	if node.is_empty() or not _func_has_notnull(node):
+		return
+	_error_notnull_call(node, base, _split_arg_slices(tokens, open_idx), owner)
+
+
+## Chain call-site check across one segment's script links (self and
+## same-file instances). Union dispatch is lenient: errors only when
+## every resolving callee flags the position. Engine, dynamic and
+## cross-script links (no signature data) stay silent, as do signals
+## (handled before this point).
+func _check_notnull_links(links: Array, seg: String, tokens: Array, j: int, owner: String) -> void:
+	var slices := _split_arg_slices(tokens, j + 1)
+	if slices.is_empty():
+		return
+	var saw := false
+	var clean := false
+	var first := {}
+	for L in links:
+		if not (L is Dictionary) or str(L.get("kind", "")) != "script":
+			continue
+		var node := _script_func_node(str(L.get("key", "")), seg)
+		if node.is_empty() or not _func_has_notnull(node):
+			continue
+		saw = true
+		var v := _notnull_call_violation(node, slices)
+		if v.is_empty():
+			clean = true
+			break
+		if first.is_empty():
+			first = v
+	if saw and not clean and not first.is_empty():
+		_error(ERR_PARAM_NOTNULL, "cannot pass null to notnull parameter '" + str(first.get("param", "")) + "' of '" + seg + "()'", int(first.get("line", 0)), int(first.get("col", 0)), owner)
 ## Generic instantiation for a bare call `f(...)`: only when the name
 ## cannot be a value (no overlay/scope/env/member binding), resolving
 ## member functions outward (owner, then root). Returns the index past
@@ -7777,6 +7877,8 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 				engine_names.append(ename)
 				dnames.append(ename)
 		if found:
+			if is_call:
+				_check_notnull_links(links, seg, tokens, j, owner)
 			if not engine_names.is_empty():
 				var extra := _verify_seg(engine_names, seg, is_call, static_ctx, tokens[j], owner, true)
 				var vt := str(extra.get("vtype", ""))
@@ -7900,6 +8002,7 @@ func _verify_tokens(tokens: Array, scope: Dictionary, owner: String, fn: Variant
 				i = _verify_chain(tokens, i, scope, owner, fn, env, overlay)
 				continue
 			if nxt_ty == "LPAREN" and nxt_v == "(":
+				_check_notnull_bare(tokens, i, i + 1, scope, fn, env, overlay, owner)
 				var bj := _verify_bare_generic(tokens, i, i + 1, scope, fn, env, overlay, owner)
 				if bj >= 0:
 					i = bj
