@@ -24,6 +24,8 @@ func run() -> Dictionary:
 	_nb_boundary(h)
 	_nb_istest(h)
 	_nb_frontier(h)
+	_nb_taintx(h)
+	_nb_elif(h)
 	return h.result()
 
 
@@ -287,3 +289,59 @@ func _nb_frontier(h) -> void:
 	h.check(h.warn_texts(h.analyze_text(plainres, "res://tests/tmp_nb_g7.gd", "distrust")).is_empty(), "plain call-result silent")
 	var xcallres := "extends RefCounted\n# @return Node nullable\nfunc make() -> Node:\n\treturn Node.new()\nfunc g() -> void:\n\tTmpNullP3Lib.plain(make())\n"
 	h.check(h.has_warn(h.analyze_text(xcallres, "res://tests/tmp_nb_g8.gd", "distrust"), "possible null argument 'make()'"), "cross call-result warns")
+
+
+func _nb_taintx(h) -> void:
+	var inst := "extends RefCounted\nclass TBox:\n\t# @return Node nullable\n\tfunc make() -> Node:\n\t\treturn null\nfunc g(b: TBox) -> void:\n\tvar r = b.make()\n\tr.queue_free()\n"
+	var ri: Dictionary = h.analyze_text(inst, "res://tests/tmp_nb_x01.gd", "distrust")
+	h.check(_clean(ri) and h.has_warn(ri, "(nullable 'Node')"), "member instance taint warns")
+	var stat := "extends RefCounted\nclass SBox:\n\t# @return Node nullable\n\tstatic func make() -> Node:\n\t\treturn null\nfunc g() -> void:\n\tvar r = SBox.make()\n\tr.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(stat, "res://tests/tmp_nb_x02.gd", "distrust"), "(nullable 'Node')"), "static taint warns")
+	var plain := "extends RefCounted\nclass PBox:\n\tfunc make() -> Node:\n\t\treturn Node.new()\nfunc g(b: PBox) -> void:\n\tif b is PBox:\n\t\tvar r = b.make()\n\t\tr.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(plain, "res://tests/tmp_nb_x03.gd", "distrust")).is_empty(), "plain member clean")
+	var sup := "extends RefCounted\nclass Base:\n\t# @return Node nullable\n\tfunc make() -> Node:\n\t\treturn null\nclass Kid extends Base:\n\tfunc f() -> void:\n\t\tvar r = super.make()\n\t\tr.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(sup, "res://tests/tmp_nb_x04.gd", "distrust"), "(nullable 'Node')"), "super taint warns")
+	var lamb := "extends RefCounted\nfunc g() -> void:\n\t# @return Node nullable\n\tvar cb = func() -> Node:\n\t\treturn null\n\tvar r = cb.call()\n\tr.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(lamb, "res://tests/tmp_nb_x05.gd", "distrust"), "(nullable 'Node')"), "lambda call taint warns")
+	var lamb_plain := "extends RefCounted\nfunc g() -> void:\n\tvar cb = func() -> Node:\n\t\treturn Node.new()\n\tvar r = cb.call()\n\tif r is Node:\n\t\tr.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(lamb_plain, "res://tests/tmp_nb_x06.gd", "distrust")).is_empty(), "plain lambda clean")
+	var lib := "class_name TmpNullXRet\nextends RefCounted\n# @return Node nullable\nstatic func smake() -> Node:\n\treturn null\n# @return Node nullable\nfunc imake() -> Node:\n\treturn null\nfunc plain() -> Node:\n\treturn Node.new()\n"
+	h.analyze_text(lib, "res://tests/tmp_null_xret.gd")
+	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/TmpNullXRet.json")
+	var smake_entry := {}
+	for list_key in ["instance_methods", "static_methods"]:
+		for m in info.get(list_key, []):
+			if str((m as Dictionary).get("name", "")) == "smake":
+				smake_entry = m
+	h.check((smake_entry as Dictionary).get("return_types", []) == ["Node"], "json return heads")
+	h.check(bool((smake_entry as Dictionary).get("nullable_return", false)), "json nullable return flag")
+	var xs := "extends RefCounted\nfunc g() -> void:\n\tvar r = TmpNullXRet.smake()\n\tr.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(xs, "res://tests/tmp_nb_x07.gd", "distrust"), "(nullable 'Node')"), "cross static taint warns")
+	var xi := "extends RefCounted\nfunc g(b: TmpNullXRet) -> void:\n\tif b is TmpNullXRet:\n\t\tvar r = b.imake()\n\t\tr.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(xi, "res://tests/tmp_nb_x08.gd", "distrust"), "(nullable 'Node')"), "cross instance taint warns")
+	var xp := "extends RefCounted\nfunc g(b: TmpNullXRet) -> void:\n\tif b is TmpNullXRet:\n\t\tvar r = b.plain()\n\t\tr.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(xp, "res://tests/tmp_nb_x09.gd", "distrust")).is_empty(), "cross plain clean")
+	var xsl := "extends RefCounted\n# @param x Node notnull\nfunc need(x: Node) -> void:\n\tpass\nfunc g() -> void:\n\tneed(TmpNullXRet.smake())\n"
+	h.check(h.has_warn(h.analyze_text(xsl, "res://tests/tmp_nb_x10.gd", "distrust"), "possible null argument 'TmpNullXRet.smake()'"), "cross static slice warns")
+	var trust := "extends RefCounted\nclass TBox2:\n\t# @return Node nullable\n\tfunc make() -> Node:\n\t\treturn null\nfunc g(b: TBox2) -> void:\n\tif b is TBox2:\n\t\tvar r = b.make()\n\t\tr.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(trust, "res://tests/tmp_nb_x11.gd"), "(nullable 'Node')"), "member taint warns in trust too")
+
+
+func _nb_elif(h) -> void:
+	var holds := "extends RefCounted\nfunc f(n: Node) -> void:\n\tif n == null:\n\t\tpass\n\telif n != null:\n\t\tn.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(holds, "res://tests/tmp_nb_e01.gd", "distrust")).is_empty(), "elif holds narrows")
+	var chain := "extends RefCounted\nfunc f(n: Node) -> void:\n\tif n == null:\n\t\tpass\n\telif n == null:\n\t\tpass\n\telse:\n\t\tn.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(chain, "res://tests/tmp_nb_e02.gd", "distrust")).is_empty(), "elif chain else narrows")
+	var miss := "extends RefCounted\nfunc f(n: Node, c: bool, d: bool) -> void:\n\tif c:\n\t\tpass\n\telif d:\n\t\tn.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(miss, "res://tests/tmp_nb_e03.gd", "distrust"), "implicitly nullable"), "unrelated elif still warns")
+	var err := "extends RefCounted\nfunc f(n: Node, c: bool) -> void:\n\tif c:\n\t\tpass\n\telif n == null:\n\t\tn.queue_free()\n"
+	h.check(_has_err(h.analyze_text(err, "res://tests/tmp_nb_e04.gd", "distrust"), "null_access", "on null"), "elif null branch errors")
+	var ischain := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is Node:\n\t\tpass\n\telif v is Control:\n\t\tv.queue_free()\n"
+	var rc: Dictionary = h.analyze_text(ischain, "res://tests/tmp_nb_e05.gd", "distrust")
+	h.check(_clean(rc) and (rc.get("warnings", []) as Array).is_empty(), "elif is holds non-null")
+	var allret := "extends RefCounted\nfunc f(n: Node, c: bool) -> void:\n\tif n != null:\n\t\tpass\n\telif c:\n\t\treturn\n\telse:\n\t\treturn\n\tn.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(allret, "res://tests/tmp_nb_e06.gd", "distrust")).is_empty(), "all-return elif chain marks")
+	var fall := "extends RefCounted\nfunc f(n: Node, c: bool) -> void:\n\tif n != null:\n\t\tpass\n\telif c:\n\t\tpass\n\telse:\n\t\treturn\n\tn.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(fall, "res://tests/tmp_nb_e07.gd", "distrust"), "implicitly nullable"), "falling elif keeps warning")
+	var ectrue := "extends RefCounted\nfunc f(n: Node, c: bool) -> void:\n\tif n == null:\n\t\treturn\n\telif c:\n\t\tpass\n\tn.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(ectrue, "res://tests/tmp_nb_e08.gd", "distrust")).is_empty(), "eq-true chain marks despite elif")

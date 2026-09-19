@@ -325,8 +325,10 @@ func myfunc():
   known returns never error. `new` is always allowed; signals accept
   their five methods.
 - `if typeof(x) == TYPE_Y` narrows the `then` branch, `!=` narrows
-  the `else` (a leading `not`/`!` flips); `elif` restarts from the
-  entry types. `@var`/`@param` facts apply in order inside the flow.
+  the `else` (a leading `not`/`!` flips); every `elif` narrows from
+  the accumulated previous-failed state, never from entry (conditions
+  verify in the state where they run). `@var`/`@param` facts apply in
+  order inside the flow.
 - `x is Y` / `x is not Y` narrow the same way (single known type
   names). `is_instance_of(x, T)` accepts a type name, a
   `Variant.Type` constant (`TYPE_OBJECT`,
@@ -1069,8 +1071,9 @@ same way, and a sole `null` `match` pattern narrows its branch.
 Guard clauses narrow what follows: when an `if` null-check's null
 side ends in `return` (`if x == null: return`, `if x != null: ...
 else: return`, `if not x: return` on Objects), the rest of the block
-runs non-null. (`elif` restarts from entry types like every other
-guard.)
+runs non-null. Every `elif` branch runs narrowed from the
+accumulated previous-failed state (`elif x != null:` holds non-null
+even when the `if` tested something else).
 Anything provably null
 errors `null_access` on member calls and reads (`cannot call method
 'm()' on null`); bare uses like `print(x)` stay legal. Plain
@@ -1144,16 +1147,23 @@ migration path: enable distrust globally, tag legacy files `trust`
 until they are converted. Each `user/*.json` records its file's
 effective policy (`"null_policy"`) for cross-script checks.
 
-`@return T nullable` taints call results: assigning one (`var r =
-make()`, bare and `self.` calls, zero-arg included) watches `r`
-downstream, and undeclared targets resolve with the declared return
-heads; explicit-null returns (`Node|null`) resolve the same way
-through their null arm. `"nullable_params"` in `user/*.json` is
+`@return T nullable` taints call results: assigning one watches the
+target downstream, and undeclared targets resolve with the declared
+return heads. Every callee shape resolves: bare and `self.` calls
+(zero-arg included), lambda-held callees (both `cb()` and the
+Godot-valid `cb.call()`, via the lambda's own `@return`), same-file
+member calls (instance receivers — params, locals, members,
+`is`-narrowed values with ANY-arm-maybeness — static class refs and
+`super`), and cross-file static AND instance calls through the
+callee's `user/*.json` signature (`return_types`/`nullable_return`
+maintained per method, stale files without the keys read as
+non-nullable). Explicit-null returns (`Node|null`) resolve the same
+way through their null arm. `"nullable_params"` in `user/*.json` is
 consent data for boundary checks: a distrust caller passing a
 declared-maybe argument (null literal, `nullable` stamp/taint, an
-explicit null arm, or a bare/`self` call to a nullable-returning
-function — never a merely policy-watched one) to an IMPLICIT
-parameter of a trust callee warns at the argument
+explicit null arm, or a call to a nullable-returning function in any
+of the shapes above — never a merely policy-watched one) to an
+IMPLICIT parameter of a trust callee warns at the argument
 (`possible null argument 'x' for parameter 'a' of 'plain()'
 (implicitly nullable)`). Silent when the caller is lenient, when the
 callee file is distrust (it warns at its own use sites — no
@@ -1177,10 +1187,12 @@ and `if v is not Node: return` guard clauses work the same way.
 proves nothing (`null is Variant` is true) and NIL forms belong to
 the null rules above.
 
-Gaps (documented): `elif` restarts from entry types like every other
-guard; guard clauses need a trailing `return` (`break`/`continue`
+Gaps (documented): guard clauses need a trailing `return`
+(`break`/`continue`
 and nested returns stay out, and the proven side returning keeps the
-warning); subscripts on null (`x[0]`)
+warning); with `elif` branches, every branch running in a
+possibly-null primary-false state must also return; subscripts on
+null (`x[0]`)
 skip;
 `const X = null` and
 `var x := null`
@@ -1193,8 +1205,8 @@ already warns at its own uses — plus engine and dynamic callees);
 explicit `: Variant` member use errors
 `missing_method` by pre-existing engine-link design (both policies
 alike); direct call chains (`make().foo()`), member taint targets
-(`self.x = make()`), member-call results as arguments and
-lambda-held callees stay silent for return-taint purposes.
+(`self.x = make()`) and engine/dynamic receivers stay silent for
+return-taint purposes.
 
 ## Analyzer data layout
 
@@ -1212,7 +1224,8 @@ it never pollutes the project tree):
   `Outer.Inner.json`, …). The analyzer adds `"private"` /
   `"deprecated"` flags on members plus per-file `analysis_errors` /
   `analysis_warnings`, maintains per-method `"param_names"` /
-  `"notnull_params"` / `"nullable_params"` signatures plus the
+  `"notnull_params"` / `"nullable_params"` / `"return_types"` /
+  `"nullable_return"` signatures plus the
   file-level `"null_policy"` for cross-script call-site checks,
   and merges newly declared members into the
   roster (existing entries keep their data; nothing is ever removed,
@@ -1277,10 +1290,11 @@ green. `GODOT_BIN` overrides the engine path.
   `test_nullable.gd` (trailing `nullable`: parse, `notnull` /
   never-nullable contradiction, trust opt-in warnings, `@return
   nullable` taint, distrust policy, guard clauses,
-  `nullable_params` JSON, ProjectSetting, `# @nullable_policy`
-  file tags with precedence, cross-script boundary consent, `is`
-  type-test narrowing, and the same-file/`super`/call-result
-  frontier).
+  `nullable_params` / `return_types` JSON, ProjectSetting,
+  `# @nullable_policy` file tags with precedence, cross-script
+  boundary consent, `is` type-test narrowing, the same-file/`super`/
+  call-result frontier, member/lambda/cross-file taint shapes, and
+  `elif` narrowing).
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits

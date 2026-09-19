@@ -111,6 +111,7 @@ func _r_misplaced(h) -> void:
 	h.check(_kinds(h.analyze_text("extends Node\n# @return int\nsignal s\n", "res://tests/tmp_ret_p2.gd")).has("return_misplaced"), "@return on signal misplaced")
 	h.check(_kinds(h.analyze_text("extends Node\nfunc f(\n\t\t# @return int\n\t\ta: int\n\t) -> void:\n\tpass\n", "res://tests/tmp_ret_p3.gd")).has("return_misplaced"), "@return on param misplaced")
 	h.check(_kinds(h.analyze_text("# @return int\nclass_name Foo\n", "res://tests/tmp_ret_p4.gd")).has("return_misplaced"), "@return at root misplaced")
+	h.check((h.analyze_text("extends RefCounted\nclass Inner:\n\t# @return int\n\tfunc make() -> int:\n\t\treturn 1\n", "res://tests/tmp_ret_p5.gd").get("errors", []) as Array).is_empty(), "@return on inner method clean (no double mark)")
 
 
 func _r_lambdas(h) -> void:

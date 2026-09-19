@@ -5867,7 +5867,7 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_implements_tag(child):
 					_error(ERR_IMPLEMENTS_MISPLACED, "@implements can only precede a class declaration or sit at the script root", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
-				elif _has_any_return_tag(child):
+				elif str((child as Dictionary).get("type", "")) != "FUNC_DECL" and _has_any_return_tag(child):
 					if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 						_mark_return_stmt(child, (child as Dictionary).get("value", null), full)
 					else:
@@ -8126,11 +8126,12 @@ func _check_cross_notnull_maybe(tname: String, tokens: Array, j: int, scope: Dic
 
 ## Declared-maybe argument behind one call slice: {"name", "tok"} for
 ## a bare null literal, a single identifier resolving to a watched
-## slot (nullable stamp/taint or an explicit null arm), or a bare /
-## self call to a nullable (or explicit-null-returning) function,
+## slot (nullable stamp/taint or an explicit null arm), or a call to
+## a nullable (or explicit-null-returning) function — bare, self,
+## lambda-held, same-file member or cross-file static shapes,
 ## {} otherwise. Policy-watched (implicit, distrust-default)
-## arguments stay out: unproven is not maybe. Member-call results
-## stay out (their taint is not tracked). Pure (never warns itself).
+## arguments stay out: unproven is not maybe. Pure (never warns
+## itself).
 func _slice_maybe_arg(slice: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> Dictionary:
 	var tt := _trim_trivia(slice)
 	if tt.is_empty() or not (tt[0] is Dictionary):
@@ -8149,17 +8150,25 @@ func _slice_maybe_arg(slice: Array, scope: Dictionary, fn: Variant, env: Diction
 			return {}
 		return {"name": aname, "tok": t}
 	var node := _taint_rhs_node(tt, scope, fn, env, owner)
-	if node.is_empty():
-		return {}
-	if not _func_returns_nullable(node) and not _return_ann_has_null(node):
+	if not node.is_empty():
+		if not _func_returns_nullable(node) and not _return_ann_has_null(node):
+			return {}
+		return {"name": _slice_call_display(tt), "tok": t}
+	var jsig := _taint_json_sig(tt, scope, fn, env, owner)
+	if jsig.is_empty() or not bool(jsig.get("nullable", false)):
 		return {}
 	return {"name": _slice_call_display(tt), "tok": t}
 
 
-## Short display for a bare/self call slice ("make()", "self.make()").
+## Short display for a call slice ("make()", "self.make()",
+## "super.make()", "lib.make()", "cb.call()").
 static func _slice_call_display(tt: Array) -> String:
-	if (tt[0] as Dictionary).get("type", "") == "KEYWORD" and tt.size() > 2 and (tt[2] is Dictionary):
-		return "self." + str((tt[2] as Dictionary).get("value", "")) + "()"
+	if tt.is_empty() or not (tt[0] is Dictionary):
+		return "call()"
+	if str((tt[0] as Dictionary).get("type", "")) == "KEYWORD" and tt.size() > 2 and (tt[2] is Dictionary):
+		return str((tt[0] as Dictionary).get("value", "")) + "." + str((tt[2] as Dictionary).get("value", "")) + "()"
+	if tt.size() > 2 and (tt[1] is Dictionary) and str((tt[1] as Dictionary).get("type", "")) == "DOT" and (tt[2] is Dictionary):
+		return str((tt[0] as Dictionary).get("value", "")) + "." + str((tt[2] as Dictionary).get("value", "")) + "()"
 	return str((tt[0] as Dictionary).get("value", "")) + "()"
 
 
@@ -8923,6 +8932,62 @@ static func _guard_bare_null(tokens: Array) -> Dictionary:
 	return {"name": vname, "bare_null": true, "eq": neg}
 
 
+## Applies one guard's holds/fails narrowing to a then/else env pair
+## in place (target validity plus bare object-ness checked inside;
+## no-op when invalid). Covers null guards, bare truthiness and
+## type-test guards. Shared by `if` and every `elif` branch: callers
+## own the chaining (each `elif` narrows from the accumulated
+## previous-failed state, never from entry). `env` is the state where
+## the condition runs (entry for `if`, accumulated rest for `elif`),
+## used only for the bare object-ness check.
+func _narrow_guard_envs(g: Dictionary, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, then_env: Dictionary, else_env: Dictionary) -> void:
+	if g.is_empty():
+		return
+	var fnd: Dictionary = fn if fn is Dictionary else {}
+	var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
+	if target.is_empty() or target.has("bad"):
+		return
+	if bool(g.get("bare_null", false)):
+		var bn := str(g.get("name", ""))
+		if bn != "" and _guard_notnull_object(bn, fn, scope, owner, env):
+			if bool(g.get("eq", true)):
+				_env_set(then_env, bn, ["null"], {})
+				(else_env as Dictionary)[ENV_NOTNULL_PREFIX + bn] = true
+			else:
+				(then_env as Dictionary)[ENV_NOTNULL_PREFIX + bn] = true
+				_env_set(else_env, bn, ["null"], {})
+	elif bool(g.get("eq", true)):
+		_env_set(then_env, str(g.get("name", "")), g.get("types", []), {})
+	else:
+		_env_set(else_env, str(g.get("name", "")), g.get("types", []), {})
+	if _is_null_guard(g):
+		var nn := str(g.get("name", ""))
+		if nn != "":
+			if bool(g.get("eq", true)):
+				(else_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
+			else:
+				(then_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
+	if _is_typetest_guard(g):
+		var tn := str(g.get("name", ""))
+		if tn != "":
+			if bool(g.get("eq", true)):
+				(then_env as Dictionary)[ENV_NOTNULL_PREFIX + tn] = true
+			else:
+				(else_env as Dictionary)[ENV_NOTNULL_PREFIX + tn] = true
+
+
+## True when the primary-false state of a guard may still be null:
+## `!=`/failing null checks, failing type tests, `x` (bare truthy
+## failing means null-ish). Used by guard-clause soundness with elifs
+## (branches running in a possibly-null state must all return).
+static func _guard_false_may_be_null(g: Dictionary) -> bool:
+	if bool(g.get("bare_null", false)):
+		return not bool(g.get("eq", true))
+	if _is_typetest_guard(g):
+		return bool(g.get("eq", true))
+	return not bool(g.get("eq", true))
+
+
 ## Applies a null-family guard ({types ["null"]} or bare-truthiness
 ## shape) to an env in place: the null side gets exact heads, the
 ## non-null side gets the flag. A type-test guard (`is` and friends
@@ -9202,19 +9267,168 @@ func _assign_callee(name: String, scope: Dictionary, fn: Variant, env: Dictionar
 ## Applies `@return nullable` (and explicit-null) call-result taint
 ## on assignment: the flag makes unguarded member use warn, and
 ## undeclared targets resolve with the callee's declared return heads
-## so the chain has types to warn through. Bare and self calls only
-## (member/lib chains stay silent, like the generic tracker, which
-## additionally needs >=4 tokens); zero-arg calls count here.
+## so the chain has types to warn through. Bare, self, lambda-held
+## and same-file member calls resolve to nodes (zero-arg included);
+## cross-file static calls resolve through the callee's user JSON
+## signature (`return_types`/`nullable_return` our analyzer maintains
+## there). Anything else stays silent.
 func _apply_return_taint(vname: String, vtoks: Array, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
 	var node := _taint_rhs_node(vtoks, scope, fn, env, owner)
-	if node.is_empty():
+	if not node.is_empty():
+		if _func_returns_nullable(node):
+			(env as Dictionary)[ENV_WATCH_PREFIX + vname] = true
+		if (_func_returns_nullable(node) or _return_ann_has_null(node)) and not _decl_has_type(_assign_target(vname, fn, scope, owner, env)):
+			var rtypes := _return_ann_types(node)
+			if not rtypes.is_empty():
+				_env_set(env, vname, rtypes, {})
 		return
-	if _func_returns_nullable(node):
+	var jsig := _taint_json_sig(vtoks, scope, fn, env, owner)
+	if jsig.is_empty():
+		return
+	if bool(jsig.get("nullable", false)):
 		(env as Dictionary)[ENV_WATCH_PREFIX + vname] = true
-	if (_func_returns_nullable(node) or _return_ann_has_null(node)) and not _decl_has_type(_assign_target(vname, fn, scope, owner, env)):
-		var rtypes := _return_ann_types(node)
-		if not rtypes.is_empty():
-			_env_set(env, vname, rtypes, {})
+	var jtypes: Array = jsig.get("types", [])
+	if not jtypes.is_empty() and not _decl_has_type(_assign_target(vname, fn, scope, owner, env)):
+		_env_set(env, vname, jtypes, {})
+
+
+## Cross-file static return signature behind an assignment RHS shaped
+## `Lib.seg(...)` ({} otherwise): delegates shape + shadow checks to
+## _json_return_sig. Pure.
+func _taint_json_sig(vtoks: Array, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> Dictionary:
+	var tt := _trim_trivia(vtoks)
+	if tt.size() < 5 or not (tt[0] is Dictionary):
+		return {}
+	if str((tt[0] as Dictionary).get("type", "")) != "IDENTIFIER":
+		return {}
+	if tt.size() < 2 or not (tt[1] is Dictionary) or str((tt[1] as Dictionary).get("type", "")) != "DOT":
+		return {}
+	if tt.size() < 3 or not (tt[2] is Dictionary) or str((tt[2] as Dictionary).get("type", "")) not in ["IDENTIFIER", "BUILTIN_TYPE", "KEYWORD"]:
+		return {}
+	if tt.size() < 4 or not (tt[3] is Dictionary) or str((tt[3] as Dictionary).get("type", "")) != "LPAREN":
+		return {}
+	if _match_close(tt, 3) != tt.size() - 1:
+		return {}
+	return _json_return_sig(str((tt[0] as Dictionary).get("value", "")), str((tt[2] as Dictionary).get("value", "")), scope, fn, env, owner)
+
+
+## Return signature behind a cross-file call (`Lib.seg()` static, or
+## `base.seg()` on a shadowed base whose env-aware type resolves to a
+## script): {"nullable", "types"} from the target script's user JSON
+## (stale files without the keys read as non-nullable). {} when no
+## script resolves or the method is missing. Union bases merge MAYBE:
+## any nullable arm flags, heads come from the first resolving arm.
+## Pure.
+func _json_return_sig(base: String, seg: String, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> Dictionary:
+	if base == "" or base == "_" or base == "self" or base == "super" or seg == "" or seg == "_" or seg == "new":
+		return {}
+	if _script_class != "" and base == _script_class:
+		return {}
+	if str(_scope_kind(scope, base)) == "" and not (env as Dictionary).has(base):
+		var shadowed := false
+		for o in [owner, ""]:
+			if not _member_var_node(str(o), base).is_empty():
+				shadowed = true
+				break
+		if not shadowed:
+			return _json_static_return_sig(base, seg)
+	var fb := _flow_base(base, fn, scope, owner, env, {})
+	if str(fb.get("kind", "")) != "instance":
+		return {}
+	var out := {}
+	for t in ((fb as Dictionary).get("types", []) as Array):
+		var ts := str(t)
+		if ts == "" or ts == "dynamic" or ts == "null" or ts == "Variant":
+			continue
+		var info := _type_info(ts)
+		if info.is_empty() or str(info.get("kind", "")) != "script":
+			continue
+		if _script_class != "" and str(info.get("class_name", "")) == _script_class:
+			continue
+		var entry := _user_method_entry(info, seg)
+		if entry.is_empty():
+			continue
+		var rtypes: Array = ((entry as Dictionary).get("return_types", []) as Array).duplicate()
+		var flagged := bool((entry as Dictionary).get("nullable_return", false))
+		if not flagged:
+			for h in rtypes:
+				if str(h) == "null":
+					flagged = true
+					break
+		if out.is_empty():
+			out = {"nullable": flagged, "types": rtypes}
+		elif flagged:
+			out["nullable"] = true
+	return out
+
+
+## Return signature behind a cross-file static call (`Lib.seg()`):
+## {"nullable", "types"} from the target script's user JSON. {}
+## when the class is unknown, not a script, or the method is missing.
+## Pure.
+func _json_static_return_sig(tname: String, seg: String) -> Dictionary:
+	var info := _type_info(tname)
+	if info.is_empty() or str(info.get("kind", "")) != "script":
+		return {}
+	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
+		return {}
+	var entry := _user_method_entry(info, seg)
+	if entry.is_empty():
+		return {}
+	var rtypes: Array = ((entry as Dictionary).get("return_types", []) as Array).duplicate()
+	var flagged := bool((entry as Dictionary).get("nullable_return", false))
+	if not flagged:
+		for t in rtypes:
+			if str(t) == "null":
+				flagged = true
+				break
+	return {"nullable": flagged, "types": rtypes}
+
+
+## Callee FUNC_DECL/LAMBDA behind a `recv.seg(...)` assignment RHS
+## ({} otherwise). Resolves same-file receivers only: self, super
+## (parent key in this file's tables), static class refs, and
+## instance bases whose env-aware script type resolves (params,
+## locals, members, `is`-narrowed values). Maybe-direction is ANY:
+## one nullable-returning arm taints. Engine, dynamic, unknown and
+## cross-file receivers stay out (the JSON path covers static ones).
+func _taint_member_node(recv: String, seg: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> Dictionary:
+	if recv == "" or recv == "_" or seg == "" or seg == "_" or seg == "new":
+		return {}
+	if recv == "self":
+		return _script_func_node(owner, seg)
+	if recv == "super":
+		var b: String = _script_extends if owner == "" else str(_class_extends.get(owner, ""))
+		if b == "":
+			return {}
+		var key := _resolve_private_owner(b, owner)
+		if key == "" or not _members.has(key):
+			return {}
+		return _script_func_node(key, seg)
+	var skey := _script_key_of(recv, owner)
+	if skey != "":
+		return _script_func_node(skey, seg)
+	if recv == _script_class and recv != "":
+		return _script_func_node(owner, seg)
+	var lamb := _lambda_value_node(recv, fn, scope, owner, env, {})
+	if seg == "call" and not lamb.is_empty():
+		return lamb
+	var fb := _flow_base(recv, fn, scope, owner, env, {})
+	if str(fb.get("kind", "")) != "instance":
+		return {}
+	for t in ((fb as Dictionary).get("types", []) as Array):
+		var ts := str(t)
+		if ts == "" or ts == "dynamic" or ts == "null" or ts == "Variant":
+			continue
+		var lk := _link_kind_of(ts, owner)
+		if (lk as Dictionary).is_empty() or str((lk as Dictionary).get("kind", "")) != "script":
+			continue
+		var node := _script_func_node(str((lk as Dictionary).get("key", "")), seg)
+		if node.is_empty():
+			continue
+		if _func_returns_nullable(node) or _return_ann_has_null(node):
+			return node
+	return {}
 
 
 ## Callee FUNC_DECL behind an assignment RHS shaped as a bare or
@@ -9227,9 +9441,17 @@ func _taint_rhs_node(vtoks: Array, scope: Dictionary, fn: Variant, env: Dictiona
 		return {}
 	var t0 := str((vtoks[0] as Dictionary).get("type", ""))
 	if t0 == "IDENTIFIER" and vtoks.size() > 1 and (vtoks[1] is Dictionary) and str((vtoks[1] as Dictionary).get("type", "")) == "LPAREN" and _match_close(vtoks, 1) == vtoks.size() - 1:
-		return _assign_callee(str((vtoks[0] as Dictionary).get("value", "")), scope, fn, env, owner)
+		var cname := str((vtoks[0] as Dictionary).get("value", ""))
+		var lamb := _lambda_value_node(cname, fn, scope, owner, env, {})
+		if not lamb.is_empty():
+			return lamb
+		return _assign_callee(cname, scope, fn, env, owner)
 	if t0 == "KEYWORD" and str((vtoks[0] as Dictionary).get("value", "")) == "self" and vtoks.size() > 3 and (vtoks[1] is Dictionary) and str((vtoks[1] as Dictionary).get("type", "")) == "DOT" and (vtoks[2] is Dictionary) and (vtoks[3] is Dictionary) and str((vtoks[3] as Dictionary).get("type", "")) == "LPAREN" and _match_close(vtoks, 3) == vtoks.size() - 1:
 		return _script_func_node(owner, str((vtoks[2] as Dictionary).get("value", "")))
+	if t0 == "IDENTIFIER" and vtoks.size() > 4 and (vtoks[1] is Dictionary) and str((vtoks[1] as Dictionary).get("type", "")) == "DOT" and (vtoks[2] is Dictionary) and str((vtoks[2] as Dictionary).get("type", "")) in ["IDENTIFIER", "BUILTIN_TYPE", "KEYWORD"] and (vtoks[3] is Dictionary) and str((vtoks[3] as Dictionary).get("type", "")) == "LPAREN" and _match_close(vtoks, 3) == vtoks.size() - 1:
+		return _taint_member_node(str((vtoks[0] as Dictionary).get("value", "")), str((vtoks[2] as Dictionary).get("value", "")), fn, scope, owner, env)
+	if (t0 == "KEYWORD" and str((vtoks[0] as Dictionary).get("value", "")) == "super") and vtoks.size() > 4 and (vtoks[1] is Dictionary) and str((vtoks[1] as Dictionary).get("type", "")) == "DOT" and (vtoks[2] is Dictionary) and str((vtoks[2] as Dictionary).get("type", "")) in ["IDENTIFIER", "BUILTIN_TYPE", "KEYWORD"] and (vtoks[3] is Dictionary) and str((vtoks[3] as Dictionary).get("type", "")) == "LPAREN" and _match_close(vtoks, 3) == vtoks.size() - 1:
+		return _taint_member_node("super", str((vtoks[2] as Dictionary).get("value", "")), fn, scope, owner, env)
 	return {}
 
 
@@ -9489,8 +9711,12 @@ func _flow_facts(node: Dictionary, scope: Dictionary, owner: String, fn: Variant
 ## side keeps running, the other side must return. Covers `x ==/!=
 ## null` (either order), `typeof`/`is_instance_of` NIL forms, bare `x`/
 ## `not x` on Objects and `is`/`is_instance_of`/`typeof` against
-## non-null types; `elif` chains, `break`/`continue` exits and nested
-## returns stay out (conservative: last statement must be RETURN).
+## non-null types. With `elif` branches present, every branch running
+## in a possibly-null primary-false state (each `elif` body plus a
+## present `else`) must also return — otherwise the fall-through
+## could still be null. `elif` chains, `break`/`continue` exits and
+## nested returns stay out (conservative: last statement must be
+## RETURN).
 func _apply_guard_clause(node: Dictionary, g: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
 	if g.is_empty():
 		return
@@ -9518,6 +9744,14 @@ func _apply_guard_clause(node: Dictionary, g: Dictionary, scope: Dictionary, own
 		holding = node.get("else_body", null) if eq else node.get("then", null)
 	if not _block_ends_return(other) or _block_ends_return(holding):
 		return
+	var elifs: Array = node.get("elifs", [])
+	if not elifs.is_empty() and _guard_false_may_be_null(g):
+		for e in elifs:
+			if not (e is Dictionary) or not _block_ends_return((e as Dictionary).get("body", null)):
+				return
+		var eb: Variant = node.get("else_body", null)
+		if not (eb is Dictionary) or not _block_ends_return(eb):
+			return
 	(env as Dictionary)[ENV_NOTNULL_PREFIX + nname] = true
 
 
@@ -9579,45 +9813,21 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 		_verify_tokens(cond, scope, owner, fn, env, {})
 		var g := _flow_guard(cond, fn, scope, owner)
 		var then_env := env.duplicate()
-		var else_env := env.duplicate()
-		if not g.is_empty():
-			var fnd: Dictionary = fn if fn is Dictionary else {}
-			var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
-			if not target.is_empty() and not target.has("bad"):
-				if bool(g.get("bare_null", false)):
-					var bn := str(g.get("name", ""))
-					if bn != "" and _guard_notnull_object(bn, fn, scope, owner, env):
-						if bool(g.get("eq", true)):
-							_env_set(then_env, bn, ["null"], {})
-							(else_env as Dictionary)[ENV_NOTNULL_PREFIX + bn] = true
-						else:
-							(then_env as Dictionary)[ENV_NOTNULL_PREFIX + bn] = true
-							_env_set(else_env, bn, ["null"], {})
-				elif bool(g.get("eq", true)):
-					_env_set(then_env, str(g.get("name", "")), g.get("types", []), {})
-				else:
-					_env_set(else_env, str(g.get("name", "")), g.get("types", []), {})
-				if _is_null_guard(g):
-					var nn := str(g.get("name", ""))
-					if nn != "":
-						if bool(g.get("eq", true)):
-							(else_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
-						else:
-							(then_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
-				if _is_typetest_guard(g):
-					var tn := str(g.get("name", ""))
-					if tn != "":
-						if bool(g.get("eq", true)):
-							(then_env as Dictionary)[ENV_NOTNULL_PREFIX + tn] = true
-						else:
-							(else_env as Dictionary)[ENV_NOTNULL_PREFIX + tn] = true
+		var rest_env := env.duplicate()
+		_narrow_guard_envs(g, fn, scope, owner, env, then_env, rest_env)
 		_flow_block(node.get("then", null), scope, owner, fn, then_env)
 		for e in node.get("elifs", []):
 			if e is Dictionary:
-				_verify_tokens(_as_tokens((e as Dictionary).get("condition", null)), scope, owner, fn, env, {})
-				_flow_block((e as Dictionary).get("body", null), scope, owner, fn, env.duplicate())
+				var econd := _as_tokens((e as Dictionary).get("condition", null))
+				_verify_tokens(econd, scope, owner, fn, rest_env, {})
+				var eg := _flow_guard(econd, fn, scope, owner)
+				var ethen := rest_env.duplicate()
+				var erest := rest_env.duplicate()
+				_narrow_guard_envs(eg, fn, scope, owner, rest_env, ethen, erest)
+				_flow_block((e as Dictionary).get("body", null), scope, owner, fn, ethen)
+				rest_env = erest
 		if node.get("else_body", null) is Dictionary:
-			_flow_block(node.get("else_body", null), scope, owner, fn, else_env)
+			_flow_block(node.get("else_body", null), scope, owner, fn, rest_env)
 		_apply_guard_clause(node, g, scope, owner, fn, env)
 		return
 	if t == "FOR_STMT":
@@ -9811,6 +10021,8 @@ static func _signature_param_info(rec: Dictionary) -> Dictionary:
 	var names: Array = []
 	var flagged: Array = []
 	var watch: Array = []
+	var ret_types: Array = []
+	var ret_nullable := false
 	var node: Variant = rec.get("node", {})
 	if node is Dictionary and str((node as Dictionary).get("type", "")) == "FUNC_DECL":
 		for p in (node as Dictionary).get("params", []):
@@ -9822,7 +10034,11 @@ static func _signature_param_info(rec: Dictionary) -> Dictionary:
 					flagged.append(pname)
 				if ann is Dictionary and bool((ann as Dictionary).get("nullable", false)):
 					watch.append(pname)
-	return {"names": names, "notnull": flagged, "nullable": watch}
+		var rann: Variant = (node as Dictionary).get("return_ann", {})
+		if rann is Dictionary and not bool((rann as Dictionary).get("void", false)):
+			ret_types = ((rann as Dictionary).get("types", []) as Array).duplicate()
+			ret_nullable = bool((rann as Dictionary).get("nullable", false))
+	return {"names": names, "notnull": flagged, "nullable": watch, "return_types": ret_types, "nullable_return": ret_nullable}
 
 
 func _merge_members(info: Dictionary, owner: String) -> void:
@@ -9854,6 +10070,8 @@ func _merge_members(info: Dictionary, owner: String) -> void:
 			(entry as Dictionary)["param_names"] = (sig as Dictionary).get("names", [])
 			(entry as Dictionary)["notnull_params"] = (sig as Dictionary).get("notnull", [])
 			(entry as Dictionary)["nullable_params"] = (sig as Dictionary).get("nullable", [])
+			(entry as Dictionary)["return_types"] = (sig as Dictionary).get("return_types", [])
+			(entry as Dictionary)["nullable_return"] = (sig as Dictionary).get("nullable_return", false)
 
 
 ## User-file member list for a member-table kind ("" when none).
@@ -9965,6 +10183,8 @@ func _minimal_info(file_base: String, owner: String, root_prefix: String) -> Dic
 			entry["param_names"] = (sig as Dictionary).get("names", [])
 			entry["notnull_params"] = (sig as Dictionary).get("notnull", [])
 			entry["nullable_params"] = (sig as Dictionary).get("nullable", [])
+			entry["return_types"] = (sig as Dictionary).get("return_types", [])
+			entry["nullable_return"] = (sig as Dictionary).get("nullable_return", false)
 			(info["instance_methods"] as Array).append(entry)
 		elif kind == "class":
 			(info["inner_classes"] as Array).append({"name": mname, "full_name": mname, "file": mname + ".json"})
