@@ -1150,33 +1150,51 @@ downstream, and undeclared targets resolve with the declared return
 heads; explicit-null returns (`Node|null`) resolve the same way
 through their null arm. `"nullable_params"` in `user/*.json` is
 consent data for boundary checks: a distrust caller passing a
-declared-maybe argument (null literal, `nullable` stamp/taint, or an
-explicit null arm — never a merely policy-watched one) to an
-IMPLICIT parameter of a trust callee warns at the argument
+declared-maybe argument (null literal, `nullable` stamp/taint, an
+explicit null arm, or a bare/`self` call to a nullable-returning
+function — never a merely policy-watched one) to an IMPLICIT
+parameter of a trust callee warns at the argument
 (`possible null argument 'x' for parameter 'a' of 'plain()'
 (implicitly nullable)`). Silent when the caller is lenient, when the
 callee file is distrust (it warns at its own use sites — no
 doubles), when the parameter consents (`nullable`) or refuses
 (`notnull`, whose literal rule owns that direction), for stale JSONs
 without the keys, and for same-file calls (one file, one policy).
+The refusal direction is covered everywhere the literal rule is:
+same-file, `self.`, `super` and lambda-held `notnull` parameters
+warn on declared-maybe arguments in distrust
+(`possible null argument 'x' for notnull parameter 'c' of 'need()'`),
+literals included in the message but owned by the error; cross-script
+`notnull` warns the same way through the callee's JSON signature.
+Trust keeps the historical silence in all these positions (literals
+still error in both).
+
+Type tests prove non-null: `if v is Node:` runs the holding branch
+on a non-null value (proven against the engine: `null is Node` is
+false), so the branch gains the notnull mark — `while v is Node:`
+and `if v is not Node: return` guard clauses work the same way.
+`is_instance_of` and non-nil `typeof` tests count; `x is Variant`
+proves nothing (`null is Variant` is true) and NIL forms belong to
+the null rules above.
 
 Gaps (documented): `elif` restarts from entry types like every other
 guard; guard clauses need a trailing `return` (`break`/`continue`
-and nested returns stay out); `is` narrowing does not imply non-null
-(pair it with `!= null` under distrust); subscripts on null (`x[0]`)
+and nested returns stay out, and the proven side returning keeps the
+warning); subscripts on null (`x[0]`)
 skip;
 `const X = null` and
 `var x := null`
 are Godot parse errors, so inference never sees them; inherited
 members are not followed cross-script (direct members only, like
-every other cross check); boundary checks cover static class calls
-and narrowed receivers only (`super`, engine and dynamic callees
-stay out; maybe-arguments to `notnull` parameters stay silent);
+every other cross check); implicit-argument boundary checks cover
+static class calls and narrowed receivers only (`super` implicit
+stays silent — resolvable super is same-file, where the parent
+already warns at its own uses — plus engine and dynamic callees);
 explicit `: Variant` member use errors
 `missing_method` by pre-existing engine-link design (both policies
 alike); direct call chains (`make().foo()`), member taint targets
-(`self.x = make()`) and lambda-held callees stay silent for
-return-taint purposes.
+(`self.x = make()`), member-call results as arguments and
+lambda-held callees stay silent for return-taint purposes.
 
 ## Analyzer data layout
 
@@ -1260,7 +1278,9 @@ green. `GODOT_BIN` overrides the engine path.
   never-nullable contradiction, trust opt-in warnings, `@return
   nullable` taint, distrust policy, guard clauses,
   `nullable_params` JSON, ProjectSetting, `# @nullable_policy`
-  file tags with precedence, and cross-script boundary consent).
+  file tags with precedence, cross-script boundary consent, `is`
+  type-test narrowing, and the same-file/`super`/call-result
+  frontier).
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits

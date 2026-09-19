@@ -22,6 +22,8 @@ func run() -> Dictionary:
 	_nb_setting(h)
 	_nb_filetag(h)
 	_nb_boundary(h)
+	_nb_istest(h)
+	_nb_frontier(h)
 	return h.result()
 
 
@@ -225,13 +227,13 @@ func _nb_boundary(h) -> void:
 	h.check(h.warn_texts(h.analyze_text(guarded, "res://tests/tmp_nb_b5.gd", "distrust")).is_empty(), "boundary guarded silent")
 	var refused := "extends RefCounted\n# @var x Node nullable\nvar x: Node\nfunc g() -> void:\n\tTmpNullP3Lib.need(x)\n"
 	var rr: Dictionary = h.analyze_text(refused, "res://tests/tmp_nb_b6.gd", "distrust")
-	h.check(_clean(rr) and (rr.get("warnings", []) as Array).is_empty(), "boundary notnull-maybe silent (gap)")
+	h.check(_clean(rr) and h.has_warn(rr, "possible null argument 'x' for notnull parameter 'c'"), "boundary notnull-maybe warns")
 	var samefile := "extends RefCounted\nfunc take(a: Node) -> void:\n\ta.queue_free()\n# @var x Node nullable\nvar x: Node\nfunc g() -> void:\n\ttake(x)\n"
 	var rs: Dictionary = h.analyze_text(samefile, "res://tests/tmp_nb_b7.gd", "distrust")
 	h.check((rs.get("warnings", []) as Array).size() == 1 and not h.has_warn(rs, "argument"), "same-file boundary silent, use warns")
 	var narrow := "extends RefCounted\n# @var x Node nullable\nvar x: Node\nfunc g(v: Variant) -> void:\n\tif v is TmpNullP3Lib:\n\t\tv.plain(x)\n"
 	var rn: Dictionary = h.analyze_text(narrow, "res://tests/tmp_nb_b8.gd", "distrust")
-	h.check((rn.get("warnings", []) as Array).size() == 2 and h.has_warn(rn, "argument"), "narrowed boundary warns once")
+	h.check((rn.get("warnings", []) as Array).size() == 1 and h.has_warn(rn, "argument"), "narrowed boundary warns once (receiver proven by is)")
 	var dlib := "# @nullable_policy distrust\nclass_name TmpNullP3LibD\nextends RefCounted\nfunc plain(a: Node) -> void:\n\ta.queue_free()\n"
 	var rlib: Dictionary = h.analyze_text(dlib, "res://tests/tmp_null_p3libd.gd")
 	h.check((rlib.get("warnings", []) as Array).size() == 1, "distrust callee warns at use")
@@ -243,3 +245,45 @@ func _nb_boundary(h) -> void:
 	(f as FileAccess).close()
 	var sold := "extends RefCounted\n# @var x Node nullable\nvar x: Node\nfunc g() -> void:\n\tTmpNullP3Stale.old(x)\n"
 	h.check(h.warn_texts(h.analyze_text(sold, "res://tests/tmp_nb_b10.gd", "distrust")).is_empty(), "stale json silent")
+
+
+func _nb_istest(h) -> void:
+	var branch := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is Node:\n\t\tv.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(branch, "res://tests/tmp_nb_i1.gd", "distrust")).is_empty(), "is branch holds non-null")
+	var els := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is Node:\n\t\tpass\n\telse:\n\t\tv = Node.new()\n"
+	h.check(_clean(h.analyze_text(els, "res://tests/tmp_nb_i2.gd", "distrust")), "is else clean")
+	var variant := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is Variant:\n\t\tv.foo()\n"
+	var rv: Dictionary = h.analyze_text(variant, "res://tests/tmp_nb_i3.gd", "distrust")
+	h.check(_has_err(rv, "missing_method", "'foo()'"), "is Variant proves nothing")
+	var isnot := "extends RefCounted\nfunc f(n: Node) -> void:\n\tif n is not Node:\n\t\treturn\n\tn.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(isnot, "res://tests/tmp_nb_i4.gd", "distrust")).is_empty(), "is-not clause narrows")
+	var wrong_side := "extends RefCounted\nfunc f(n: Node) -> void:\n\tif n is Node:\n\t\treturn\n\tn.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(wrong_side, "res://tests/tmp_nb_i5.gd", "distrust"), "implicitly nullable"), "holding side returning still warns")
+	var inst := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tif is_instance_of(v, Node):\n\t\tv.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(inst, "res://tests/tmp_nb_i6.gd", "distrust")).is_empty(), "is_instance_of branch holds non-null")
+	var typ := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tif typeof(v) == TYPE_NODE:\n\t\tv.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(typ, "res://tests/tmp_nb_i7.gd", "distrust")).is_empty(), "typeof branch holds non-null")
+	var trust_is := "extends RefCounted\nfunc f(v: Variant) -> void:\n\tif v is Node:\n\t\tv.queue_free()\n"
+	h.check(_clean(h.analyze_text(trust_is, "res://tests/tmp_nb_i8.gd")), "is branch clean in trust too")
+
+
+func _nb_frontier(h) -> void:
+	var sup := "extends RefCounted\nclass BaseP:\n\t# @param x Node notnull\n\tfunc m(x: Node) -> void:\n\t\tpass\nclass KidP extends BaseP:\n\t# @var w Node nullable\n\tvar w: Node\n\tfunc f() -> void:\n\t\tsuper.m(w)\n"
+	var rs: Dictionary = h.analyze_text(sup, "res://tests/tmp_nb_g1.gd", "distrust")
+	h.check(_clean(rs) and h.has_warn(rs, "possible null argument 'w' for notnull parameter 'x'"), "super notnull-maybe warns")
+	h.check(_warn_kinds(rs) == ["maybe_null"], "super warn kind maybe_null")
+	var sup_trust := "extends RefCounted\nclass BaseQ:\n\t# @param x Node notnull\n\tfunc m(x: Node) -> void:\n\t\tpass\nclass KidQ extends BaseQ:\n\t# @var w Node nullable\n\tvar w: Node\n\tfunc f() -> void:\n\t\tsuper.m(w)\n"
+	h.check(h.warn_texts(h.analyze_text(sup_trust, "res://tests/tmp_nb_g2.gd")).is_empty(), "super silent in trust")
+	var sup_lit := "extends RefCounted\nclass BaseR:\n\t# @param x Node notnull\n\tfunc m(x: Node) -> void:\n\t\tpass\nclass KidR extends BaseR:\n\tfunc f() -> void:\n\t\tsuper.m(null)\n"
+	h.check(_has_err(h.analyze_text(sup_lit, "res://tests/tmp_nb_g3.gd", "distrust"), "param_notnull", "'x'"), "super literal still errors")
+	var callres := "extends RefCounted\n# @return Node nullable\nfunc make() -> Node:\n\treturn Node.new()\n# @param x Node notnull\nfunc need(x: Node) -> void:\n\tpass\nfunc g() -> void:\n\tneed(make())\n"
+	var rc: Dictionary = h.analyze_text(callres, "res://tests/tmp_nb_g4.gd", "distrust")
+	h.check(_clean(rc) and h.has_warn(rc, "possible null argument 'make()' for notnull parameter 'x'"), "call-result to notnull warns")
+	var callres_trust := "extends RefCounted\n# @return Node nullable\nfunc make() -> Node:\n\treturn Node.new()\n# @param x Node notnull\nfunc need(x: Node) -> void:\n\tpass\nfunc g() -> void:\n\tneed(make())\n"
+	h.check(h.warn_texts(h.analyze_text(callres_trust, "res://tests/tmp_nb_g5.gd")).is_empty(), "call-result silent in trust")
+	var selfres := "extends RefCounted\n# @return Node nullable\nfunc make() -> Node:\n\treturn Node.new()\n# @param x Node notnull\nfunc need(x: Node) -> void:\n\tpass\nfunc g() -> void:\n\tneed(self.make())\n"
+	h.check(h.has_warn(h.analyze_text(selfres, "res://tests/tmp_nb_g6.gd", "distrust"), "'self.make()'"), "self call-result warns")
+	var plainres := "extends RefCounted\nfunc make() -> Node:\n\treturn Node.new()\n# @param x Node notnull\nfunc need(x: Node) -> void:\n\tpass\nfunc g() -> void:\n\tneed(make())\n"
+	h.check(h.warn_texts(h.analyze_text(plainres, "res://tests/tmp_nb_g7.gd", "distrust")).is_empty(), "plain call-result silent")
+	var xcallres := "extends RefCounted\n# @return Node nullable\nfunc make() -> Node:\n\treturn Node.new()\nfunc g() -> void:\n\tTmpNullP3Lib.plain(make())\n"
+	h.check(h.has_warn(h.analyze_text(xcallres, "res://tests/tmp_nb_g8.gd", "distrust"), "possible null argument 'make()'"), "cross call-result warns")

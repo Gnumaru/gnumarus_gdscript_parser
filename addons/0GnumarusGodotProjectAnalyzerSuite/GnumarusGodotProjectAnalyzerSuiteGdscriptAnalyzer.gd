@@ -7671,6 +7671,33 @@ func _error_notnull_call(node: Dictionary, seg: String, slices: Array, owner: St
 	_error(ERR_PARAM_NOTNULL, "cannot pass null to notnull parameter '" + str(v.get("param", "")) + "' of '" + seg + "()'", int(v.get("line", 0)), int(v.get("col", 0)), owner)
 
 
+## Warns declared-maybe (non-literal) arguments to notnull parameters
+## of one callee, one warning per offending argument at its own line.
+## Distrust only: trust keeps the historical silence (literals still
+## error in both). Null literals stay out (the error above owns
+## them); the callee's own policy is irrelevant here (a refusal
+## broken at the boundary is invisible to the callee either way).
+func _warn_notnull_maybe_call(node: Dictionary, seg: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> void:
+	if not _null_distrust():
+		return
+	var params: Array = (node as Dictionary).get("params", [])
+	var n := mini(params.size(), slices.size())
+	for i in range(n):
+		var p: Variant = params[i]
+		if not (p is Dictionary):
+			continue
+		var ann: Variant = (p as Dictionary).get("param_ann", {})
+		if not (ann is Dictionary) or not bool((ann as Dictionary).get("notnull", false)):
+			continue
+		if i >= slices.size() or not (slices[i] is Array):
+			continue
+		var hit := _slice_maybe_arg(slices[i], scope, fn, env, overlay, owner)
+		if hit.is_empty() or str(hit.get("name", "")) == "null":
+			continue
+		var tok: Dictionary = hit.get("tok", {})
+		_warnings.append({"kind": ERR_MAYBE_NULL, "message": "possible null argument '" + str(hit.get("name", "")) + "' for notnull parameter '" + str((p as Dictionary).get("name", "")) + "' of '" + seg + "()'", "line": int(tok.get("line", 0)), "column": int(tok.get("column", 0)), "owner": owner})
+
+
 ## Bare-call site check (mirrors _verify_bare_generic resolution:
 ## member functions outward; shadowed names bail like there, except
 ## lambda values, whose own params are checked).
@@ -7683,7 +7710,9 @@ func _check_notnull_bare(tokens: Array, i: int, open_idx: int, scope: Dictionary
 	var lnode := _lambda_value_node(base, fn, scope, owner, env, overlay)
 	if not lnode.is_empty():
 		if _func_has_notnull(lnode):
-			_error_notnull_call(lnode, base, _split_arg_slices(tokens, open_idx), owner)
+			var lslices := _split_arg_slices(tokens, open_idx)
+			_error_notnull_call(lnode, base, lslices, owner)
+			_warn_notnull_maybe_call(lnode, base, lslices, scope, fn, env, overlay, owner)
 		return
 	if str(_scope_kind(scope, base)) != "":
 		return
@@ -7694,7 +7723,9 @@ func _check_notnull_bare(tokens: Array, i: int, open_idx: int, scope: Dictionary
 		node = _script_func_node("", base)
 	if node.is_empty() or not _func_has_notnull(node):
 		return
-	_error_notnull_call(node, base, _split_arg_slices(tokens, open_idx), owner)
+	var slices := _split_arg_slices(tokens, open_idx)
+	_error_notnull_call(node, base, slices, owner)
+	_warn_notnull_maybe_call(node, base, slices, scope, fn, env, overlay, owner)
 
 
 ## Lambda-valued declaration behind a bare-call base (locals, member
@@ -7730,7 +7761,7 @@ func _lambda_value_node(base: String, fn: Variant, scope: Dictionary, owner: Str
 ## `super.m(...)` site check: resolves the parent script key in this
 ## file's tables only (engine/cross-file parents stay silent, like the
 ## chain itself, which never verifies super calls).
-func _check_notnull_super(base: String, tokens: Array, j: int, owner: String) -> void:
+func _check_notnull_super(base: String, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> void:
 	if base != "super":
 		return
 	var b: String = _script_extends if owner == "" else str(_class_extends.get(owner, ""))
@@ -7752,7 +7783,7 @@ func _check_notnull_super(base: String, tokens: Array, j: int, owner: String) ->
 		return
 	if str((tokens[j + 2] as Dictionary).get("type", "")) != "LPAREN":
 		return
-	_check_notnull_links([{"kind": "script", "key": key}], seg, tokens, j + 1, owner)
+	_check_notnull_links([{"kind": "script", "key": key}], seg, tokens, j + 1, scope, fn, env, overlay, owner)
 
 
 ## Chain call-site check across one segment's script links (self and
@@ -7760,19 +7791,22 @@ func _check_notnull_super(base: String, tokens: Array, j: int, owner: String) ->
 ## every resolving callee flags the position. Engine, dynamic and
 ## cross-script links (no signature data) stay silent, as do signals
 ## (handled before this point).
-func _check_notnull_links(links: Array, seg: String, tokens: Array, j: int, owner: String) -> void:
+func _check_notnull_links(links: Array, seg: String, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> void:
 	var slices := _split_arg_slices(tokens, j + 1)
 	if slices.is_empty():
 		return
 	var saw := false
 	var clean := false
 	var first := {}
+	var wnode := {}
 	for L in links:
 		if not (L is Dictionary) or str(L.get("kind", "")) != "script":
 			continue
 		var node := _script_func_node(str(L.get("key", "")), seg)
 		if node.is_empty() or not _func_has_notnull(node):
 			continue
+		if wnode.is_empty():
+			wnode = node
 		saw = true
 		var v := _notnull_call_violation(node, slices)
 		if v.is_empty():
@@ -7782,6 +7816,8 @@ func _check_notnull_links(links: Array, seg: String, tokens: Array, j: int, owne
 			first = v
 	if saw and not clean and not first.is_empty():
 		_error(ERR_PARAM_NOTNULL, "cannot pass null to notnull parameter '" + str(first.get("param", "")) + "' of '" + seg + "()'", int(first.get("line", 0)), int(first.get("col", 0)), owner)
+	if not wnode.is_empty():
+		_warn_notnull_maybe_call(wnode, seg, slices, scope, fn, env, overlay, owner)
 ## Generic instantiation for a bare call `f(...)`: only when the name
 ## cannot be a value (no overlay/scope/env/member binding), resolving
 ## member functions outward (owner, then root). Returns the index past
@@ -7943,6 +7979,29 @@ func _check_cross_notnull(tname: String, tokens: Array, j: int, owner: String) -
 			_error(ERR_PARAM_NOTNULL, "cannot pass null to notnull parameter '" + str((names as Array)[i]) + "' of '" + seg + "()'", int((tt[0] as Dictionary).get("line", 0)), int((tt[0] as Dictionary).get("column", 0)), owner)
 
 
+## Warns declared-maybe arguments to IMPLICIT parameters of one
+## resolved callee node (same-file/super shape: params carry
+## param_ann stamps). Null literals included (no error owns the
+## implicit direction). Caller must be distrust (checked by callers).
+func _warn_implicit_maybe_call(node: Dictionary, seg: String, slices: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> void:
+	var params: Array = (node as Dictionary).get("params", [])
+	var n := mini(params.size(), slices.size())
+	for i in range(n):
+		var p: Variant = params[i]
+		if not (p is Dictionary):
+			continue
+		var ann: Variant = (p as Dictionary).get("param_ann", {})
+		if ann is Dictionary and (bool((ann as Dictionary).get("notnull", false)) or bool((ann as Dictionary).get("nullable", false))):
+			continue
+		if i >= slices.size() or not (slices[i] is Array):
+			continue
+		var hit := _slice_maybe_arg(slices[i], scope, fn, env, overlay, owner)
+		if hit.is_empty():
+			continue
+		var tok: Dictionary = hit.get("tok", {})
+		_warnings.append({"kind": ERR_MAYBE_NULL, "message": "possible null argument '" + str(hit.get("name", "")) + "' for parameter '" + str((p as Dictionary).get("name", "")) + "' of '" + seg + "()' (implicitly nullable)", "line": int(tok.get("line", 0)), "column": int(tok.get("column", 0)), "owner": owner})
+
+
 ## Cross-script boundary consent: a distrust caller passing a
 ## declared-maybe argument (null literal, nullable stamp/taint, or an
 ## explicit null arm) to an IMPLICIT parameter of a trust callee warns
@@ -8008,29 +8067,100 @@ func _check_cross_maybe(tname: String, tokens: Array, j: int, scope: Dictionary,
 		_warnings.append({"kind": ERR_MAYBE_NULL, "message": "possible null argument '" + str(hit.get("name", "")) + "' for parameter '" + pname + "' of '" + seg + "()' (implicitly nullable)", "line": int(tok.get("line", 0)), "column": int(tok.get("column", 0)), "owner": owner})
 
 
+## Cross-script refusal direction: a distrust caller passing a
+## declared-maybe (non-literal) argument to a `notnull` parameter
+## warns at the argument. Null literals stay out (the literal error
+## owns them); the callee's policy is irrelevant (a refusal broken at
+## the boundary is invisible to the callee either way). Same-file and
+## super calls route through _warn_notnull_maybe_call instead.
+func _check_cross_notnull_maybe(tname: String, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> void:
+	if not _null_distrust():
+		return
+	if tname == "" or tname == "_" or tname == "null":
+		return
+	if j >= tokens.size() or not (tokens[j] is Dictionary):
+		return
+	if str((tokens[j] as Dictionary).get("type", "")) != "DOT":
+		return
+	if j + 1 >= tokens.size() or not (tokens[j + 1] is Dictionary):
+		return
+	var nt := str((tokens[j + 1] as Dictionary).get("type", ""))
+	if nt != "IDENTIFIER" and nt != "BUILTIN_TYPE" and nt != "KEYWORD":
+		return
+	var seg := str((tokens[j + 1] as Dictionary).get("value", ""))
+	if seg == "" or seg == "_" or seg == "new":
+		return
+	if j + 2 >= tokens.size() or not (tokens[j + 2] is Dictionary):
+		return
+	if str((tokens[j + 2] as Dictionary).get("type", "")) != "LPAREN":
+		return
+	if _script_class != "" and tname == _script_class:
+		return
+	var info := _type_info(tname)
+	if info.is_empty() or str(info.get("kind", "")) != "script":
+		return
+	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
+		return
+	var entry := _user_method_entry(info, seg)
+	if entry.is_empty():
+		return
+	var names: Variant = entry.get("param_names", [])
+	var refused: Variant = entry.get("notnull_params", [])
+	if not (names is Array) or not (refused is Array):
+		return
+	if (names as Array).is_empty() or (refused as Array).is_empty():
+		return
+	var slices := _split_arg_slices(tokens, j + 2)
+	var n := mini((names as Array).size(), slices.size())
+	for i in range(n):
+		if not (refused as Array).has(str((names as Array)[i])):
+			continue
+		if not (slices[i] is Array):
+			continue
+		var hit := _slice_maybe_arg(slices[i], scope, fn, env, overlay, owner)
+		if hit.is_empty() or str(hit.get("name", "")) == "null":
+			continue
+		var tok: Dictionary = hit.get("tok", {})
+		_warnings.append({"kind": ERR_MAYBE_NULL, "message": "possible null argument '" + str(hit.get("name", "")) + "' for notnull parameter '" + str((names as Array)[i]) + "' of '" + seg + "()'", "line": int(tok.get("line", 0)), "column": int(tok.get("column", 0)), "owner": owner})
+
+
 ## Declared-maybe argument behind one call slice: {"name", "tok"} for
-## a bare null literal or a single identifier resolving to a watched
-## slot (nullable stamp/taint or an explicit null arm), {} otherwise.
-## Policy-watched (implicit, distrust-default) arguments stay out:
-## unproven is not maybe. Pure (never warns itself).
+## a bare null literal, a single identifier resolving to a watched
+## slot (nullable stamp/taint or an explicit null arm), or a bare /
+## self call to a nullable (or explicit-null-returning) function,
+## {} otherwise. Policy-watched (implicit, distrust-default)
+## arguments stay out: unproven is not maybe. Member-call results
+## stay out (their taint is not tracked). Pure (never warns itself).
 func _slice_maybe_arg(slice: Array, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> Dictionary:
 	var tt := _trim_trivia(slice)
-	if tt.size() != 1 or not (tt[0] is Dictionary):
+	if tt.is_empty() or not (tt[0] is Dictionary):
 		return {}
 	var t: Dictionary = tt[0]
-	if str(t.get("type", "")) == "NULL":
+	if str(t.get("type", "")) == "NULL" and tt.size() == 1:
 		return {"name": "null", "tok": t}
-	if str(t.get("type", "")) != "IDENTIFIER":
+	if str(t.get("type", "")) == "IDENTIFIER" and tt.size() == 1:
+		var aname := str(t.get("value", ""))
+		if aname == "" or aname == "_":
+			return {}
+		var fb := _flow_base(aname, fn, scope, owner, env, overlay)
+		if str(fb.get("kind", "")) != "instance":
+			return {}
+		if _flow_watch_cause(aname, fn, scope, owner, env, (fb as Dictionary).get("types", [])) != "declared":
+			return {}
+		return {"name": aname, "tok": t}
+	var node := _taint_rhs_node(tt, scope, fn, env, owner)
+	if node.is_empty():
 		return {}
-	var aname := str(t.get("value", ""))
-	if aname == "" or aname == "_":
+	if not _func_returns_nullable(node) and not _return_ann_has_null(node):
 		return {}
-	var fb := _flow_base(aname, fn, scope, owner, env, overlay)
-	if str(fb.get("kind", "")) != "instance":
-		return {}
-	if _flow_watch_cause(aname, fn, scope, owner, env, (fb as Dictionary).get("types", [])) != "declared":
-		return {}
-	return {"name": aname, "tok": t}
+	return {"name": _slice_call_display(tt), "tok": t}
+
+
+## Short display for a bare/self call slice ("make()", "self.make()").
+static func _slice_call_display(tt: Array) -> String:
+	if (tt[0] as Dictionary).get("type", "") == "KEYWORD" and tt.size() > 2 and (tt[2] is Dictionary):
+		return "self." + str((tt[2] as Dictionary).get("value", "")) + "()"
+	return str((tt[0] as Dictionary).get("value", "")) + "()"
 
 
 ## Method entry by name in a script user JSON (instance first, then
@@ -8095,6 +8225,7 @@ func _check_cross_static(base: String, tokens: Array, j: int, scope: Dictionary,
 	_check_cross_private(base, tokens, j, owner)
 	_check_cross_notnull(base, tokens, j, owner)
 	_check_cross_maybe(base, tokens, j, scope, fn, env, overlay, owner)
+	_check_cross_notnull_maybe(base, tokens, j, scope, fn, env, overlay, owner)
 
 
 ## Verifies one DOT chain starting at tokens[i] (an IDENTIFIER).
@@ -8113,7 +8244,7 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 	var kind := str(fb.get("kind", ""))
 	if kind == "skip":
 		_check_cross_static(base, tokens, j, scope, fn, env, overlay, owner)
-		_check_notnull_super(base, tokens, j, owner)
+		_check_notnull_super(base, tokens, j, scope, fn, env, overlay, owner)
 		var bj := _verify_bare_generic(tokens, i, j, scope, fn, env, overlay, owner)
 		if bj >= 0:
 			return bj
@@ -8161,6 +8292,7 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 				_check_cross_private(str(t), tokens, j, owner)
 				_check_cross_notnull(str(t), tokens, j, owner)
 				_check_cross_maybe(str(t), tokens, j, scope, fn, env, overlay, owner)
+				_check_cross_notnull_maybe(str(t), tokens, j, scope, fn, env, overlay, owner)
 				_warn_unresolved_watch(base, tokens, j, warn_types, warn_cause, owner)
 				return _skip_chain_verify(tokens, j, scope, owner, fn, env, overlay)
 			links.append(l)
@@ -8372,7 +8504,7 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 			if not warn_types.is_empty() and not _flow_notnull(base, fn, scope, owner, env):
 				_warn_maybe_null(base, seg, warn_types, is_call, tokens[j], owner, warn_cause)
 			if is_call:
-				_check_notnull_links(links, seg, tokens, j, owner)
+				_check_notnull_links(links, seg, tokens, j, scope, fn, env, overlay, owner)
 			if not engine_names.is_empty():
 				var extra := _verify_seg(engine_names, seg, is_call, static_ctx, tokens[j], owner, true)
 				var vt := str(extra.get("vtype", ""))
@@ -8793,25 +8925,38 @@ static func _guard_bare_null(tokens: Array) -> Dictionary:
 
 ## Applies a null-family guard ({types ["null"]} or bare-truthiness
 ## shape) to an env in place: the null side gets exact heads, the
-## non-null side gets the flag. Used by `while` bodies and `match`
-## null-pattern branches, which otherwise narrow nothing. Validates
-## the target and, for bare shapes, object-ness, exactly like `if`.
+## non-null side gets the flag. A type-test guard (`is` and friends
+## against a non-null type) sets the flag outright: `while` bodies run
+## on the holding side. Used by `while` bodies, which otherwise narrow
+## nothing. Validates the target and, for bare shapes, object-ness,
+## exactly like `if`.
 func _apply_null_family_guard(cond: Array, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> void:
 	var g := _guard_null(cond)
 	if g.is_empty():
 		g = _guard_bare_null(cond)
-	if g.is_empty():
+	if not g.is_empty():
+		var fnd: Dictionary = fn if fn is Dictionary else {}
+		var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
+		if target.is_empty() or target.has("bad"):
+			return
+		if bool(g.get("bare_null", false)) and not _guard_notnull_object(str(g.get("name", "")), fn, scope, owner, env):
+			return
+		if bool(g.get("eq", true)):
+			_env_set(env, str(g.get("name", "")), ["null"], {})
+		else:
+			(env as Dictionary)[ENV_NOTNULL_PREFIX + str(g.get("name", ""))] = true
 		return
-	var fnd: Dictionary = fn if fn is Dictionary else {}
-	var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
-	if target.is_empty() or target.has("bad"):
+	var t := _flow_guard(cond, fn, scope, owner)
+	if not _is_typetest_guard(t):
 		return
-	if bool(g.get("bare_null", false)) and not _guard_notnull_object(str(g.get("name", "")), fn, scope, owner, env):
+	var tfnd: Dictionary = fn if fn is Dictionary else {}
+	var tname := str(t.get("name", ""))
+	if tname == "":
 		return
-	if bool(g.get("eq", true)):
-		_env_set(env, str(g.get("name", "")), ["null"], {})
-	else:
-		(env as Dictionary)[ENV_NOTNULL_PREFIX + str(g.get("name", ""))] = true
+	var ttarget := _free_var_target(tname, tfnd, scope, owner)
+	if ttarget.is_empty() or ttarget.has("bad"):
+		return
+	(env as Dictionary)[ENV_NOTNULL_PREFIX + tname] = true
 
 
 ## Branch env for one `match` branch: a sole `null` pattern on a bare
@@ -9138,6 +9283,25 @@ static func _is_null_guard(g: Dictionary) -> bool:
 	return types.size() == 1 and str(types[0]) == "null"
 
 
+## True for a type-test guard (`is`, `is_instance_of`, `typeof`
+## against a non-null type): the side where the test HOLDS ran on a
+## non-null value (proven against the engine: `null is Node` is
+## false). Excludes NIL forms (owned by _is_null_guard) and `Variant`
+## tests (`null is Variant` is true, so those prove nothing), plus
+## bare truthiness (shapes, not type tests).
+static func _is_typetest_guard(g: Dictionary) -> bool:
+	if g.is_empty() or bool(g.get("bare_null", false)):
+		return false
+	var types: Array = g.get("types", [])
+	if types.is_empty():
+		return false
+	for t in types:
+		var ts := str(t)
+		if ts == "null" or ts == "Variant" or ts == "dynamic":
+			return false
+	return true
+
+
 ## notnull state of a variable in flow: an explicit env mark (notnull
 ## @var facts, non-null guard sides) or a notnull @var/@param stamp on
 ## its declaration (locals, params, consts, members). Anything else
@@ -9317,18 +9481,22 @@ func _flow_facts(node: Dictionary, scope: Dictionary, owner: String, fn: Variant
 			(env as Dictionary).erase(ENV_NOTNULL_PREFIX + vname)
 
 
-## Guard-clause narrowing: when an `if` null-check's null side
-## (`then` for `==`, `else` for `!=`, same for bare truthiness) ends
-## in `return`, code after the `if` only runs non-null, so the outer
-## env gains the notnull mark. Covers `x ==/!= null` (either order),
-## `typeof`/`is_instance_of` NIL forms and bare `x`/`not x` on
-## Objects; `elif` chains, `break`/`continue` exits and nested
+## Guard-clause narrowing: when an `if` check's failing side ends in
+## `return`, code after the `if` only runs proven state, so the outer
+## env gains the notnull mark. Null checks (`x == null` returns from
+## the null side), bare truthiness (`not x` returns) and type tests
+## (`x is not Y` returns from the `is` side) all unify: the proven
+## side keeps running, the other side must return. Covers `x ==/!=
+## null` (either order), `typeof`/`is_instance_of` NIL forms, bare `x`/
+## `not x` on Objects and `is`/`is_instance_of`/`typeof` against
+## non-null types; `elif` chains, `break`/`continue` exits and nested
 ## returns stay out (conservative: last statement must be RETURN).
 func _apply_guard_clause(node: Dictionary, g: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
 	if g.is_empty():
 		return
 	var bare := bool(g.get("bare_null", false))
-	if not _is_null_guard(g) and not bare:
+	var typetest := _is_typetest_guard(g)
+	if not _is_null_guard(g) and not bare and not typetest:
 		return
 	var nname := str(g.get("name", ""))
 	if nname == "":
@@ -9339,8 +9507,16 @@ func _apply_guard_clause(node: Dictionary, g: Dictionary, scope: Dictionary, own
 		return
 	if bare and not _guard_notnull_object(nname, fn, scope, owner, env):
 		return
-	var null_side: Variant = node.get("then", null) if bool(g.get("eq", true)) else node.get("else_body", null)
-	if not _block_ends_return(null_side):
+	var eq := bool(g.get("eq", true))
+	var holding: Variant = null
+	var other: Variant = null
+	if typetest:
+		holding = node.get("then", null) if eq else node.get("else_body", null)
+		other = node.get("else_body", null) if eq else node.get("then", null)
+	else:
+		other = node.get("then", null) if eq else node.get("else_body", null)
+		holding = node.get("else_body", null) if eq else node.get("then", null)
+	if not _block_ends_return(other) or _block_ends_return(holding):
 		return
 	(env as Dictionary)[ENV_NOTNULL_PREFIX + nname] = true
 
@@ -9428,6 +9604,13 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 							(else_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
 						else:
 							(then_env as Dictionary)[ENV_NOTNULL_PREFIX + nn] = true
+				if _is_typetest_guard(g):
+					var tn := str(g.get("name", ""))
+					if tn != "":
+						if bool(g.get("eq", true)):
+							(then_env as Dictionary)[ENV_NOTNULL_PREFIX + tn] = true
+						else:
+							(else_env as Dictionary)[ENV_NOTNULL_PREFIX + tn] = true
 		_flow_block(node.get("then", null), scope, owner, fn, then_env)
 		for e in node.get("elifs", []):
 			if e is Dictionary:
