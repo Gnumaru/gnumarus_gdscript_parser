@@ -404,6 +404,11 @@ const MAX_DEP_DEPTH := 4
 static var _resolve_stack: Array = []
 ## One regex rescan per analyze() call at most (lookup misses).
 var _roster_swept := false
+## Class names attempted through on-demand resolution this analyze()
+## call (hits and misses, deduped): the cross-file references of the
+## analyzed file. Read by the editor to re-analyze dependents when a
+## referenced JSON changes. Reset per call, never persisted.
+var _last_refs: Array = []
 
 
 ## True when the roster knows a global script class by exact name.
@@ -414,6 +419,16 @@ static func _roster_has(tname: String) -> bool:
 ## res:// source path behind a roster class ("" when absent). Pure.
 static func _roster_path(tname: String) -> String:
 	return str(_roster_names.get(tname, ""))
+
+
+## Roster class behind a source path ("" when absent): linear scan,
+## roster-sized (hundreds), only used by batch tools like warm pass.
+## Static: no instance.
+static func _roster_class_for_path(source_path: String) -> String:
+	for k in _roster_names.keys():
+		if str(_roster_names[k]) == source_path:
+			return str(k)
+	return ""
 
 
 ## Refreshes the roster when the engine cache is new/changed/absent:
@@ -574,6 +589,8 @@ func _ensure_script_info(tname: String) -> Dictionary:
 		return {}
 	if tname == _script_class and tname != "":
 		return {}
+	if not _last_refs.has(tname):
+		_last_refs.append(tname)
 	var info := _type_info(tname)
 	if not info.is_empty():
 		return info
@@ -633,6 +650,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_file_policy = ""
 	_file_strict = ""
 	_roster_swept = false
+	_last_refs = []
 	if _policy_explicit:
 		_policy_base = null_policy
 	else:
@@ -5131,6 +5149,14 @@ func _type_known(tname: String) -> bool:
 			return true
 	if _roster_has(tname):
 		return true
+	if not _roster_swept and _project_root != "":
+		_roster_swept = true
+		var swept := _roster_scan_files(_project_root)
+		for k in swept.keys():
+			if not _roster_names.has(k):
+				_roster_names[k] = swept[k]
+		if _roster_has(tname):
+			return true
 	return _type_file_exists(tname)
 
 
@@ -5294,13 +5320,35 @@ func _script_derives(child: String, ancestor: String) -> bool:
 		guard += 1
 		var base := str(_class_extends.get(key, ""))
 		if base == "":
-			return false
+			break
 		if base == ancestor or _base_simple(base) == ancestor:
 			return true
 		if ancestor in _engine_chain(_base_simple(base)):
 			return true
 		key = _resolve_private_owner(base, key)
-	return false
+	return _script_derives_json(child, ancestor, {})
+
+
+## Cross-file derivation through user JSON extends chains (recorded
+## per file by the writers). Engine pairs keep the old behavior
+## exactly (only script infos walk here). Seen-guarded; on-demand
+## analysis fills missing files within the shared depth cap.
+func _script_derives_json(child: String, ancestor: String, seen: Dictionary) -> bool:
+	if child == "" or ancestor == "" or seen.has(child):
+		return false
+	seen[child] = true
+	var info := _ensure_script_info(child)
+	if info.is_empty() or str(info.get("kind", "")) != "script":
+		return false
+	var base := str(info.get("extends", ""))
+	if base == "":
+		return false
+	var simple := _base_simple(base)
+	if simple == ancestor or base == ancestor:
+		return true
+	if ancestor in _engine_chain(simple):
+		return true
+	return _script_derives_json(simple, ancestor, seen)
 
 
 ## Single type name behind a "->" TYPE_REF ("void" included), or "" when
@@ -6911,10 +6959,25 @@ func _user_member_entry(tname: String, seg: String) -> Dictionary:
 		["signals", "signal"],
 		["enums", "enum"],
 	]
-	for pair in lists:
-		for m in info.get(pair[0], []):
-			if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
-				return {"kind": pair[1], "decl_owner": tname, "private": (m as Dictionary).get("private", {}), "dep": (m as Dictionary).get("deprecated", {})}
+	var cur := info
+	var cur_name := tname
+	var seen := {str(info.get("name", "")): true}
+	while true:
+		for pair in lists:
+			for m in cur.get(pair[0], []):
+				if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
+					return {"kind": pair[1], "decl_owner": cur_name, "private": (m as Dictionary).get("private", {}), "dep": (m as Dictionary).get("deprecated", {})}
+		var base := str(cur.get("extends", ""))
+		if base == "":
+			return {}
+		var simple := _base_simple(base)
+		if seen.has(simple):
+			return {}
+		seen[simple] = true
+		cur = _ensure_script_info(simple)
+		if cur.is_empty() or str(cur.get("kind", "")) != "script":
+			return {}
+		cur_name = simple
 	return {}
 
 
@@ -8299,7 +8362,7 @@ func _check_cross_notnull(tname: String, tokens: Array, j: int, owner: String) -
 		return
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
 		return
-	var entry := _user_method_entry(info, seg)
+	var entry := _user_method_entry_chain(tname, info, seg)
 	if entry.is_empty():
 		return
 	var names: Variant = entry.get("param_names", [])
@@ -8360,7 +8423,7 @@ func _check_cross_maybe(tname: String, tokens: Array, j: int, scope: Dictionary,
 		return
 	if str(info.get("null_policy", "")) != "trust":
 		return
-	var entry := _user_method_entry(info, seg)
+	var entry := _user_method_entry_chain(tname, info, seg)
 	if entry.is_empty():
 		return
 	var names: Variant = entry.get("param_names", [])
@@ -8434,7 +8497,7 @@ func _check_cross_notnull_maybe(tname: String, tokens: Array, j: int, scope: Dic
 		return
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
 		return
-	var entry := _user_method_entry(info, seg)
+	var entry := _user_method_entry_chain(tname, info, seg)
 	if entry.is_empty():
 		return
 	var names: Variant = entry.get("param_names", [])
@@ -8522,6 +8585,32 @@ func _user_method_entry(info: Dictionary, seg: String) -> Dictionary:
 			for m in items:
 				if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
 					return m
+	return {}
+
+
+## Method entry by name following the JSON extends chain (direct
+## members first, then parents via on-demand analysis). Top-level
+## classes only. {} when absent everywhere.
+func _user_method_entry_chain(tname: String, info: Dictionary, seg: String) -> Dictionary:
+	var hit := _user_method_entry(info, seg)
+	if not hit.is_empty():
+		return hit
+	var seen := {str(info.get("name", "")): true}
+	var cur := info
+	while true:
+		var base := str(cur.get("extends", ""))
+		if base == "":
+			return {}
+		var simple := _base_simple(base)
+		if seen.has(simple):
+			return {}
+		seen[simple] = true
+		cur = _ensure_script_info(simple)
+		if cur.is_empty() or str(cur.get("kind", "")) != "script":
+			return {}
+		hit = _user_method_entry(cur, seg)
+		if not hit.is_empty():
+			return hit
 	return {}
 
 
@@ -9704,7 +9793,7 @@ func _json_return_sig(base: String, seg: String, scope: Dictionary, fn: Variant,
 			continue
 		if _script_class != "" and str(info.get("class_name", "")) == _script_class:
 			continue
-		var entry := _user_method_entry(info, seg)
+		var entry := _user_method_entry_chain(ts, info, seg)
 		if entry.is_empty():
 			continue
 		var rtypes: Array = ((entry as Dictionary).get("return_types", []) as Array).duplicate()
@@ -9731,7 +9820,7 @@ func _json_static_return_sig(tname: String, seg: String) -> Dictionary:
 		return {}
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
 		return {}
-	var entry := _user_method_entry(info, seg)
+	var entry := _user_method_entry_chain(tname, info, seg)
 	if entry.is_empty():
 		return {}
 	var rtypes: Array = ((entry as Dictionary).get("return_types", []) as Array).duplicate()
@@ -10506,6 +10595,7 @@ static func _signature_param_info(rec: Dictionary) -> Dictionary:
 
 func _merge_members(info: Dictionary, owner: String) -> void:
 	(info as Dictionary)["null_policy"] = _effective_file_policy()
+	(info as Dictionary)["extends"] = _script_extends if owner == "" else str(_class_extends.get(owner, ""))
 	var table: Dictionary = _members.get(owner, {})
 	for mname in table.keys():
 		if not (table[mname] is Dictionary):
@@ -10615,6 +10705,7 @@ func _minimal_info(file_base: String, owner: String, root_prefix: String) -> Dic
 		"class_name": _script_class,
 		"resource_path": _script_resource_path,
 		"null_policy": _effective_file_policy(),
+		"extends": _script_extends if owner == "" else str(_class_extends.get(owner, "")),
 		"enums": [],
 		"constants": [],
 		"signals": [],

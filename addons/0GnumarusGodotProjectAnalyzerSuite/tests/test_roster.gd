@@ -24,6 +24,8 @@ func run() -> Dictionary:
 	_r_demand(h)
 	_r_cycle(h)
 	_r_depth(h)
+	_r_inherit(h)
+	_r_refs(h)
 	return h.result()
 
 
@@ -68,11 +70,11 @@ func _r_names(h) -> void:
 	h.check(not ("var_unknown_type" in _sig(h.analyze_text(acc, "res://tests/tmp_rs_n1.gd"))), "roster name accepted cold")
 	var typo := "extends RefCounted\n# @var x TmpRosterTarge\nvar x: Variant\n"
 	h.check(_has_err(h.analyze_text(typo, "res://tests/tmp_rs_n2.gd"), "var_unknown_type", "TmpRosterTarge"), "typo still unknown")
-	var narrow := "extends RefCounted\n# @var x TmpRosterTarget\nvar x: Node\n"
-	h.check(_clean(h.analyze_text(narrow, "res://tests/tmp_rs_n3.gd")), "opaque narrowing lenient")
 	var watch := "extends RefCounted\n# @var x TmpRosterTarget nullable\nvar x: Variant\n"
 	h.check(_clean(h.analyze_text(watch, "res://tests/tmp_rs_n4.gd")), "nullable opaque clean")
 	h.check(not _has_json("TmpRosterTarget"), "names need no analysis")
+	var narrow := "extends RefCounted\n# @var x TmpRosterTarget\nvar x: RefCounted\n"
+	h.check(_clean(h.analyze_text(narrow, "res://tests/tmp_rs_n3.gd")), "proven derives silent")
 	var cold := "extends RefCounted\nfunc g() -> void:\n\tTmpRosterTarget.take(Node.new())\n"
 	var rc: Dictionary = h.analyze_text(cold, "res://tests/tmp_rs_n5.gd")
 	h.check(_clean(rc) and (rc.get("warnings", []) as Array).is_empty(), "cold static clean")
@@ -130,3 +132,31 @@ func _r_depth(h) -> void:
 	H.Analyzer._resolve_stack.clear()
 	var freed: Dictionary = h.analyze_text(caller, "res://tests/tmp_rs_p2.gd")
 	h.check(_has_err(freed, "param_notnull", "'m'"), "cleared stack analyzes")
+
+
+func _r_inherit(h) -> void:
+	_drop_json("TmpRosterParent")
+	_drop_json("TmpRosterChild")
+	var compat := "extends RefCounted\n# @var x TmpRosterChild\nvar x: TmpRosterParent\n"
+	h.check(_clean(h.analyze_text(compat, "res://tests/tmp_rs_h1.gd")), "cross-file derives silent")
+	var refusal := "extends RefCounted\nfunc g() -> void:\n\tTmpRosterChild.take(null)\n"
+	h.check(_has_err(h.analyze_text(refusal, "res://tests/tmp_rs_h2.gd"), "param_notnull", "'m'"), "inherited refusal errors")
+	var info: Dictionary = h.load_json(USER_DIR + "TmpRosterChild.json")
+	h.check(str(info.get("extends", "")) == "TmpRosterParent", "json records extends")
+	var priv := "extends RefCounted\nfunc g(v: Variant) -> void:\n\tif v is TmpRosterChild:\n\t\tv.hid()\n"
+	var rp: Dictionary = h.analyze_text(priv, "res://tests/tmp_rs_h3.gd")
+	h.check(_has_err(rp, "private_use", "TmpRosterParent"), "inherited private names parent")
+	var miss := "extends RefCounted\nfunc g() -> void:\n\tTmpRosterChild.nope()\n"
+	var rm: Dictionary = h.analyze_text(miss, "res://tests/tmp_rs_h4.gd")
+	h.check(_clean(rm) and (rm.get("warnings", []) as Array).is_empty(), "inherited miss silent")
+
+
+func _r_refs(h) -> void:
+	_drop_json("TmpRosterTarget")
+	var syn = H.SynParser.new()
+	var ana = H.Analyzer.new()
+	ana.analyze(syn.parse_text("extends RefCounted\nfunc g() -> void:\n\tTmpRosterTarget.take(null)\n"), "res://tests/tmp_rs_f1.gd")
+	h.check((ana._last_refs as Array).has("TmpRosterTarget"), "refs record cross names")
+	var ana2 = H.Analyzer.new()
+	ana2.analyze(syn.parse_text("extends RefCounted\nfunc g() -> void:\n\tpass\n"), "res://tests/tmp_rs_f2.gd")
+	h.check((ana2._last_refs as Array).is_empty(), "refs reset per call")

@@ -35,6 +35,8 @@ func run() -> Dictionary:
 	_hotkey(h)
 	_debounce_countdown(h)
 	_plugin_impl(h)
+	_warm(h)
+	_deps(h)
 	_bar_model(h)
 	_tree_nulls(h)
 	return h
@@ -306,3 +308,50 @@ func _tree_highlight(h) -> void:
 	_check(h, ce.get_caret_line() == 2, "caret moved")
 	bar.queue_free()
 	ce.queue_free()
+
+
+func _warm(h) -> void:
+	var root := Impl.project_root()
+	_check(h, root != "" and DirAccess.dir_exists_absolute(root), "project root resolves")
+	var paths: Array = Impl.collect_project_scripts(root)
+	_check(h, not paths.is_empty(), "collect finds scripts")
+	var sorted := paths.duplicate()
+	sorted.sort()
+	_check(h, paths == sorted, "collect sorted")
+	var nodot := true
+	for p in paths:
+		if ".godot/" in str(p):
+			nodot = false
+	_check(h, nodot, "collect skips data dir")
+	_check(h, "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterTarget.gd" in paths, "collect has fixture")
+	_check(h, Impl.json_for_source("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterTarget.gd") == Impl.user_dir() + "/TmpRosterTarget.json", "json stem via roster")
+	_check(h, Impl.json_for_source("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd").ends_with("helpers.json"), "json stem via path")
+	var pair := [
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterTarget.gd",
+	]
+	var impl = Impl.new(null)
+	var done := impl.warm_step(pair, 0, 60000)
+	_check(h, done == pair.size(), "warm step completes")
+	_check(h, FileAccess.file_exists(Impl.json_for_source(pair[0])), "warm writes json")
+	done = impl.warm_step(pair, 0, 60000)
+	_check(h, done == pair.size(), "warm second pass completes")
+	_check(h, impl.warm_step(pair, pair.size(), 60000) == pair.size(), "warm past end stable")
+	_check(h, impl.warm_step([], 0, 60000) == 0, "warm empty stable")
+	DirAccess.remove_absolute(Impl.json_for_source(pair[0]))
+	DirAccess.remove_absolute(Impl.json_for_source(pair[1]))
+
+
+func _deps(h) -> void:
+	_check(h, Impl.deps_changed(["ZZMissingDep_xyz"], 0.0, Impl.user_dir()), "missing dep triggers")
+	_check(h, not Impl.deps_changed([], 0.0, Impl.user_dir()), "no refs calm")
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(Impl.user_dir()))
+	var dummy := Impl.user_dir() + "/ZZDepsDummy.json"
+	var f := FileAccess.open(dummy, FileAccess.WRITE)
+	(f as FileAccess).store_string("{}")
+	(f as FileAccess).close()
+	_check(h, Impl.deps_changed(["ZZDepsDummy"], 0.0, Impl.user_dir()), "stale stamp triggers")
+	_check(h, not Impl.deps_changed(["ZZDepsDummy"], 99999999999.0, Impl.user_dir()), "future stamp calm")
+	DirAccess.remove_absolute(dummy)
+	var impl = Impl.new(null)
+	_check(h, (impl._last_refs as Array).is_empty(), "refs start empty")

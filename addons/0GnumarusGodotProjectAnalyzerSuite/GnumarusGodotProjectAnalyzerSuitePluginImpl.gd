@@ -19,8 +19,13 @@ const Bar = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGod
 const EdTree = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteEditorTree.gd")
 const SynParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
 const Analyzer = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
+const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
 
 const DEBOUNCE_SEC := 1.0
+## Files per warm pump tick (deferred chain, cancellable).
+const WARM_CHUNK := 5
+## Milliseconds per warm tick (whichever hits first with the chunk).
+const WARM_BUDGET_MS := 120
 
 ## EditorPlugin host (null headless). Only Node services are used
 ## (add_child, get_viewport): everything else goes through singletons.
@@ -33,6 +38,10 @@ var _watched_ce: Object = null
 var _last_path := ""
 var _last_hash := 0
 var _has_last := false
+var _last_refs: Array = []
+var _last_run_unix := 0.0
+var _warm_pending: Array = []
+var _warm_idx := 0
 
 
 func _init(p_plugin: EditorPlugin = null) -> void:
@@ -89,6 +98,7 @@ func enter_tree() -> void:
 	ensure_bar()
 	_rewatch_code_edit()
 	analyze_current(false)
+	_start_warm()
 
 
 ## Registers the nullable-policy ProjectSetting once (keeps the user
@@ -127,10 +137,127 @@ static func _fresh_analyzer() -> RefCounted:
 	return ana
 
 
+## Project OS root (globalized res://). Static, headless-safe.
+static func project_root() -> String:
+	var r := ProjectSettings.globalize_path("res://")
+	if r.ends_with("/") and r.length() > 1:
+		r = r.substr(0, r.length() - 1)
+	return r
+
+
+## res:// data dir holding user JSONs (mirrors the analyzer base).
+## Static, headless-safe.
+static func user_dir() -> String:
+	return "res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user"
+
+
+## Sorted res:// paths of every project .gd (skips `.godot/`).
+## Static, pure IO, headless-safe.
+static func collect_project_scripts(root: String) -> Array:
+	var out: Array = []
+	if root == "" or not DirAccess.dir_exists_absolute(root):
+		return out
+	var dirs: Array = [root]
+	while not dirs.is_empty():
+		var dir: String = str(dirs.pop_back())
+		if dir == "" or not DirAccess.dir_exists_absolute(dir):
+			continue
+		for sub in DirAccess.get_directories_at(dir):
+			if str(sub) != ".godot":
+				dirs.append(dir + "/" + str(sub))
+		for f in DirAccess.get_files_at(dir):
+			if str(f).ends_with(".gd"):
+				out.append(_res_path(root, dir + "/" + str(f)))
+	out.sort()
+	return out
+
+
+## OS/dir path to res:// form under root (falls back to the raw path
+## outside the root). Static, pure.
+static func _res_path(root: String, abspath: String) -> String:
+	if root != "" and abspath.begins_with(root):
+		var rel := abspath.substr(root.length()).trim_prefix("/")
+		return "res://" + rel
+	return abspath
+
+
+## Expected user JSON res:// path for a source res:// path:
+## class_name via the roster reverse map, else the path-derived base
+## (same rule as the writers). Static, no IO.
+static func json_for_source(source_res_path: String) -> String:
+	var stem := Analyzer._roster_class_for_path(source_res_path)
+	if stem == "":
+		stem = SemParser.user_file_base("", "", source_res_path)
+	return user_dir() + "/" + stem + ".json"
+
+
+## True when any referenced dep JSON is missing or newer than the
+## analysis stamp (unix seconds; 1s granularity). Static, pure IO,
+## headless-safe. Callers pass the analyzer `_last_refs`.
+static func deps_changed(refs: Array, since_unix: float, dir: String) -> bool:
+	for r in refs:
+		var jp := dir + "/" + str(r) + ".json"
+		if not FileAccess.file_exists(jp):
+			return true
+		if float(FileAccess.get_modified_time(jp)) > since_unix:
+			return true
+	return false
+
+
+## One warm chunk: analyzes stale/missing-JSON sources from
+## paths[idx:], stopping at the chunk/budget cap. Returns the next
+## index (== size when done). Headless-runnable; editors pump it
+## deferred (see _warm_pump). Skips up-to-date files by mtime.
+func warm_step(paths: Array, from_idx: int, budget_ms: int) -> int:
+	var i := mini(maxi(from_idx, 0), paths.size())
+	var t0 := Time.get_ticks_msec()
+	var done := 0
+	while i < paths.size():
+		var src := str(paths[i])
+		if src != "" and FileAccess.file_exists(src):
+			var js := json_for_source(src)
+			var sm := FileAccess.get_modified_time(src)
+			if not FileAccess.file_exists(js) or sm > FileAccess.get_modified_time(js):
+				var ana = _fresh_analyzer()
+				ana.analyze(SynParser.new().parse_text(FileAccess.get_file_as_string(src)), src)
+		i += 1
+		done += 1
+		if done >= WARM_CHUNK or Time.get_ticks_msec() - t0 >= budget_ms:
+			break
+	return i
+
+
+## Starts the background warm pass (editor only — headless instances
+## never pump, so unit tests stay hermetic).
+func _start_warm() -> void:
+	_warm_pending = []
+	_warm_idx = 0
+	if not Engine.is_editor_hint():
+		return
+	_warm_pending = collect_project_scripts(project_root())
+	_warm_idx = 0
+	if not _warm_pending.is_empty():
+		call_deferred("_warm_pump")
+
+
+## One deferred warm tick; chains until done or cancelled by
+## exit_tree (which empties the pending list first).
+func _warm_pump() -> void:
+	if _warm_pending.is_empty():
+		return
+	_warm_idx = warm_step(_warm_pending, _warm_idx, WARM_BUDGET_MS)
+	if _warm_idx < _warm_pending.size():
+		call_deferred("_warm_pump")
+	else:
+		_warm_pending = []
+
+
 ## Editor exit point (forwarded by the proxy).
 func exit_tree() -> void:
 	_hook_signals(false)
 	_unwatch_code_edit()
+	_warm_pending = []
+	_warm_idx = 0
 	_drop(_debounce)
 	_debounce = null
 	_drop(_bar)
@@ -304,13 +431,17 @@ func analyze_current(announce := true) -> void:
 	if path.strip_edges() == "":
 		path = "res://untitled.gd"
 	var h := text.hash()
-	if not announce and _has_last and path == _last_path and h == _last_hash:
+	var same := not announce and _has_last and path == _last_path and h == _last_hash
+	if same and not deps_changed(_last_refs, _last_run_unix, user_dir()):
 		_rewatch_code_edit()
 		return
 	_last_path = path
 	_last_hash = h
 	_has_last = true
-	var res: Dictionary = _fresh_analyzer().analyze(SynParser.new().parse_text(text), path)
+	var ana = _fresh_analyzer()
+	var res: Dictionary = ana.analyze(SynParser.new().parse_text(text), path)
+	_last_refs = (ana._last_refs as Array).duplicate() if ana._last_refs is Array else []
+	_last_run_unix = Time.get_unix_time_from_system()
 	var issues: Array = []
 	for e in res.get("errors", []):
 		if e is Dictionary:

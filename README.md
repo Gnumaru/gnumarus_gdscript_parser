@@ -1280,8 +1280,10 @@ skip;
 `const X = null` and
 `var x := null`
 are Godot parse errors, so inference never sees them; inherited
-members are not followed cross-script (direct members only, like
-every other cross check); implicit-argument boundary checks cover
+members resolve cross-script through the JSON `extends` chain
+(direct members first, then the full parent chain via on-demand
+analysis; top-level classes only, cycles guarded); implicit-argument
+boundary checks cover
 static class calls and narrowed receivers only (`super` implicit
 stays silent — resolvable super is same-file, where the parent
 already warns at its own uses — plus engine and dynamic callees);
@@ -1289,10 +1291,10 @@ explicit `: Variant` member use errors
 `missing_method` by pre-existing engine-link design (both policies
 alike); direct call chains (`make().foo()`), member taint targets
 (`self.x = make()`) and engine/dynamic receivers stay silent for
-return-taint purposes; cross-file inheritance stays shallow (direct
-members only — parents resolve when analyzed, grandparents do not);
-unsaved buffers are invisible to the roster (save triggers rescan);
-scripts without `class_name` resolve by path only, never by name.
+return-taint purposes; cross-file `super` stays shallow (same-file
+parents only); unsaved buffers are invisible to the roster (save
+triggers rescan); scripts without `class_name` resolve by path
+only, never by name.
 
 ## Analyzer data layout
 
@@ -1311,8 +1313,8 @@ it never pollutes the project tree):
   `"deprecated"` flags on members plus per-file `analysis_errors` /
   `analysis_warnings`, maintains per-method `"param_names"` /
   `"notnull_params"` / `"nullable_params"` / `"return_types"` /
-  `"nullable_return"` signatures plus the
-  file-level `"null_policy"` for cross-script call-site checks,
+  `"nullable_return"` signatures, the file-level `"null_policy"` and
+  the `"extends"` head for cross-script call-site checks,
   and merges newly declared members into the
   roster (existing entries keep their data; nothing is ever removed,
   so a partially parsed re-analysis cannot wipe it).
@@ -1386,11 +1388,22 @@ green. `GODOT_BIN` overrides the engine path.
   unknown, opaque narrowing lenient; on-demand literal errors, dep
   JSON completeness, warm-cold equivalence, transitive taint;
   mutual-cycle termination with sequential equivalence; depth-cap
-  blocking and release).
+  blocking and release; cross-file inheritance (`extends` in JSON,
+  chain lookups, derived compat); recorded cross references per
+  analysis).
 - `tests/AnnotationsStressTest.gd` is a non-suite fixture: a
   single-file stress of every annotation, valid and invalid uses
   with documented verdicts. It parses in Godot, so its diagnostics
   come only from this analyzer.
+- `tests/bench_analyze.gd` is a manual benchmark (not a suite):
+  parse + analyze timings on the analyzer itself (~10k lines) and a
+  small file, trust vs distrust+strict. Reference numbers
+  (Godot 4.7.2, Linux, warm data dir): small file 1ms parse /
+  ~17ms analyze both modes; big file ~2.4s parse / ~4.5s trust /
+  ~5.0s distrust+strict analyze. Parse dominates proportionally;
+  distrust+strict adds ~12% on the big file. Typical open files
+  (hundreds of lines) analyze in milliseconds — debounce-safe;
+  the warm pass absorbs the rest in budgeted ticks.
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits
@@ -1442,6 +1455,11 @@ first-painted-line scan).
   also schedules one forced deferred pass: Godot's own validator
   runs after our immediate paint and resets every line background,
   so without it highlights would vanish until the next manual run.
+  On enable, a background warm pass analyzes stale project files in
+  budgeted deferred ticks (cancellable on exit), so cross-file data
+  is ready before it is needed. Repeat triggers on an unchanged
+  buffer re-analyze only when a referenced script JSON changed
+  (new/missing data converges without edits).
   **Ctrl+Shift+Alt+F5**
   forces an immediate run that also logs to the console; automatic
   runs update only the bar and highlights. Issues are shown in file
