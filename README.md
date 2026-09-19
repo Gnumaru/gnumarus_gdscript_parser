@@ -17,7 +17,7 @@ source text (.gd)
         └─> GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer   @-comments become TYPE_INFO
               └─> GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser   AST (syntax only)
                     └─> GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser  semantic errors + data-dir user/*.json
-                          └─> GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer   annotation rules (@deprecated) + JSON update
+                          └─> GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer   annotation + nullability rules + cross-script JSON update
 ```
 
 `.godot/0GnumarusGodotProjectAnalyzerSuiteData/` (native + user data)
@@ -285,8 +285,9 @@ print(result["warnings"], result["errors"])  # result["ast"] is the modified AST
   The AST root gains `analyzer_errors` / `analyzer_warnings`, and
   marked declaration nodes gain `"deprecated"` / `"private"` marks.
 - Just before returning, the data-dir `user/*.json` files are
-  updated with member flags plus per-file `analysis_errors` /
-  `analysis_warnings`.
+  updated with member flags, per-method nullability signatures and
+  per-file `analysis_errors` / `analysis_warnings` (see "Analyzer
+  data layout").
 
 ### Flow analysis (member calls + `typeof` guards)
 
@@ -322,8 +323,9 @@ func myfunc():
   (`WithSignal.Mode.ON` verifies, `.NOPE` errors).
 - Suppression-safe by construction: dynamic plain-`=` variables,
   untyped parameters, unknown types, `super` and call results without
-  known returns never error. `new` is always allowed; signals accept
-  their five methods.
+  known returns never error from type uncertainty — only proven-null
+  uses error (`null_access`), in every policy. `new` is always
+  allowed; signals accept their five methods.
 - `if typeof(x) == TYPE_Y` narrows the `then` branch, `!=` narrows
   the `else` (a leading `not`/`!` flips); every `elif` narrows from
   the accumulated previous-failed state, never from entry (conditions
@@ -348,9 +350,12 @@ func myfunc():
         myvar.queue_free()      # OK: narrowed to Node
 ```
 
-- Not yet: assignment tracking, `and`/`or` compounds, loop-carried
-  narrowing, unreachable detection, subscript result types, operator
-  checking (the semantic pass owns operators).
+- Not yet: `and`/`or` compounds, loop-carried narrowing (beyond
+  `while`/`if` guards), unreachable detection, subscript result
+  types, operator checking (the semantic pass owns operators).
+  Assignment state is fully tracked instead: `= null` sets exact
+  heads, provably-non-null writes mark (distrust) or revert, unknown
+  writes reset; call results taint and flow through generics.
 
 ## 7. GnumarusGodotProjectAnalyzerSuiteTextResourceParser
 
@@ -429,7 +434,7 @@ print(cache["by_path"].get("res://scene.tscn", ""))
   "errors", "error_list", "path"}`. Static helpers `id_to_text()`,
   `text_to_id()` (malformed text gives `-1`) and `encode_entry()`
   (builds synthetic bytes) round-trip exactly against the engine:
-  all 51 local cache entries decode byte-exact and match every
+  every local cache entry decodes byte-exact and matches every
   `.uid` sidecar.
 - Pairs well with the scene parser: an `ExtResource`/`SubResource`
   uid from a `.tscn` resolves through `by_uid` to its `res://` path.
@@ -450,6 +455,9 @@ Available annotations at a glance (details in each subsection below):
 - `@return` — declares a function or lambda return type.
 - `@param` — declares a parameter type.
 - `@var` — declares or redefines a variable type, narrowing included.
+
+Nullability configuration tags (`# @nullable_policy`,
+`# @strict_untyped`) are documented under Nullability, not here.
 
 Type annotations live in comments and follow the general shape:
 
@@ -634,7 +642,8 @@ var f = func():
 ```
 
 - Every named member must be a known type (the script class, script
-  classes/enums, or a data-dir JSON file); unknown names error
+  classes/enums, roster-known global classes, or a data-dir JSON
+  file); unknown names error
   (`return_unknown_type`). Empty specs, non-identifiers, empty union
   arms and `void` combined with names error (`return_malformed`).
 - When the function also has a `->` annotation, every `@return`
@@ -647,7 +656,8 @@ var f = func():
 - Misplaced tags are errors (`return_misplaced`): file header, class
   name, variables, signals, parameters, and any statement that is not
   a function or a lambda. Marked nodes gain a `return_ann` stamp;
-  nothing is written to the user JSON files.
+  per-method `return_types` / `nullable_return` are written to the
+  user JSON files for cross-script taint.
 
 ### `@var`
 
@@ -763,6 +773,18 @@ var x: Array = [1, "a"]   # OK: length and elements conform
 var y: Array = [1, 2, 3]  # ERROR: expects 2 elements, got 3
 # @var z Pair
 var z: Array = ["a", "b"] # ERROR: element 0 expects 'int', got 'String'
+# @var w Pair
+var w: Array = [3.14, "a"] # ERROR: element 0 expects 'int', got 'float'
+# @tuple PairF 2 float float
+# @var v PairF
+var v: Array = [1, 2]     # OK: int widens into float
+```
+
+Literal elements check directionally: an `int` literal fits an
+`int` or `float` slot (Godot itself accepts `var f: float = 1`),
+but a `float` literal never fits an `int` slot (Godot silently
+truncates `var i: int = 3.14` to `3` — exactly the data loss this
+check exists to catch).
 
 func f():
     print(x[0])             # OK: int
@@ -816,8 +838,9 @@ var y := "a"               # ERROR: neither int nor float is String
 ```
 
 - Aliases are global: one `kind: "alias"` JSON per name under
-  `user/`, usable from any file once written (use before that
-  errors `*_unknown_type`, like any missing type). Definitions live
+  `user/`, usable from any file once written (use before that errors
+  `*_unknown_type` — unlike script classes, which the roster resolves
+  without analysis). Definitions live
   top-level only (`alias_misplaced` elsewhere); duplicates, clashes
   with script/engine/template types and circular definitions error
   (`alias_conflict`); bad shapes error (`alias_malformed`,
@@ -870,8 +893,10 @@ var x: Variant              # OK: known name, narrowing deferred
   `int`; reassignments (`y = id2(..)`) update it. Declarations own
   their type (vartype/`@var`/inference beat call results), guards
   erase trees when narrowing, dynamic results never widen.
-- Gaps (documented): `@generic` classes come next; only bare and
-  `self.` call values feed assignments (no `obj.m()` results yet).
+- Gaps (documented): `@generic` classes come next; generic
+  substitution results feed assignments through bare/`self` calls
+  only (member-call results carry nullability taint instead — see
+  Nullability — but not generic substitution).
 
 ### `@generic`
 
@@ -921,9 +946,9 @@ func f():
 - Gaps (documented): the script root itself cannot be generic (no
   `CLASS_DECL` to attach to); bare template names in vartypes/arrows
   (`var x: TplT`) error in the semantic pass (untouched) — use
-  applications or annotations; methods cannot carry `@return`
-  (pre-existing rule), so generic method returns flow only via
-  `->` arrows.
+  applications or annotations; `@return` marks methods normally, but
+  template variables in it do not substitute — generic method returns
+  flow only via `->` arrows.
 
 ### `@interface`
 
@@ -1025,6 +1050,12 @@ var p: Dictionary = {"x": 1, "y": 2}   # OK: exact keys, conforming values
 var q: Dictionary = {"x": 1}           # ERROR: missing field 'y'
 # @var r Point
 var r: Dictionary = {"x": 1, "y": 2, "z": 3}  # ERROR: expects 2 fields, got 3
+# @var s Point
+var s: Dictionary = {"x": 1, "y": 3.14} # ERROR: field 'y' expects 'int', got 'float'
+```
+
+Literal values check directionally like tuple elements: `int`
+widens into `float` slots, `float` never fits `int`.
 
 func f():
     print(p.x)                    # OK: int
@@ -1103,10 +1134,12 @@ checked too: passing a `null` literal to a notnull parameter errors
 (`param_notnull`) for bare, `self.`, same-file instance/static,
 `super` and lambda-held calls, one error per offending argument at
 its own line; maybe-null
-arguments stay silent, template-typed parameters belong to generic
+arguments stay silent in trust but warn in distrust (refusal
+direction below), template-typed parameters belong to generic
 machinery (no doubles), and cross-script calls resolve through the
 callee's `user/*.json` signature (`param_names`/`notnull_params`/
-`nullable_params` maintained per method). `@return notnull` errors
+`nullable_params`/`return_types`/`nullable_return` maintained per
+method). `@return notnull` errors
 `return null`
 (`return_notnull`, lambdas and redundant parentheses included); call
 results are trusted
@@ -1181,7 +1214,8 @@ IMPLICIT parameter of a trust callee warns at the argument
 callee file is distrust (it warns at its own use sites — no
 doubles), when the parameter consents (`nullable`) or refuses
 (`notnull`, whose literal rule owns that direction), for stale JSONs
-without the keys, and for same-file calls (one file, one policy).
+without the keys (missing files are analyzed on demand first — see
+below), and for same-file calls (one file, one policy).
 The refusal direction is covered everywhere the literal rule is:
 same-file, `self.`, `super` and lambda-held `notnull` parameters
 warn on declared-maybe arguments in distrust
@@ -1199,11 +1233,14 @@ truth, not suspicion): `x = null` sets exact-null heads, so a later
 target errors at the write first, then the use reports the resulting
 null too); provably-non-null writes (value/array/dict literals,
 `self`, `X.new()`, calls to `notnull`-returning functions) revert to
-the declaration and mark non-null; any other write fully resets
+the declaration and, in distrust only, mark non-null (trust keeps
+incidental state silent — only explicit user checks, i.e. guard
+marks, establish intent there); any other write fully resets
 heads, taint and guard marks (stale marks must not survive).
 Declaration initializers stay lenient: `= null` and unknown inits
 never invalidate (the null-init placeholder idiom is invisible to
-intra-procedural flow), only provably-non-null inits mark.
+intra-procedural flow), only provably-non-null inits mark (in
+distrust).
 `self.x` writes are out — env cannot represent members.
 
 Type tests prove non-null: `if v is Node:` runs the holding branch
@@ -1213,6 +1250,25 @@ and `if v is not Node: return` guard clauses work the same way.
 `is_instance_of` and non-nil `typeof` tests count; `x is Variant`
 proves nothing (`null is Variant` is true) and NIL forms belong to
 the null rules above.
+
+Cross-script references resolve without opening files. A process-wide
+class roster maps every global `class_name` to its source: the
+engine's `global_script_class_cache.cfg` when present (mtime-checked
+per analysis), else a recursive `class_name` line scan (works on
+unparseable files too; skips `.godot/`; collisions keep the
+sorted-first path; at most one rescan per analysis, on lookup miss).
+Roster-known but never-analyzed classes are opaque: annotations
+accept the name, narrowing stays lenient (unknown hierarchy proves
+neither compat nor contradiction), and member positions stay silent
+— while names absent from the roster still error (typo detection is
+now sound: unknown means typo, not unseen). Member data arrives via
+bounded on-demand analysis: the first cross check against a class
+without JSON analyzes its file in a fresh instance (explicit
+policy/strict carry over; its own file tags apply; its JSON lands on
+disk as a side effect), guarded by a shared resolve stack (cycles
+read as missing — partial first pass, converges on re-analysis) and
+a depth cap of 4. No user action needed: open one file and its
+transitive references sharpen automatically.
 
 Gaps (documented): guard clauses need a trailing `return`
 (`break`/`continue`
@@ -1233,7 +1289,10 @@ explicit `: Variant` member use errors
 `missing_method` by pre-existing engine-link design (both policies
 alike); direct call chains (`make().foo()`), member taint targets
 (`self.x = make()`) and engine/dynamic receivers stay silent for
-return-taint purposes.
+return-taint purposes; cross-file inheritance stays shallow (direct
+members only — parents resolve when analyzed, grandparents do not);
+unsaved buffers are invisible to the roster (save triggers rescan);
+scripts without `class_name` resolve by path only, never by name.
 
 ## Analyzer data layout
 
@@ -1322,7 +1381,16 @@ green. `GODOT_BIN` overrides the engine path.
   boundary consent, `is` type-test narrowing, the same-file/`super`/
   call-result frontier, member/lambda/cross-file taint shapes, `elif`
   narrowing, strict-untyped slots with setting/tag, and reassignment
-  invalidation).
+  invalidation),
+  `test_roster.gd` (class roster: cold names accepted, typos still
+  unknown, opaque narrowing lenient; on-demand literal errors, dep
+  JSON completeness, warm-cold equivalence, transitive taint;
+  mutual-cycle termination with sequential equivalence; depth-cap
+  blocking and release).
+- `tests/AnnotationsStressTest.gd` is a non-suite fixture: a
+  single-file stress of every annotation, valid and invalid uses
+  with documented verdicts. It parses in Godot, so its diagnostics
+  come only from this analyzer.
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits
@@ -1363,7 +1431,11 @@ present (headless fallback is the built-in constant, then the legacy
 first-painted-line scan).
 
 - Install: open the project in Godot 4.7.2+, enable the plugin in
-  Project → Plugins. No project files are touched by the plugin.
+  Project → Plugins. No tracked source files are touched by the
+  plugin (analysis artifacts land gitignored under `.godot/`).
+  Nullability defaults live in Project → Project Settings (see
+  Nullability): `gnumarus_analyzer/nullable_policy`
+  (`trust`/`distrust`) and `gnumarus_analyzer/strict_untyped`.
 - Use: open any GDScript and issues show right away; after that
   analysis is realtime with debounce (1s after the last edit, or past
   Godot's `idle_parse_delay` when larger). Opening/switching files

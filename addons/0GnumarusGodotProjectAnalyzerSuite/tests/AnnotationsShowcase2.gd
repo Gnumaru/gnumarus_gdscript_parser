@@ -29,6 +29,10 @@ var pair_ok: Array = [1, "a"] # OK: length and elements conform
 
 # @var pair_bad ShowPair
 var pair_bad: Array = [1, 2, 3] # ERROR: expects 2 elements, got 3
+# @var pair_bad2 ShowPair
+var pair_bad2: Array = [1] # ERROR: expects 2 elements, got 1
+# @var pair_bad3 ShowPair
+var pair_bad3: Array = [1, 2] # ERROR: element 2 should be String
 
 
 func tuple_demo() -> void:
@@ -43,6 +47,10 @@ var point_ok: Dictionary = {"x": 1, "y": 2} # OK: exact keys
 
 # @var point_bad ShowPoint
 var point_bad: Dictionary = {"x": 1} # ERROR: expects 2 fields, got 1
+# @var point_bad2 ShowPoint
+var point_bad2: Dictionary = {"x": 1, "z": 2} # ERROR: has no field "z"
+# @var point_bad3 ShowPoint
+var point_bad3: Dictionary = {"x": 1, "y": 3.14} # ERROR: field "y" should be int
 
 
 # @alias show_number int|float @endalias

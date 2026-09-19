@@ -101,6 +101,8 @@ func _t_use(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\n# @tuple T2 2 int String\n# @var x T2\nvar x: Array = [foo(), \"a\"]\n", "res://tests/tmp_tup_u5.gd")), "complex element skipped")
 	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T2 2 int String\n# @var x T2\nvar x: Array = [1, 2, 3] # trailing note\n", "res://tests/tmp_tup_u6.gd"), "tuple_mismatch", "expects 2 elements, got 3"), "trailing comment keeps mismatch")
 	h.check(_clean(h.analyze_text("extends Node\n# @tuple T2 2 int String\n# @var x T2\nvar x: Array = [1, \"a\"] # trailing note\n", "res://tests/tmp_tup_u7.gd")), "trailing comment keeps clean literal clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T1 1 int\n# @var x T1\nvar x: Array = [3.14]\n", "res://tests/tmp_tup_u8.gd"), "tuple_mismatch", "element 0 expects 'int', got 'float'"), "float narrowing mismatches")
+	h.check(_clean(h.analyze_text("extends Node\n# @tuple T1 1 float\n# @var x T1\nvar x: Array = [1]\n", "res://tests/tmp_tup_u9.gd")), "int widening clean")
 
 
 func _t_index(h) -> void:

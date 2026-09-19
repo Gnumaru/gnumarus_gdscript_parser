@@ -416,7 +416,8 @@ func _nb_reassign(h) -> void:
 	var litmark := "extends RefCounted\nfunc g() -> void:\n\tvar u = 1\n\tu.foo()\n"
 	h.check(_clean(h.analyze_text(litmark, "res://tests/tmp_nb_w07.gd", "distrust", true)), "literal write proves non-null")
 	var litnull := "extends RefCounted\nfunc g() -> void:\n\tvar u = 1\n\tu = null\n"
-	h.check(_has_err(h.analyze_text(litnull, "res://tests/tmp_nb_w08.gd"), "var_notnull", "'u'"), "null after literal errors")
+	h.check(_has_err(h.analyze_text(litnull, "res://tests/tmp_nb_w08.gd", "distrust"), "var_notnull", "'u'"), "null after literal errors in distrust")
+	h.check(_clean(h.analyze_text(litnull, "res://tests/tmp_nb_w08b.gd")), "null after literal silent in trust")
 	var member := "extends RefCounted\nvar x: Node\nfunc g() -> void:\n\tself.x = null\n\tself.x.queue_free()\n"
 	h.check(_clean(h.analyze_text(member, "res://tests/tmp_nb_w09.gd", "distrust")), "member reassign silent (gap)")
 	var cascade := "extends RefCounted\n# @var x Node notnull\nvar x: Node\nfunc g() -> void:\n\tx = null\n\tx.queue_free()\n"

@@ -69,6 +69,7 @@ func null_demo() -> void:
 	var other: Variant = GnumarusGodotProjectAnalyzerSuiteAnnotationsShowcase2.new()
 	if other == null:
 		other.queue_free() # ERROR: provably null
+	# the ShowMaybeNode alias was defined in other class, in GnumarusGodotProjectAnalyzerSuiteAnnotationsShowcase2
 	# @var okay ShowMaybeNode
 	var okay: Node # OK: both arms fit Node
 	# @var bad ShowMaybeNode

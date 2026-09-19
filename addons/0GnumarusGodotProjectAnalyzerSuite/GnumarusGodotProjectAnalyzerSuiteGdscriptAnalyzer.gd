@@ -230,6 +230,9 @@ const SemParser = preload("GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticPars
 ## Preloaded like SemParser so the native database can be ensured
 ## without relying on the global class cache.
 const NativeDumper = preload("GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
+## Preloaded like SemParser so on-demand dependency analysis can
+## parse referenced scripts without relying on global classes.
+const SynParser = preload("GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
 
 ## Member kinds tracked per owner. Owner "" is the script root,
 ## otherwise a dotted inner path like "Outer" or "Outer.Inner".
@@ -377,6 +380,231 @@ static func _read_project_strict() -> bool:
 	return bool(ProjectSettings.get_setting(SETTING_STRICT_UNTYPED, false))
 
 
+## Class roster: global script class_name -> res:// source path for
+## the whole project. Tells "a script by this name exists" apart from
+## "unknown identifier" without analyzing anything: names resolve
+## (annotations accept them, chains treat them as opaque scripts)
+## while member data stays lazy (on-demand analysis fills it).
+## Process-static (shared across instances and sequential analyze()
+## calls); content comes from real files on disk, so it is
+## deterministic. First hit wins on collisions (sorted paths).
+static var _roster_names: Dictionary = {}
+## Project root the roster was built for (a different root resets it:
+## headless runs can analyze several projects in one process).
+static var _roster_root := ""
+## mtime of the cfg the roster was built from (-1 none yet, -2
+## regex-scan without cfg).
+static var _roster_cfg_mtime := -1
+## Max nested on-demand dependency analyses (cycle guard is the
+## shared _resolve_stack; depth caps pathological cascades).
+const MAX_DEP_DEPTH := 4
+## Class names currently being on-demand analyzed up-stack (shared
+## across the fresh instances of one cascade): re-entry reads as
+## missing (partial first pass, converges on re-analysis).
+static var _resolve_stack: Array = []
+## One regex rescan per analyze() call at most (lookup misses).
+var _roster_swept := false
+
+
+## True when the roster knows a global script class by exact name.
+static func _roster_has(tname: String) -> bool:
+	return tname != "" and _roster_names.has(tname)
+
+
+## res:// source path behind a roster class ("" when absent). Pure.
+static func _roster_path(tname: String) -> String:
+	return str(_roster_names.get(tname, ""))
+
+
+## Refreshes the roster when the engine cache is new/changed/absent:
+## `global_script_class_cache.cfg` (the engine's own truth) when
+## present, else a recursive `class_name` line scan (works on
+## unparseable files too; skips `.godot/`). Static: no instance.
+static func _roster_refresh(root: String) -> void:
+	if root == "":
+		return
+	if _roster_root != root:
+		_roster_root = root
+		_roster_names = {}
+		_roster_cfg_mtime = -1
+	var cfg := root + "/.godot/global_script_class_cache.cfg"
+	if FileAccess.file_exists(cfg):
+		var mt := FileAccess.get_modified_time(cfg)
+		if mt == _roster_cfg_mtime and not _roster_names.is_empty():
+			return
+		var parsed := _roster_parse_cfg(FileAccess.get_file_as_string(cfg))
+		if not parsed.is_empty():
+			_roster_names = parsed
+		_roster_cfg_mtime = mt
+		return
+	if _roster_cfg_mtime == -2 and not _roster_names.is_empty():
+		return
+	_roster_names = _roster_scan_files(root)
+	_roster_cfg_mtime = -2
+
+
+## Parses engine cache text into {class_name: res:// path} (.gd only;
+## other languages cannot be analyzed). Chunk-split (never DOTALL):
+## each `{...}` entry contributes its first class + first path.
+static func _roster_parse_cfg(text: String) -> Dictionary:
+	var out := {}
+	for chunk in text.split("}, {"):
+		var cpos := chunk.find("\"class\": &\"")
+		if cpos < 0:
+			continue
+		var cstart := cpos + 11
+		var cend := chunk.find("\"", cstart)
+		if cend <= cstart:
+			continue
+		var cname := chunk.substr(cstart, cend - cstart)
+		if not _is_type_name(cname):
+			continue
+		var ppos := chunk.find("\"path\": \"")
+		if ppos < 0:
+			continue
+		var pstart := ppos + 9
+		var pend := chunk.find("\"", pstart)
+		if pend <= pstart:
+			continue
+		var ppath := chunk.substr(pstart, pend - pstart)
+		if not ppath.ends_with(".gd"):
+			continue
+		if not out.has(cname):
+			out[cname] = ppath
+	return out
+
+
+## Recursive `{class_name: res:// path}` line scan under root
+## (skips `.godot/`): first `class_name <Name>` line per file wins;
+## collisions keep the sorted-first path. Static: no instance.
+static func _roster_scan_files(root: String) -> Dictionary:
+	var found: Dictionary = {}
+	var dirs: Array = [root]
+	while not dirs.is_empty():
+		var dir: String = str(dirs.pop_back())
+		if dir == "" or not DirAccess.dir_exists_absolute(dir):
+			continue
+		for sub in DirAccess.get_directories_at(dir):
+			if str(sub) != ".godot":
+				dirs.append(dir + "/" + str(sub))
+		for f in DirAccess.get_files_at(dir):
+			if not str(f).ends_with(".gd"):
+				continue
+			var fpath := dir + "/" + str(f)
+			var cname := _roster_file_class(fpath)
+			if cname == "":
+				continue
+			if found.has(cname):
+				(found[cname] as Array).append(fpath)
+			else:
+				found[cname] = [fpath]
+	var out := {}
+	for cname in found.keys():
+		var paths: Array = (found[cname] as Array).duplicate()
+		paths.sort()
+		var rel := str(paths[0])
+		if rel.begins_with(root):
+			rel = rel.substr(root.length())
+		if not rel.begins_with("res://"):
+			rel = "res://" + rel.trim_prefix("/")
+		out[cname] = rel
+	return out
+
+
+## class_name behind one file's first `class_name <Name>` line (""
+## when absent or invalid). Reads plain text: broken files still
+## contribute their name. Static: no instance.
+static func _roster_file_class(fpath: String) -> String:
+	if not FileAccess.file_exists(fpath):
+		return ""
+	for line in FileAccess.get_file_as_string(fpath).split("\n"):
+		var s := str(line).strip_edges()
+		if not s.begins_with("class_name "):
+			continue
+		var rest := s.substr(11).strip_edges()
+		var end := rest.find(" ")
+		var tab := rest.find("\t")
+		if tab >= 0 and (end < 0 or tab < end):
+			end = tab
+		var hash := rest.find("#")
+		if hash >= 0 and (end < 0 or hash < end):
+			end = hash
+		var cname := rest if end < 0 else rest.substr(0, end)
+		if _is_type_name(cname):
+			return cname
+		return ""
+	return ""
+
+
+## True for a roster-known script class with no usable info in this
+## run (no engine entry, no JSON on disk, no same-file member): the
+## name exists, the members are opaque. Compat and name checks stay
+## lenient on opaque (unknown hierarchy); never true for builtins,
+## value types or dynamic slots.
+func _opaque_script(tname: String) -> bool:
+	if tname == "" or tname == "Variant" or tname == "dynamic" or tname == "null":
+		return false
+	if not _roster_has(tname):
+		return false
+	if not _engine_info(tname).is_empty():
+		return false
+	if tname == _script_class and tname != "":
+		return false
+	if not _iface_spec(tname).is_empty():
+		return false
+	if not _type_info(tname).is_empty():
+		return false
+	for key in _members.keys():
+		var table: Dictionary = _members[key]
+		if table.has(tname) and str((table[tname] as Dictionary).get("kind", "")) in ["class", "enum"]:
+			return false
+	return true
+
+
+## Script info with on-demand dependency analysis: roster-known
+## classes without a data-dir JSON get analyzed right here (fresh
+## instance; the dep JSON lands on disk as a side effect), then the
+## local miss cache is dropped and the info re-read. Bounded by the
+## shared resolve stack (cycles read as missing — partial first
+## pass, converges on re-analysis) and MAX_DEP_DEPTH. Configuration
+## (explicit policy/strict) carries over; file tags apply inside the
+## sub-analysis naturally. Returns {} when nothing resolves.
+func _ensure_script_info(tname: String) -> Dictionary:
+	if tname == "" or tname == "_" or tname == "null" or tname == "self" or tname == "super":
+		return {}
+	if tname == _script_class and tname != "":
+		return {}
+	var info := _type_info(tname)
+	if not info.is_empty():
+		return info
+	if not _roster_has(tname):
+		return {}
+	if tname in _resolve_stack:
+		return {}
+	if _resolve_stack.size() >= MAX_DEP_DEPTH:
+		return {}
+	var path := _roster_path(tname)
+	if path == "" or not FileAccess.file_exists(path):
+		if not _roster_swept and _project_root != "":
+			_roster_swept = true
+			var swept := _roster_scan_files(_project_root)
+			for k in swept.keys():
+				if not _roster_names.has(k):
+					_roster_names[k] = swept[k]
+			return _ensure_script_info(tname)
+		return {}
+	_resolve_stack.append(tname)
+	var sub := GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.new()
+	if _policy_explicit:
+		sub.null_policy = null_policy
+	if _strict_explicit:
+		sub.strict_untyped = strict_untyped
+	sub.analyze(SynParser.new().parse_text(FileAccess.get_file_as_string(path)), path)
+	_resolve_stack.pop_back()
+	_type_cache.erase(tname)
+	return _type_info(tname)
+
+
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
 ## the modified "ast" plus flat "errors" and "warnings" arrays.
 ## script_path should be the res:// path of the analyzed script (used
@@ -404,6 +632,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 	_pending_vartype_bounds = []
 	_file_policy = ""
 	_file_strict = ""
+	_roster_swept = false
 	if _policy_explicit:
 		_policy_base = null_policy
 	else:
@@ -425,6 +654,7 @@ func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
 		_project_root = SemParser.fallback_root(anchor + "/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
 	_script_resource_path = SemParser.resource_path_for(script_path, _project_root)
 	_write_base = _compute_write_base(_project_root)
+	_roster_refresh(_project_root)
 	if not _ensure_native_types():
 		ast["analyzer_errors"] = _errors
 		ast["analyzer_warnings"] = _warnings
@@ -1273,12 +1503,17 @@ static func _infer_lit_elem(elem: Variant) -> String:
 	return ""
 
 
-## Literal-ish compatibility for tuple elements (mirrors the semantic
-## numeric/string families; NULL and complex elements skip).
+## Literal-ish compatibility for tuple/struct elements (mirrors the
+## semantic string family; NULL and complex elements skip). Numerics
+## are DIRECTIONAL, not one family: an `int` literal widens into a
+## `float` slot (Godot itself accepts `var f: float = 1`), but a
+## `float` literal never fits an `int` slot (Godot silently truncates
+## `var i: int = 3.14` to 3 — exactly the data loss this checker
+## exists to catch).
 func _lit_compatible(et: String, mname: String) -> bool:
 	if et == mname:
 		return true
-	if et in ["int", "float"] and mname in ["int", "float"]:
+	if et == "int" and mname == "float":
 		return true
 	if et in ["String", "StringName", "NodePath"] and mname in ["String", "StringName", "NodePath"]:
 		return true
@@ -2778,6 +3013,8 @@ func _check_nullpolicy_clash(what: String, malformed_kind: String, spec: Diction
 		if ms == "null" or _null_fits(ms):
 			return false
 		if _aliases.has(ms) or not _alias_def(ms).is_empty():
+			return false
+		if _opaque_script(ms):
 			return false
 	_error(malformed_kind, what + " nullable contradicts non-nullable type '" + str(spec.get("raw", "")) + "'", line, col, owner)
 	return true
@@ -4871,7 +5108,8 @@ func _engine_chain(tname: String) -> Array:
 
 
 ## A @return member is known when it is the script class, a script class
-## or enum member, or a data-dir JSON file exists for it.
+## or enum member, a roster-known global script class, or a data-dir
+## JSON file exists for it.
 func _type_known(tname: String) -> bool:
 	if tname == "null":
 		return true
@@ -4891,6 +5129,8 @@ func _type_known(tname: String) -> bool:
 		var table: Dictionary = _members[key]
 		if table.has(tname) and str((table[tname] as Dictionary).get("kind", "")) in ["class", "enum"]:
 			return true
+	if _roster_has(tname):
+		return true
 	return _type_file_exists(tname)
 
 
@@ -5008,6 +5248,8 @@ func _nominal_compat(member: String, ref: String) -> bool:
 	if member == "null":
 		return _null_fits(ref)
 	if member == ref or _derives_from(member, ref):
+		return true
+	if _opaque_script(member) or _opaque_script(ref):
 		return true
 	if ref == "Array" and _is_tuple_name(member):
 		return true
@@ -6656,7 +6898,7 @@ func _user_member_entry(tname: String, seg: String) -> Dictionary:
 		return {}
 	if _script_class != "" and tname == _script_class:
 		return {}
-	var info := _type_info(tname)
+	var info := _ensure_script_info(tname)
 	if info.is_empty() or str(info.get("kind", "")) != "script":
 		return {}
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
@@ -8052,7 +8294,7 @@ func _check_cross_notnull(tname: String, tokens: Array, j: int, owner: String) -
 		return
 	if _script_class != "" and tname == _script_class:
 		return
-	var info := _type_info(tname)
+	var info := _ensure_script_info(tname)
 	if info.is_empty() or str(info.get("kind", "")) != "script":
 		return
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
@@ -8111,7 +8353,7 @@ func _check_cross_maybe(tname: String, tokens: Array, j: int, scope: Dictionary,
 		return
 	if _script_class != "" and tname == _script_class:
 		return
-	var info := _type_info(tname)
+	var info := _ensure_script_info(tname)
 	if info.is_empty() or str(info.get("kind", "")) != "script":
 		return
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
@@ -8187,7 +8429,7 @@ func _check_cross_notnull_maybe(tname: String, tokens: Array, j: int, scope: Dic
 		return
 	if _script_class != "" and tname == _script_class:
 		return
-	var info := _type_info(tname)
+	var info := _ensure_script_info(tname)
 	if info.is_empty() or str(info.get("kind", "")) != "script":
 		return
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
@@ -9411,7 +9653,7 @@ func _apply_return_taint(vname: String, vtoks: Array, scope: Dictionary, fn: Var
 
 ## Cross-file static return signature behind an assignment RHS shaped
 ## `Lib.seg(...)` ({} otherwise): delegates shape + shadow checks to
-## _json_return_sig. Pure.
+## _json_return_sig (which may analyze the target on demand).
 func _taint_json_sig(vtoks: Array, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> Dictionary:
 	var tt := _trim_trivia(vtoks)
 	if tt.size() < 5 or not (tt[0] is Dictionary):
@@ -9432,10 +9674,10 @@ func _taint_json_sig(vtoks: Array, scope: Dictionary, fn: Variant, env: Dictiona
 ## Return signature behind a cross-file call (`Lib.seg()` static, or
 ## `base.seg()` on a shadowed base whose env-aware type resolves to a
 ## script): {"nullable", "types"} from the target script's user JSON
-## (stale files without the keys read as non-nullable). {} when no
-## script resolves or the method is missing. Union bases merge MAYBE:
-## any nullable arm flags, heads come from the first resolving arm.
-## Pure.
+## (stale files without the keys read as non-nullable; missing files
+## are analyzed on demand). {} when no script resolves or the method
+## is missing. Union bases merge MAYBE: any nullable arm flags, heads
+## come from the first resolving arm.
 func _json_return_sig(base: String, seg: String, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> Dictionary:
 	if base == "" or base == "_" or base == "self" or base == "super" or seg == "" or seg == "_" or seg == "new":
 		return {}
@@ -9457,7 +9699,7 @@ func _json_return_sig(base: String, seg: String, scope: Dictionary, fn: Variant,
 		var ts := str(t)
 		if ts == "" or ts == "dynamic" or ts == "null" or ts == "Variant":
 			continue
-		var info := _type_info(ts)
+		var info := _ensure_script_info(ts)
 		if info.is_empty() or str(info.get("kind", "")) != "script":
 			continue
 		if _script_class != "" and str(info.get("class_name", "")) == _script_class:
@@ -9480,11 +9722,11 @@ func _json_return_sig(base: String, seg: String, scope: Dictionary, fn: Variant,
 
 
 ## Return signature behind a cross-file static call (`Lib.seg()`):
-## {"nullable", "types"} from the target script's user JSON. {}
-## when the class is unknown, not a script, or the method is missing.
-## Pure.
+## {"nullable", "types"} from the target script's user JSON (missing
+## files are analyzed on demand). {} when the class is unknown, not a
+## script, or the method is missing.
 func _json_static_return_sig(tname: String, seg: String) -> Dictionary:
-	var info := _type_info(tname)
+	var info := _ensure_script_info(tname)
 	if info.is_empty() or str(info.get("kind", "")) != "script":
 		return {}
 	if _script_class != "" and str(info.get("class_name", "")) == _script_class:
@@ -9581,9 +9823,11 @@ func _taint_rhs_node(vtoks: Array, scope: Dictionary, fn: Variant, env: Dictiona
 ## null_access, even for nullable slots); provably-non-null RHS
 ## (value literals, array/dict literals, `self`, `X.new()`, calls to
 ## notnull-returning functions incl. cross-file ones with clean
-## signatures) reverts heads to the declaration and sets the notnull
-## mark; anything else fully resets (heads, tree, watch and notnull
-## mark go — a stale guard mark must not survive an unknown write).
+## signatures) reverts heads to the declaration and, in distrust
+## only, marks non-null (trust keeps incidental state silent — only
+## explicit user checks, i.e. guard marks, establish intent there);
+## anything else fully resets (heads, tree, watch and flow marks go —
+## a stale guard mark must not survive an unknown write).
 ## Declaration stamps (`notnull` @var/@param) are permanent and never
 ## reset: only flow marks clear. `notnull` targets still error on
 ## `= null` first (via _check_null_assign); the env update follows
@@ -9606,7 +9850,8 @@ func _apply_assign_invalidation(vname: String, vtoks: Array, scope: Dictionary, 
 		(env as Dictionary).erase(vname)
 		(env as Dictionary).erase(ENV_TREE_PREFIX + vname)
 		(env as Dictionary).erase(ENV_WATCH_PREFIX + vname)
-		(env as Dictionary)[ENV_NOTNULL_PREFIX + vname] = true
+		if _null_distrust():
+			(env as Dictionary)[ENV_NOTNULL_PREFIX + vname] = true
 		return
 	if is_init:
 		return
@@ -9799,6 +10044,8 @@ func _heads_have_null(itypes: Array) -> bool:
 ## needs no branch: member use through it already errors
 ## `missing_method` (it links as an engine type with no members), so
 ## both modes stay equally strict there by pre-existing design.
+## Roster-known heads are analyzed on demand first, so the first
+## touch warns exactly like later ones (no order dependence).
 func _watchable_heads(itypes: Array) -> bool:
 	for t in itypes:
 		var ts := str(t)
@@ -9806,12 +10053,21 @@ func _watchable_heads(itypes: Array) -> bool:
 			return true
 		if ts == "" or ts == "dynamic" or ts == "null" or ts == "Variant":
 			continue
+		if _roster_has(ts):
+			_ensure_script_info(ts)
+			if _is_object_like(ts):
+				return true
 		if _aliases.has(ts) or not _alias_def(ts).is_empty():
 			var exp := _expand_tree_aliases((_alias_def(ts) as Dictionary).get("tree", {}))
 			if bool(exp.get("ok", false)):
 				for h in _tree_top_heads(exp.get("node", {})):
-					if _is_object_like(str(h)):
+					var hs := str(h)
+					if _is_object_like(hs):
 						return true
+					if _roster_has(hs):
+						_ensure_script_info(hs)
+						if _is_object_like(hs):
+							return true
 	return false
 
 

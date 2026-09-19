@@ -96,6 +96,8 @@ func _s_use(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 m:Variant\n# @var x S\nvar x: Dictionary = {\"m\": 1}\n", "res://tests/tmp_st_u6.gd")), "unknown field accepts literal")
 	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1} # trailing note\n", "res://tests/tmp_st_u7.gd"), "struct_mismatch", "expects 2 fields, got 1"), "trailing comment keeps mismatch")
 	h.check(_clean(h.analyze_text("extends Node\n# @struct S 2 a:int b:String\n# @var x S\nvar x: Dictionary = {\"a\": 1, \"b\": \"s\"} # trailing note\n", "res://tests/tmp_st_u8.gd")), "trailing comment keeps clean literal clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 1 a:int\n# @var x S\nvar x: Dictionary = {\"a\": 3.14}\n", "res://tests/tmp_st_u9.gd"), "struct_mismatch", "field 'a' expects 'int', got 'float'"), "float narrowing mismatches")
+	h.check(_clean(h.analyze_text("extends Node\n# @struct S 1 a:float\n# @var x S\nvar x: Dictionary = {\"a\": 1}\n", "res://tests/tmp_st_u10.gd")), "int widening clean")
 
 
 func _s_keys_members(h) -> void:
