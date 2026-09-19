@@ -29,12 +29,15 @@ func result() -> Dictionary:
 
 ## Parses + analyzes a source string with fresh instances. `policy`
 ## optionally sets the analyzer nullability policy ("trust"/"distrust";
-## "" keeps the default) for the fresh instance.
-func analyze_text(src: String, path: String, policy := "") -> Dictionary:
+## "" keeps the default) and `strict` the strict-untyped flag for the
+## fresh instance.
+func analyze_text(src: String, path: String, policy := "", strict := false) -> Dictionary:
 	var syn = SynParser.new()
 	var ana = Analyzer.new()
 	if policy != "":
 		ana.null_policy = policy
+	if strict:
+		ana.strict_untyped = true
 	return ana.analyze(syn.parse_text(src), path)
 
 

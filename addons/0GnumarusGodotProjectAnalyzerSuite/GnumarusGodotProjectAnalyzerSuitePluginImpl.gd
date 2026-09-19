@@ -83,6 +83,7 @@ static func _live_debounce() -> float:
 ## Editor entry point (forwarded by the proxy).
 func enter_tree() -> void:
 	_ensure_policy_setting()
+	_ensure_strict_setting()
 	_ensure_debounce()
 	_hook_signals(true)
 	ensure_bar()
@@ -103,12 +104,26 @@ static func _ensure_policy_setting() -> void:
 	ProjectSettings.add_property_info({"name": key, "type": TYPE_STRING, "hint": PROPERTY_HINT_ENUM, "hint_string": "trust,distrust"})
 
 
+## Registers the strict-untyped ProjectSetting once (keeps the user
+## value on later enables): under distrust, member use on
+## declared-but-untyped slots warns. The file `# @strict_untyped`
+## tag overrides per file; changing the setting applies on the next
+## analysis pass.
+static func _ensure_strict_setting() -> void:
+	var key := "gnumarus_analyzer/strict_untyped"
+	if not ProjectSettings.has_setting(key):
+		ProjectSettings.set_setting(key, false)
+	ProjectSettings.set_initial_value(key, false)
+	ProjectSettings.add_property_info({"name": key, "type": TYPE_BOOL})
+
+
 ## Fresh analyzer carrying the current ProjectSetting policy as its
 ## explicit base (file tags still override per file inside analyze).
 ## Kept in one place so every analysis entry point stays consistent.
 static func _fresh_analyzer() -> RefCounted:
 	var ana = Analyzer.new()
 	ana.null_policy = str(ProjectSettings.get_setting("gnumarus_analyzer/nullable_policy", "trust"))
+	ana.strict_untyped = bool(ProjectSettings.get_setting("gnumarus_analyzer/strict_untyped", false))
 	return ana
 
 

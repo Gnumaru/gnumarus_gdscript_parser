@@ -26,6 +26,8 @@ func run() -> Dictionary:
 	_nb_frontier(h)
 	_nb_taintx(h)
 	_nb_elif(h)
+	_nb_strict(h)
+	_nb_reassign(h)
 	return h.result()
 
 
@@ -345,3 +347,80 @@ func _nb_elif(h) -> void:
 	h.check(h.has_warn(h.analyze_text(fall, "res://tests/tmp_nb_e07.gd", "distrust"), "implicitly nullable"), "falling elif keeps warning")
 	var ectrue := "extends RefCounted\nfunc f(n: Node, c: bool) -> void:\n\tif n == null:\n\t\treturn\n\telif c:\n\t\tpass\n\tn.queue_free()\n"
 	h.check(h.warn_texts(h.analyze_text(ectrue, "res://tests/tmp_nb_e08.gd", "distrust")).is_empty(), "eq-true chain marks despite elif")
+
+
+func _nb_strict(h) -> void:
+	var ana0 = H.Analyzer.new()
+	h.check(not bool(ana0.strict_untyped), "strict default off")
+	var local := "extends RefCounted\nfunc g() -> void:\n\tvar u\n\tu.foo()\n"
+	var rs: Dictionary = h.analyze_text(local, "res://tests/tmp_nb_s01.gd", "distrust", true)
+	h.check(_clean(rs) and h.has_warn(rs, "(untyped 'u')"), "strict local warns")
+	h.check(_warn_kinds(rs) == ["maybe_null"], "strict warn kind maybe_null")
+	h.check(h.warn_texts(h.analyze_text(local, "res://tests/tmp_nb_s02.gd", "distrust")).is_empty(), "strict off silent")
+	h.check(h.warn_texts(h.analyze_text(local, "res://tests/tmp_nb_s03.gd")).is_empty(), "strict inert in trust")
+	var param := "extends RefCounted\nfunc g(p) -> void:\n\tp.foo()\n"
+	h.check(h.has_warn(h.analyze_text(param, "res://tests/tmp_nb_s04.gd", "distrust", true), "(untyped 'p')"), "strict param warns")
+	var lit := "extends RefCounted\nfunc g() -> void:\n\tvar u = 1\n\tu.foo()\n"
+	h.check(h.warn_texts(h.analyze_text(lit, "res://tests/tmp_nb_s05.gd", "distrust", true)).is_empty(), "proven literal silent")
+	var guarded := "extends RefCounted\nfunc g(p) -> void:\n\tif p != null:\n\t\tp.foo()\n"
+	h.check(h.warn_texts(h.analyze_text(guarded, "res://tests/tmp_nb_s06.gd", "distrust", true)).is_empty(), "guarded untyped silent")
+	var member := "extends RefCounted\nvar x\nfunc g() -> void:\n\tx.foo()\n"
+	h.check(h.has_warn(h.analyze_text(member, "res://tests/tmp_nb_s07.gd", "distrust", true), "(untyped 'x')"), "strict member warns")
+	var unknown := "extends RefCounted\nfunc g() -> void:\n\tnosuchvar_xyz.foo()\n"
+	h.check(h.warn_texts(h.analyze_text(unknown, "res://tests/tmp_nb_s08.gd", "distrust", true)).is_empty(), "unknown name silent")
+	var bare := "extends RefCounted\nfunc g(p) -> void:\n\tprint(p)\n"
+	h.check(h.warn_texts(h.analyze_text(bare, "res://tests/tmp_nb_s09.gd", "distrust", true)).is_empty(), "bare use legal")
+	var read := "extends RefCounted\nfunc g(p) -> void:\n\tprint(p.bar)\n"
+	h.check(h.has_warn(h.analyze_text(read, "res://tests/tmp_nb_s10.gd", "distrust", true), "possible null read 'bar'"), "strict read warns")
+	var ismark := "extends RefCounted\nfunc g(p) -> void:\n\tif p is Node:\n\t\tp.queue_free()\n"
+	h.check(h.warn_texts(h.analyze_text(ismark, "res://tests/tmp_nb_s11.gd", "distrust", true)).is_empty(), "is-narrowed silent")
+	var barg := "extends RefCounted\nfunc g(p) -> void:\n\tTmpNullP3Lib.plain(p)\n"
+	var rb: Dictionary = h.analyze_text(barg, "res://tests/tmp_nb_s12.gd", "distrust", true)
+	h.check(_clean(rb) and h.has_warn(rb, "possible null argument 'p'") and h.has_warn(rb, "(untyped)"), "strict cross implicit warns")
+	h.check(h.warn_texts(h.analyze_text(barg, "res://tests/tmp_nb_s13.gd", "distrust")).is_empty(), "nonstrict cross silent")
+	var nbarg := "extends RefCounted\n# @param x Node notnull\nfunc need(x: Node) -> void:\n\tpass\nfunc g(p) -> void:\n\tneed(p)\n"
+	h.check(h.has_warn(h.analyze_text(nbarg, "res://tests/tmp_nb_s14.gd", "distrust", true), "for notnull parameter 'x' of 'need()' (untyped)"), "strict notnull arg warns")
+	var gbarg := "extends RefCounted\n# @param x Node notnull\nfunc need(x: Node) -> void:\n\tpass\nfunc g(p) -> void:\n\tif p != null:\n\t\tneed(p)\n"
+	h.check(h.warn_texts(h.analyze_text(gbarg, "res://tests/tmp_nb_s15.gd", "distrust", true)).is_empty(), "guarded arg silent")
+	ProjectSettings.set_setting("gnumarus_analyzer/nullable_policy", "distrust")
+	ProjectSettings.set_setting("gnumarus_analyzer/strict_untyped", true)
+	h.check(h.has_warn(h.analyze_text(local, "res://tests/tmp_nb_s16.gd"), "(untyped 'u')"), "strict setting warns")
+	ProjectSettings.set_setting("gnumarus_analyzer/strict_untyped", false)
+	h.check(h.warn_texts(h.analyze_text(local, "res://tests/tmp_nb_s17.gd")).is_empty(), "strict setting off silent")
+	ProjectSettings.set_setting("gnumarus_analyzer/nullable_policy", "trust")
+	var tag := "# @nullable_policy distrust\n# @strict_untyped\nextends RefCounted\nfunc g(p) -> void:\n\tp.foo()\n"
+	h.check(h.has_warn(h.analyze_text(tag, "res://tests/tmp_nb_s18.gd"), "(untyped 'p')"), "strict tag warns")
+	var tagoff := "# @strict_untyped off\nextends RefCounted\nfunc g(p) -> void:\n\tp.foo()\n"
+	h.check(h.warn_texts(h.analyze_text(tagoff, "res://tests/tmp_nb_s19.gd", "distrust", true)).is_empty(), "strict tag off beats property")
+	var tagbad := "# @strict_untyped sometimes\nextends RefCounted\n"
+	h.check(_has_err(h.analyze_text(tagbad, "res://tests/tmp_nb_s20.gd"), "policy_malformed", "'on' or 'off'"), "bad strict value malformed")
+	var tagmis := "extends RefCounted\nfunc g(p) -> void:\n\t# @strict_untyped\n\tp.foo()\n"
+	h.check(_has_err(h.analyze_text(tagmis, "res://tests/tmp_nb_s21.gd"), "policy_misplaced", "first comment block"), "strict tag misplaced")
+
+
+func _nb_reassign(h) -> void:
+	var renull := "extends RefCounted\n# @var x Node|null\nvar x: Node\nfunc g() -> void:\n\tx = null\n\tx.queue_free()\n"
+	var rr: Dictionary = h.analyze_text(renull, "res://tests/tmp_nb_w01.gd", "distrust")
+	h.check(_has_err(rr, "null_access", "on null"), "reassigned null errors on use")
+	var trust := "extends RefCounted\n# @var x Node|null\nvar x: Node\nfunc g() -> void:\n\tx = null\n\tx.queue_free()\n"
+	h.check(_has_err(h.analyze_text(trust, "res://tests/tmp_nb_w02.gd"), "null_access", "on null"), "reassign invalidation policy-free")
+	var reseat := "extends RefCounted\n# @var x Node|null\nvar x: Node\nfunc g() -> void:\n\tx = null\n\tx = Node.new()\n\tx.queue_free()\n"
+	var rs: Dictionary = h.analyze_text(reseat, "res://tests/tmp_nb_w03.gd", "distrust")
+	h.check(_clean(rs) and (rs.get("warnings", []) as Array).is_empty(), "reseat clears exact null")
+	var initonly := "extends RefCounted\nvar x: Node = null\nfunc g() -> void:\n\tx = null\n\tx.queue_free()\n"
+	h.check(_has_err(h.analyze_text(initonly, "res://tests/tmp_nb_w04.gd"), "null_access", "on null"), "reassign triggers past init leniency")
+	var stale := "extends RefCounted\nfunc g(n: Node, y: Variant) -> void:\n\tif n != null:\n\t\tn = y\n\t\tn.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(stale, "res://tests/tmp_nb_w05.gd", "distrust"), "implicitly nullable"), "unknown write clears guard")
+	var staleclean := "extends RefCounted\nvar x: Node\nfunc g(y: Variant) -> void:\n\tif x != null:\n\t\tx = y\n\t\tx = null\n"
+	h.check(_clean(h.analyze_text(staleclean, "res://tests/tmp_nb_w06.gd")), "cleared mark accepts null")
+	var litmark := "extends RefCounted\nfunc g() -> void:\n\tvar u = 1\n\tu.foo()\n"
+	h.check(_clean(h.analyze_text(litmark, "res://tests/tmp_nb_w07.gd", "distrust", true)), "literal write proves non-null")
+	var litnull := "extends RefCounted\nfunc g() -> void:\n\tvar u = 1\n\tu = null\n"
+	h.check(_has_err(h.analyze_text(litnull, "res://tests/tmp_nb_w08.gd"), "var_notnull", "'u'"), "null after literal errors")
+	var member := "extends RefCounted\nvar x: Node\nfunc g() -> void:\n\tself.x = null\n\tself.x.queue_free()\n"
+	h.check(_clean(h.analyze_text(member, "res://tests/tmp_nb_w09.gd", "distrust")), "member reassign silent (gap)")
+	var cascade := "extends RefCounted\n# @var x Node notnull\nvar x: Node\nfunc g() -> void:\n\tx = null\n\tx.queue_free()\n"
+	var rc: Dictionary = h.analyze_text(cascade, "res://tests/tmp_nb_w10.gd")
+	h.check(_has_err(rc, "var_notnull", "'x'") and _has_err(rc, "null_access", "on null"), "notnull cascade reports both")
+	var proven := "extends RefCounted\nfunc g(p) -> void:\n\tp = null\n\tp.foo()\n"
+	h.check(_has_err(h.analyze_text(proven, "res://tests/tmp_nb_w11.gd", "distrust", true), "null_access", "on null"), "proven null beats strict warn")

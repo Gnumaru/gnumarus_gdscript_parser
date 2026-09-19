@@ -1131,7 +1131,19 @@ behavior, bit-for-bit), distrust warns on unguarded member use
 (`... (implicitly nullable 'Node')`), still a warning, never an
 error. Explicit markers always win over the policy; guards (in-block
 and guard-clause) silence both. Untyped/dynamic slots stay out of
-distrust entirely. The property is per-instance configuration: an
+plain distrust — unless the analyzer `strict_untyped` flag (own
+property, default off, inert under trust) opts in: then member use
+on declared-but-untyped slots (plain-`=` locals, untyped params,
+typeless members) warns `maybe_null` too (`possible null call
+'foo()' on 'p' (untyped 'p')`). Totally unknown names stay silent
+(they are not slots), bare uses stay legal, and guards/`notnull`
+marks still win; explicit `: Variant` member use keeps erroring
+`missing_method` by pre-existing design. Precedence mirrors the
+policy, first hit wins: file `# @strict_untyped` tag (`on`, bare,
+or `off`; misplaced and bad values error like the policy tag) >
+explicit property > `gnumarus_analyzer/strict_untyped`
+ProjectSetting (registered by the plugin, default false) > off.
+The property is per-instance configuration: an
 explicit assignment (even back to `"trust"`) beats the
 `gnumarus_analyzer/nullable_policy` ProjectSetting (registered by
 the editor plugin on enable, `"trust"` default, invalid values read
@@ -1176,8 +1188,23 @@ warn on declared-maybe arguments in distrust
 (`possible null argument 'x' for notnull parameter 'c' of 'need()'`),
 literals included in the message but owned by the error; cross-script
 `notnull` warns the same way through the callee's JSON signature.
-Trust keeps the historical silence in all these positions (literals
-still error in both).
+Under strict-untyped, declared-but-untyped arguments join both
+directions (`... (untyped)`), still never under a `notnull` mark or
+guard. Trust keeps the historical silence in all these positions
+(literals still error in both).
+
+Reassignments invalidate flow memory (all policies — this is runtime
+truth, not suspicion): `x = null` sets exact-null heads, so a later
+`x.foo()` errors `null_access` even for nullable slots (a `notnull`
+target errors at the write first, then the use reports the resulting
+null too); provably-non-null writes (value/array/dict literals,
+`self`, `X.new()`, calls to `notnull`-returning functions) revert to
+the declaration and mark non-null; any other write fully resets
+heads, taint and guard marks (stale marks must not survive).
+Declaration initializers stay lenient: `= null` and unknown inits
+never invalidate (the null-init placeholder idiom is invisible to
+intra-procedural flow), only provably-non-null inits mark.
+`self.x` writes are out — env cannot represent members.
 
 Type tests prove non-null: `if v is Node:` runs the holding branch
 on a non-null value (proven against the engine: `null is Node` is
@@ -1293,8 +1320,9 @@ green. `GODOT_BIN` overrides the engine path.
   `nullable_params` / `return_types` JSON, ProjectSetting,
   `# @nullable_policy` file tags with precedence, cross-script
   boundary consent, `is` type-test narrowing, the same-file/`super`/
-  call-result frontier, member/lambda/cross-file taint shapes, and
-  `elif` narrowing).
+  call-result frontier, member/lambda/cross-file taint shapes, `elif`
+  narrowing, strict-untyped slots with setting/tag, and reassignment
+  invalidation).
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits
