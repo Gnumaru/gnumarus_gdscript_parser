@@ -15,6 +15,7 @@ func run() -> Dictionary:
 	_n_guards(h)
 	_n_exact(h)
 	_n_generic(h)
+	_n_maybe(h)
 	return h.result()
 
 
@@ -107,3 +108,28 @@ func _n_generic(h) -> void:
 			lines.append(int((e as Dictionary).get("line", 0)))
 	h.check(lines == [8], "generic null arg violates bound once")
 	h.check(_has_err(res, "template_mismatch", "null"), "generic null message names null")
+
+
+func _has_warn_kind(res: Dictionary, kind: String) -> bool:
+	for w in res.get("warnings", []):
+		if str((w as Dictionary).get("kind", "")) == kind:
+			return true
+	return false
+
+
+func _n_maybe(h) -> void:
+	var u := "extends RefCounted\n# @var x Node|null\nvar x: Node\nfunc f() -> void:\n\tx.queue_free()\n"
+	var r1: Dictionary = h.analyze_text(u, "res://tests/tmp_null_m1.gd")
+	h.check((r1.get("errors", []) as Array).is_empty(), "union found warns only")
+	h.check(h.has_warn(r1, "possible null call"), "union call warns")
+	var m := "extends RefCounted\n# @var x Node|null\nvar x: Node\nfunc f() -> void:\n\tx.bogus()\n"
+	var r2: Dictionary = h.analyze_text(m, "res://tests/tmp_null_m2.gd")
+	h.check(not h.has_warn(r2, "possible null"), "missing method warns nothing extra")
+	var rd := "extends RefCounted\n# @var x Node|null\nvar x: Node\nfunc f() -> void:\n\tprint(x.name)\n"
+	h.check(h.has_warn(h.analyze_text(rd, "res://tests/tmp_null_m3.gd"), "possible null read"), "union read warns")
+	h.check(not _has_warn_kind(h.analyze_text("extends RefCounted\n# @var x Node|null\nvar x: Node\nfunc f() -> void:\n\tif x != null:\n\t\tx.queue_free()\n", "res://tests/tmp_null_m4.gd"), "maybe_null"), "guarded silent")
+	h.check(not _has_warn_kind(h.analyze_text("extends RefCounted\n# @var x Node notnull\nvar x: Node\nfunc f() -> void:\n\tx.queue_free()\n", "res://tests/tmp_null_m5.gd"), "maybe_null"), "flagged silent")
+	h.check(not _has_warn_kind(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tn.queue_free()\n", "res://tests/tmp_null_m6.gd"), "maybe_null"), "plain Node silent")
+	h.check(h.has_warn(h.analyze_text("extends RefCounted\n# @alias MN2 Node|null @endalias\n# @var x MN2\nvar x: Variant\nfunc f() -> void:\n\tx.queue_free()\n", "res://tests/tmp_null_m7.gd"), "possible null"), "alias union warns")
+	h.check(_has_err(h.analyze_text("extends RefCounted\n# @var x null\nvar x: Variant\nfunc f() -> void:\n\tx.queue_free()\n", "res://tests/tmp_null_m8.gd"), "null_access", "on null"), "exact null still errors")
+

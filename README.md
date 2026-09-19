@@ -1061,7 +1061,12 @@ Flow narrowing understands null: `if x == null` (either order, with
 optional leading `not`/`!`) narrows the branch to exactly null, and
 `!=` narrows the other side the same way; `typeof(x) == TYPE_NIL`
 (and `is_instance_of(x, TYPE_NIL)`) does the same. (`x is null` is
-rejected: Godot rejects it at parse time.) Anything provably null
+rejected: Godot rejects it at parse time.) Bare truthiness narrows
+objects too (`if not x:` nulls that branch, `if x:` flags the other),
+but only for provably-Object slots — bools, ints, `Variant`s and
+unknowns never misread. `while` conditions narrow their bodies the
+same way, and a sole `null` `match` pattern narrows its branch.
+Anything provably null
 errors `null_access` on member calls and reads (`cannot call method
 'm()' on null`); bare uses like `print(x)` stay legal. Plain
 nullable types stay lenient by design: `var x: Node = null` followed
@@ -1069,28 +1074,41 @@ by `x.foo()` is silent, as is any unguarded `Variant` use. Generic
 null arguments compose naturally (`id(null)` against `of int`
 mismatches).
 
+Explicitly nullable values warn instead of staying silent: when a
+union with a `null` arm (direct, or via an alias expanding to one)
+resolves a member through another arm, `maybe_null` warns (`possible
+null call 'm()' on 'x' (nullable 'Node|null')`) — still a warning,
+never an error, and skipped under `notnull` marks and guards. Plain
+`Node` (implicitly nullable) stays silent: only written `|null`
+opt-ins warn.
+
 A trailing `notnull` marker on `@var`/`@param`/`@return`
 (`# @var x Node notnull`) declares the slot never-null: it is stored
 on the stamp, rejects nullable types (`Node|null`, bare `null` or an
-alias expanding to one) as malformed, errors `= null` initializers,
-`null` defaults and `= null` reassignments (`var_notnull`,
-`param_notnull`), and is set by the non-null side of `==`/`!=` guards
+alias expanding to one) as malformed, errors `= null` initializers
+(including `self.x`), `null` defaults and `= null` reassignments
+(`var_notnull`, `param_notnull`), and is set by the non-null side of
+`==`/`!=` guards
 (a plain redefinition without the marker clears it). Call sites are
 checked too: passing a `null` literal to a notnull parameter errors
-(`param_notnull`) for bare, `self.` and same-file instance/static
-calls, one error per offending argument at its own line; maybe-null
+(`param_notnull`) for bare, `self.`, same-file instance/static,
+`super` and lambda-held calls, one error per offending argument at
+its own line; maybe-null
 arguments stay silent, template-typed parameters belong to generic
-machinery (no doubles), and cross-script calls stay silent (no
-signature data). `@return notnull` errors `return null`
-(`return_notnull`, lambdas included); call results are trusted
+machinery (no doubles), and cross-script calls resolve through the
+callee's `user/*.json` signature (`param_names`/`notnull_params`
+maintained per method). `@return notnull` errors `return null`
+(`return_notnull`, lambdas and redundant parentheses included); call
+results are trusted
 downstream — passing them to notnull parameters or using them needs
 no guard.
 
-Gaps (documented): `while`/`match` patterns don't narrow null;
-subscripts on null (`x[0]`) skip; `const X = null` and `var x := null`
-are Godot parse errors, so inference never sees them; `super` calls
-and lambdas holding notnull signatures stay silent; parenthesized
-`return (null)` skips the check.
+Gaps (documented): `elif` restarts from entry types like every other
+guard; subscripts on null (`x[0]`) skip; `const X = null` and
+`var x := null`
+are Godot parse errors, so inference never sees them; inherited
+members are not followed cross-script (direct members only, like
+every other cross check).
 
 ## Analyzer data layout
 
@@ -1107,7 +1125,9 @@ it never pollutes the project tree):
   plus one dotted file per inner class (`Outer.json`,
   `Outer.Inner.json`, …). The analyzer adds `"private"` /
   `"deprecated"` flags on members plus per-file `analysis_errors` /
-  `analysis_warnings`, and merges newly declared members into the
+  `analysis_warnings`, maintains per-method `"param_names"` /
+  `"notnull_params"` signatures for cross-script call-site checks,
+  and merges newly declared members into the
   roster (existing entries keep their data; nothing is ever removed,
   so a partially parsed re-analysis cannot wipe it).
 
@@ -1165,7 +1185,8 @@ green. `GODOT_BIN` overrides the engine path.
   `null` names, `==`/`!=` narrowing, exact-null access errors and
   generic bound violations on null arguments),
   `test_notnull.gd` (trailing `notnull`: parse, contradiction,
-  `= null` violations, guard-set flags and redefinition clearing).
+  `= null` violations, guard-set flags, redefinition clearing,
+  call-site checks, fine coverage and cross-script signatures).
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits
@@ -1180,7 +1201,10 @@ green. `GODOT_BIN` overrides the engine path.
 - Workflow: after any change to the pipeline scripts, run
   `./addons/0GnumarusGodotProjectAnalyzerSuite/tests/test.sh`. If checks that should pass fail (or vice
   versa), fix the code or the test — never both silently — and
-  re-run until green.
+  re-run until green. `CLEAN_USER_JSON=1` wipes `user/*.json` first
+  (they regenerate on demand); use it when debugging stale-cache
+  behavior, never as default (a clean-every-run CI would stop
+  catching staleness).
 - Test artifacts (`.godot/`, `*.uid`) are gitignored.
 
 ## Editor addon (`addons/0GnumarusGodotProjectAnalyzerSuite/`)

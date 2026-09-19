@@ -8,6 +8,7 @@
 # Usage:
 #   ./addons/0GnumarusGodotProjectAnalyzerSuite/tests/test.sh   # from the project root
 #   GODOT_BIN=/path/to/godot ./addons/0GnumarusGodotProjectAnalyzerSuite/tests/test.sh
+#   CLEAN_USER_JSON=1 ./addons/0GnumarusGodotProjectAnalyzerSuite/tests/test.sh   # wipe user/*.json first
 ADDON="addons/0GnumarusGodotProjectAnalyzerSuite/tests"
 set -u
 __DIR__="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -15,6 +16,10 @@ ROOT="$(dirname "$(dirname "$(dirname "$__DIR__")")")"
 GODOT="${GODOT_BIN:-/sync/opt/godot/godot4.x86_64}"
 export GODOT_BIN="$GODOT"
 cd "$ROOT" || exit 1
+if [ "${CLEAN_USER_JSON:-0}" = "1" ]; then
+  echo "== cleaning user type files (they regenerate on demand) =="
+  rm -f .godot/0GnumarusGodotProjectAnalyzerSuiteData/user/*.json
+fi
 echo "== ensuring native types =="
 OUT_DUMP="$("$GODOT" --headless --path "$ROOT" --quit-after 600 --script res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd 2>&1)"
 CODE_DUMP=$?
