@@ -1066,6 +1066,11 @@ objects too (`if not x:` nulls that branch, `if x:` flags the other),
 but only for provably-Object slots — bools, ints, `Variant`s and
 unknowns never misread. `while` conditions narrow their bodies the
 same way, and a sole `null` `match` pattern narrows its branch.
+Guard clauses narrow what follows: when an `if` null-check's null
+side ends in `return` (`if x == null: return`, `if x != null: ...
+else: return`, `if not x: return` on Objects), the rest of the block
+runs non-null. (`elif` restarts from entry types like every other
+guard.)
 Anything provably null
 errors `null_access` on member calls and reads (`cannot call method
 'm()' on null`); bare uses like `print(x)` stay legal. Plain
@@ -1078,7 +1083,8 @@ Explicitly nullable values warn instead of staying silent: when a
 union with a `null` arm (direct, or via an alias expanding to one)
 resolves a member through another arm, `maybe_null` warns (`possible
 null call 'm()' on 'x' (nullable 'Node|null')`) — still a warning,
-never an error, and skipped under `notnull` marks and guards. Plain
+never an error, and skipped under `notnull` marks and guards. Under
+the default trust policy, plain
 `Node` (implicitly nullable) stays silent: only written `|null`
 opt-ins warn.
 
@@ -1096,19 +1102,81 @@ checked too: passing a `null` literal to a notnull parameter errors
 its own line; maybe-null
 arguments stay silent, template-typed parameters belong to generic
 machinery (no doubles), and cross-script calls resolve through the
-callee's `user/*.json` signature (`param_names`/`notnull_params`
-maintained per method). `@return notnull` errors `return null`
+callee's `user/*.json` signature (`param_names`/`notnull_params`/
+`nullable_params` maintained per method). `@return notnull` errors
+`return null`
 (`return_notnull`, lambdas and redundant parentheses included); call
 results are trusted
 downstream — passing them to notnull parameters or using them needs
 no guard.
 
+A trailing `nullable` marker on `@var`/`@param`/`@return`
+(`# @var x Node nullable`) declares the slot maybe-null and watches
+it: unguarded member use warns `maybe_null` in both policies
+(`possible null call 'm()' on 'x' (nullable 'Node')`). The marker is
+always optional and never combines with `notnull` (malformed), nor
+with `void`, nor with a type that can never hold null (`int
+nullable` is malformed); a `|null` arm or a nullable alias alongside
+it is simply redundant, never an error (alias content is invisible).
+`nullable` slots accept `= null` initializers, `null` defaults and
+`return null` without complaint — that is what they declare.
+
+The analyzer `null_policy` property (`"trust"` default, `"distrust"`
+opt-in) decides the default for implicitly-nullable slots
+(Object-derived types; aliases expand): trust stays silent (current
+behavior, bit-for-bit), distrust warns on unguarded member use
+(`... (implicitly nullable 'Node')`), still a warning, never an
+error. Explicit markers always win over the policy; guards (in-block
+and guard-clause) silence both. Untyped/dynamic slots stay out of
+distrust entirely. The property is per-instance configuration: an
+explicit assignment (even back to `"trust"`) beats the
+`gnumarus_analyzer/nullable_policy` ProjectSetting (registered by
+the editor plugin on enable, `"trust"` default, invalid values read
+as trust); the setting applies on the next analysis pass.
+
+A file opts out (or in) with a `# @nullable_policy trust|distrust`
+tag that must be the file's first comment block, before any
+declaration — anywhere else (member level, function bodies, inner
+classes) errors `policy_misplaced`, and any other value errors
+`policy_malformed`. Precedence, first hit wins: slot marker > file
+tag > explicit property > ProjectSetting > `trust`. This is the
+migration path: enable distrust globally, tag legacy files `trust`
+until they are converted. Each `user/*.json` records its file's
+effective policy (`"null_policy"`) for cross-script checks.
+
+`@return T nullable` taints call results: assigning one (`var r =
+make()`, bare and `self.` calls, zero-arg included) watches `r`
+downstream, and undeclared targets resolve with the declared return
+heads; explicit-null returns (`Node|null`) resolve the same way
+through their null arm. `"nullable_params"` in `user/*.json` is
+consent data for boundary checks: a distrust caller passing a
+declared-maybe argument (null literal, `nullable` stamp/taint, or an
+explicit null arm — never a merely policy-watched one) to an
+IMPLICIT parameter of a trust callee warns at the argument
+(`possible null argument 'x' for parameter 'a' of 'plain()'
+(implicitly nullable)`). Silent when the caller is lenient, when the
+callee file is distrust (it warns at its own use sites — no
+doubles), when the parameter consents (`nullable`) or refuses
+(`notnull`, whose literal rule owns that direction), for stale JSONs
+without the keys, and for same-file calls (one file, one policy).
+
 Gaps (documented): `elif` restarts from entry types like every other
-guard; subscripts on null (`x[0]`) skip; `const X = null` and
+guard; guard clauses need a trailing `return` (`break`/`continue`
+and nested returns stay out); `is` narrowing does not imply non-null
+(pair it with `!= null` under distrust); subscripts on null (`x[0]`)
+skip;
+`const X = null` and
 `var x := null`
 are Godot parse errors, so inference never sees them; inherited
 members are not followed cross-script (direct members only, like
-every other cross check).
+every other cross check); boundary checks cover static class calls
+and narrowed receivers only (`super`, engine and dynamic callees
+stay out; maybe-arguments to `notnull` parameters stay silent);
+explicit `: Variant` member use errors
+`missing_method` by pre-existing engine-link design (both policies
+alike); direct call chains (`make().foo()`), member taint targets
+(`self.x = make()`) and lambda-held callees stay silent for
+return-taint purposes.
 
 ## Analyzer data layout
 
@@ -1126,7 +1194,8 @@ it never pollutes the project tree):
   `Outer.Inner.json`, …). The analyzer adds `"private"` /
   `"deprecated"` flags on members plus per-file `analysis_errors` /
   `analysis_warnings`, maintains per-method `"param_names"` /
-  `"notnull_params"` signatures for cross-script call-site checks,
+  `"notnull_params"` / `"nullable_params"` signatures plus the
+  file-level `"null_policy"` for cross-script call-site checks,
   and merges newly declared members into the
   roster (existing entries keep their data; nothing is ever removed,
   so a partially parsed re-analysis cannot wipe it).
@@ -1186,7 +1255,12 @@ green. `GODOT_BIN` overrides the engine path.
   generic bound violations on null arguments),
   `test_notnull.gd` (trailing `notnull`: parse, contradiction,
   `= null` violations, guard-set flags, redefinition clearing,
-  call-site checks, fine coverage and cross-script signatures).
+  call-site checks, fine coverage and cross-script signatures),
+  `test_nullable.gd` (trailing `nullable`: parse, `notnull` /
+  never-nullable contradiction, trust opt-in warnings, `@return
+  nullable` taint, distrust policy, guard clauses,
+  `nullable_params` JSON, ProjectSetting, `# @nullable_policy`
+  file tags with precedence, and cross-script boundary consent).
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/ensure_native_types.gd`
   runs first: if the data-dir `builtin/`,
   `classes/` and `index.json` exist with content it exits

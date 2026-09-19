@@ -82,11 +82,34 @@ static func _live_debounce() -> float:
 
 ## Editor entry point (forwarded by the proxy).
 func enter_tree() -> void:
+	_ensure_policy_setting()
 	_ensure_debounce()
 	_hook_signals(true)
 	ensure_bar()
 	_rewatch_code_edit()
 	analyze_current(false)
+
+
+## Registers the nullable-policy ProjectSetting once (keeps the user
+## value on later enables): "trust" keeps Godot's own leniency,
+## "distrust" warns on unguarded implicitly-nullable use. The file
+## `# @nullable_policy` tag overrides per file; changing the setting
+## applies on the next analysis pass.
+static func _ensure_policy_setting() -> void:
+	var key := "gnumarus_analyzer/nullable_policy"
+	if not ProjectSettings.has_setting(key):
+		ProjectSettings.set_setting(key, "trust")
+	ProjectSettings.set_initial_value(key, "trust")
+	ProjectSettings.add_property_info({"name": key, "type": TYPE_STRING, "hint": PROPERTY_HINT_ENUM, "hint_string": "trust,distrust"})
+
+
+## Fresh analyzer carrying the current ProjectSetting policy as its
+## explicit base (file tags still override per file inside analyze).
+## Kept in one place so every analysis entry point stays consistent.
+static func _fresh_analyzer() -> RefCounted:
+	var ana = Analyzer.new()
+	ana.null_policy = str(ProjectSettings.get_setting("gnumarus_analyzer/nullable_policy", "trust"))
+	return ana
 
 
 ## Editor exit point (forwarded by the proxy).
@@ -272,7 +295,7 @@ func analyze_current(announce := true) -> void:
 	_last_path = path
 	_last_hash = h
 	_has_last = true
-	var res: Dictionary = Analyzer.new().analyze(SynParser.new().parse_text(text), path)
+	var res: Dictionary = _fresh_analyzer().analyze(SynParser.new().parse_text(text), path)
 	var issues: Array = []
 	for e in res.get("errors", []):
 		if e is Dictionary:

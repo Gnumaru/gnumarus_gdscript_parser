@@ -27,10 +27,14 @@ func result() -> Dictionary:
 	return {"suite": suite, "passed": passed, "failed": failed}
 
 
-## Parses + analyzes a source string with fresh instances.
-func analyze_text(src: String, path: String) -> Dictionary:
+## Parses + analyzes a source string with fresh instances. `policy`
+## optionally sets the analyzer nullability policy ("trust"/"distrust";
+## "" keeps the default) for the fresh instance.
+func analyze_text(src: String, path: String, policy := "") -> Dictionary:
 	var syn = SynParser.new()
 	var ana = Analyzer.new()
+	if policy != "":
+		ana.null_policy = policy
 	return ana.analyze(syn.parse_text(src), path)
 
 
