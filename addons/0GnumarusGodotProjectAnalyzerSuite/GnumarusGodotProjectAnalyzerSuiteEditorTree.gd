@@ -342,6 +342,58 @@ static func apply_highlights(code_edit: Object, lines: Array, err_color: Color, 
 	return painted
 
 
+## Current background color of a 1-based line (transparent when
+## unreadable or out of range). Never fails.
+static func line_color(code_edit: Object, line: int) -> Color:
+	if not is_code_edit(code_edit):
+		return Color(0, 0, 0, 0)
+	var ce: Object = code_edit
+	var count: int = int(ce.call("get_line_count"))
+	if line < 1 or line > count:
+		return Color(0, 0, 0, 0)
+	var c: Variant = ce.call("get_line_background_color", line - 1)
+	if c is Color:
+		return c
+	return Color(0, 0, 0, 0)
+
+
+## Snapshots current background colors of 1-based lines ({line:
+## Color}, duplicates collapsed, out-of-range skipped). Call before
+## painting; hand the map to restore_highlights on clear, so foreign
+## paint (e.g. Godot's own error highlights underneath ours) survives
+## our teardown. Never fails.
+static func snapshot_highlights(code_edit: Object, lines: Array) -> Dictionary:
+	var out := {}
+	if not is_code_edit(code_edit):
+		return out
+	for ln in lines:
+		var line := int(ln)
+		if line < 1 or out.has(line):
+			continue
+		var count: int = int((code_edit as Object).call("get_line_count"))
+		if line > count:
+			continue
+		out[line] = line_color(code_edit, line)
+	return out
+
+
+## Restores previously snapshotted background colors (out-of-range
+## and non-Color entries skipped). Counterpart to
+## snapshot_highlights. Never fails.
+static func restore_highlights(code_edit: Object, prev: Dictionary) -> void:
+	if not is_code_edit(code_edit):
+		return
+	var ce: Object = code_edit
+	var count: int = int(ce.call("get_line_count"))
+	for ln in prev.keys():
+		var line := int(ln)
+		if line < 1 or line > count:
+			continue
+		var c: Variant = prev[ln]
+		if c is Color:
+			ce.call("set_line_background_color", line - 1, c)
+
+
 ## Clears background paint of 1-based lines. Never fails.
 static func clear_highlights(code_edit: Object, lines: Array) -> void:
 	if not is_code_edit(code_edit):

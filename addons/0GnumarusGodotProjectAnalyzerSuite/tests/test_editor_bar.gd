@@ -38,9 +38,12 @@ func run() -> Dictionary:
 	_warm(h)
 	_warm_order(h)
 	_warm_fs(h)
+	_warm_pump_loop(h)
 	_deps(h)
 	_bar_origin(h)
 	_bar_model(h)
+	_bar_snapshot(h)
+	_exit_clears(h)
 	_tree_nulls(h)
 	return h
 
@@ -398,3 +401,70 @@ func _warm_fs(h) -> void:
 	_check(h, impl._warm_pending == ["res://x.gd"] and impl._warm_idx == 1, "flagged pass untouched")
 	impl.exit_tree()
 	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "exit clears warm state")
+
+
+func _bar_snapshot(h) -> void:
+	var ce := TextEdit.new()
+	ce.text = "line one\nline two\nline three\nline four\n"
+	var native := Color(0.5, 0.1, 0.1, 0.3)
+	ce.set_line_background_color(1, native)
+	var bar = Bar.new()
+	bar.set_results([
+		{"severity": "error", "kind": "e", "message": "bad", "line": 2, "column": 1, "path": "res://x.gd"},
+		{"severity": "error", "kind": "e2", "message": "bad2", "line": 4, "column": 1, "path": "res://x.gd"},
+	], "res://x.gd", ce)
+	_check(h, ce.get_line_background_color(1) != Color(0, 0, 0, 0), "paints over native")
+	_check(h, ce.get_line_background_color(3) != Color(0, 0, 0, 0), "paints blank line")
+	bar.clear_highlights()
+	_check(h, ce.get_line_background_color(1) == native, "clear restores native underneath")
+	_check(h, ce.get_line_background_color(3) == Color(0, 0, 0, 0), "clear blanks own-only line")
+	_check(h, (bar._painted as Array).is_empty() and (bar._prev_colors as Dictionary).is_empty(), "clear drops state")
+	bar.set_results([{"severity": "error", "kind": "e", "message": "bad", "line": 2, "column": 1, "path": "res://x.gd"}], "res://x.gd", ce)
+	bar.set_results([{"severity": "error", "kind": "e", "message": "bad", "line": 2, "column": 1, "path": "res://x.gd"}], "res://x.gd", ce)
+	bar.clear_highlights()
+	_check(h, ce.get_line_background_color(1) == native, "repaint keeps original snapshot")
+	_check(h, EdTree.snapshot_highlights(ce, [99]).is_empty(), "snapshot skips out-of-range")
+	_check(h, EdTree.line_color(null, 1) == Color(0, 0, 0, 0), "line color null transparent")
+	EdTree.restore_highlights(ce, {"x": Color.RED})
+	_check(h, true, "restore garbage safe")
+	bar.queue_free()
+	ce.queue_free()
+
+
+func _exit_clears(h) -> void:
+	var ce := TextEdit.new()
+	ce.text = "a\nb\nc\n"
+	var native := Color(0.5, 0.1, 0.1, 0.3)
+	ce.set_line_background_color(0, native)
+	var bar = Bar.new()
+	bar.set_results([{"severity": "error", "kind": "e", "message": "bad", "line": 1, "column": 1, "path": "res://x.gd"}], "res://x.gd", ce)
+	var impl = Impl.new(null)
+	impl._bar = bar
+	impl.exit_tree()
+	_check(h, ce.get_line_background_color(0) == native, "exit preserves native paint")
+	_check(h, impl._bar == null, "exit drops bar after clear")
+	ce.queue_free()
+
+
+func _warm_pump_loop(h) -> void:
+	var impl = Impl.new(null)
+	impl._warm_begin(999)
+	_check(h, impl._warm_pending.is_empty(), "stale begin ignored")
+	var pair := [
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterTarget.gd",
+	]
+	DirAccess.remove_absolute(Impl.json_for_source(pair[0]))
+	DirAccess.remove_absolute(Impl.json_for_source(pair[1]))
+	impl._warm_pending = pair.duplicate()
+	impl._warm_idx = 0
+	impl._warm_pump()
+	_check(h, impl._warm_idx == pair.size() and impl._warm_pending.is_empty(), "pump drains synchronously headless")
+	_check(h, FileAccess.file_exists(Impl.json_for_source(pair[0])) and FileAccess.file_exists(Impl.json_for_source(pair[1])), "pump writes jsons")
+	impl._warm_pending = pair.duplicate()
+	impl._warm_idx = pair.size()
+	impl._warm_restart = true
+	impl._warm_pump()
+	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "pump consumes restart")
+	DirAccess.remove_absolute(Impl.json_for_source(pair[0]))
+	DirAccess.remove_absolute(Impl.json_for_source(pair[1]))

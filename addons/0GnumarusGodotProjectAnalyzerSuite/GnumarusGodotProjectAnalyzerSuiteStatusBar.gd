@@ -24,6 +24,12 @@ var _index: int = 0
 var _path: String = ""
 var _code_edit: Object = null
 var _painted: Array = []
+## Pre-paint background colors ({line: Color}) for the currently
+## painted lines: clearing restores these instead of blanking, so
+## foreign highlights underneath ours (Godot's own error paint)
+## survive our teardown. First paint wins across repaints; dropped
+## together with _painted on every clear.
+var _prev_colors: Dictionary = {}
 var _goto: Callable = Callable()
 ## Analysis origin marker ("deps" when a dependency refresh
 ## triggered the run, "" otherwise): shown beside the position while
@@ -211,8 +217,9 @@ func clear_results() -> void:
 
 func clear_highlights() -> void:
 	if _code_edit != null and is_instance_valid(_code_edit):
-		EdTree.clear_highlights(_code_edit, _painted)
+		EdTree.restore_highlights(_code_edit, _prev_colors)
 	_painted = []
+	_prev_colors = {}
 	_code_edit = null
 
 
@@ -312,6 +319,10 @@ func apply() -> void:
 	var live_warn: Color = EdTree.godot_warning_color(_code_edit)
 	if live_warn.a > 0.01:
 		warn_col = live_warn
+	var snap := EdTree.snapshot_highlights(_code_edit, lines)
+	for k in snap.keys():
+		if not _prev_colors.has(k):
+			_prev_colors[k] = snap[k]
 	_painted = EdTree.apply_highlights(_code_edit, lines, err_col, warn_col, warns)
 	refresh()
 

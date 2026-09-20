@@ -93,3 +93,13 @@ every annotation valid and broken in one Godot-parseable file.
 
 Full technical documentation (pipeline stages, every rule and
 error kind, data layout, gaps): [`addons/0GnumarusGodotProjectAnalyzerSuite/README.md`](addons/0GnumarusGodotProjectAnalyzerSuite/README.md).
+
+## Shameless Plug
+
+If you're interested, check out my opengl 2 driver for godot 4:
+
+[GLES2 on Godot 4](https://github.com/Gnumaru/godot/tree/_gles2_compatibility_driver_godot_4)
+
+or my yet unreleased game on steam:
+
+[Ezra's Legacy](https://store.steampowered.com/app/1454130/Ezras_Legacy/)

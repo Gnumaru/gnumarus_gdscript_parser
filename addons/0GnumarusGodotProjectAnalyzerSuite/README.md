@@ -1386,8 +1386,10 @@ suites still print, so the marker alone could look green).
   `test_editor_bar.gd` (editor status-bar logic: formatting, counts,
   navigation, hotkey, null-safe resolvers, mock-tree placement and
   real highlight/caret on a `TextEdit`; warm collect/order/step,
-  incremental re-warm on filesystem scans, and dep-change gating;
-  origin marker paint),
+  incremental re-warm on filesystem scans, deferred begin/pump loop
+  and dep-change gating;
+  origin marker paint; snapshot/restore of foreign highlights and
+  exit-time clearing),
   `test_scene.gd` (scene/resource/config parsing: value nodes,
   sections, multiline values, comments, errors, reuse, plus the
   `Node3D.tscn`, `Environment.tres`, `ProceduralSkyMaterial.tres`,
@@ -1489,7 +1491,10 @@ first-painted-line scan).
   On enable, a background warm pass analyzes stale project files in
   budgeted deferred ticks (cancellable on exit), leaves first via
   the roster extends map so parents land before children cascade,
-  so cross-file data is ready before it is needed. Editor filesystem
+  so cross-file data is ready before it is needed. Enabling never
+  blocks the editor: collection itself is deferred past the toggle
+  paint, each tick prints its file (`warming [i/n] path`) and yields
+  a frame, and teardown cancels cleanly. Editor filesystem
   rescans re-warm incrementally (a restart when idle, one flagged
   extra pass otherwise; mtime skips keep both cheap). Repeat triggers
   on an unchanged buffer re-analyze only when a referenced script
@@ -1527,6 +1532,12 @@ first-painted-line scan).
 - Limitations: GDScript editors only; unsaved (`untitled`) scripts
   analyze under a fallback path; each run writes the usual
   `user/*.json` analysis files like any other analyze() call.
+  Disabling the plugin clears only its own line highlights: every
+  painted line restores the background it had before our paint, so
+  Godot's native error highlights underneath survive the teardown
+  (a native repaint landing between our paint and the disable is
+  indistinguishable from ours by color and restores blank instead
+  — transient until Godot revalidates).
 
 ## Documentation maintenance
 

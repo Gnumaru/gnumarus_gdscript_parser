@@ -43,6 +43,7 @@ var _last_run_unix := 0.0
 var _warm_pending: Array = []
 var _warm_idx := 0
 var _warm_restart := false
+var _warm_gen := 0
 
 
 func _init(p_plugin: EditorPlugin = null) -> void:
@@ -269,9 +270,10 @@ static func deps_changed(refs: Array, since_unix: float, dir: String) -> bool:
 
 ## One warm chunk: analyzes stale/missing-JSON sources from
 ## paths[idx:], stopping at the chunk/budget cap. Returns the next
-## index (== size when done). Headless-runnable; editors pump it
-## deferred (see _warm_pump). Skips up-to-date files by mtime.
-func warm_step(paths: Array, from_idx: int, budget_ms: int) -> int:
+## index (== size when done). Headless-runnable; editors pump it one
+## frame at a time (see _warm_pump). Skips up-to-date files by mtime.
+## Verbose prints every analyzed file for console progress.
+func warm_step(paths: Array, from_idx: int, budget_ms: int, verbose := false) -> int:
 	var i := mini(maxi(from_idx, 0), paths.size())
 	var t0 := Time.get_ticks_msec()
 	var done := 0
@@ -281,6 +283,8 @@ func warm_step(paths: Array, from_idx: int, budget_ms: int) -> int:
 			var js := json_for_source(src)
 			var sm := FileAccess.get_modified_time(src)
 			if not FileAccess.file_exists(js) or sm > FileAccess.get_modified_time(js):
+				if verbose:
+					print("Gnumarus Analyzer: warming [%d/%d] %s" % [i + 1, paths.size(), src])
 				var ana = _fresh_analyzer()
 				ana.analyze(SynParser.new().parse_text(FileAccess.get_file_as_string(src)), src)
 		i += 1
@@ -291,34 +295,70 @@ func warm_step(paths: Array, from_idx: int, budget_ms: int) -> int:
 
 
 ## Starts the background warm pass (editor only — headless instances
-## never pump, so unit tests stay hermetic). Roster refreshes plus one
-## full scan (extends edges for ordering) first, then leaves-first
-## order minimizes on-demand cascades mid-pass.
+## never pump, so unit tests stay hermetic). Only schedules: the
+## collection itself runs deferred in _warm_begin, so enabling the
+## plugin (checkbox toggle) returns immediately and the editor stays
+## responsive while files stream in one frame at a time.
 func _start_warm() -> void:
 	_warm_pending = []
 	_warm_idx = 0
+	_warm_restart = false
 	if not Engine.is_editor_hint():
+		return
+	_warm_gen += 1
+	call_deferred("_warm_begin", _warm_gen)
+
+
+## Deferred warm setup: collects and orders the project scripts,
+## then pumps. Generation-guarded (a disable/enable cycle in between
+## cancels this begin).
+func _warm_begin(g: int) -> void:
+	if g != _warm_gen:
 		return
 	Analyzer._roster_refresh(project_root())
 	Analyzer._roster_absorb(Analyzer._roster_scan_files(project_root()))
 	_warm_pending = order_for_warm(collect_project_scripts(project_root()))
 	_warm_idx = 0
-	if not _warm_pending.is_empty():
-		call_deferred("_warm_pump")
-
-
-## One deferred warm tick; chains until done or cancelled by
-## exit_tree (which empties the pending list first).
-func _warm_pump() -> void:
 	if _warm_pending.is_empty():
 		return
-	_warm_idx = warm_step(_warm_pending, _warm_idx, WARM_BUDGET_MS)
-	if _warm_idx < _warm_pending.size():
-		call_deferred("_warm_pump")
-	elif _warm_restart:
+	print("Gnumarus Analyzer: warming %d project scripts in the background..." % _warm_pending.size())
+	_warm_pump()
+
+
+## Editor SceneTree for frame yields (null headless or detached: the
+## pump then runs synchronously instead of hanging).
+func _warm_tree() -> SceneTree:
+	if plugin == null or not is_instance_valid(plugin):
+		return null
+	var t: Variant = (plugin as Node).get_tree()
+	if t is SceneTree:
+		return t
+	return null
+
+
+## Warm pump: one budgeted chunk per frame, so the editor never
+## freezes no matter how slow a single analysis is. Awaits one
+## process frame between chunks; exit_tree (pending cleared) and
+## impl teardown (weakref) both stop it cleanly.
+func _warm_pump() -> void:
+	var selfref := weakref(self)
+	var tree := _warm_tree()
+	while not _warm_pending.is_empty() and _warm_idx < _warm_pending.size():
+		_warm_idx = warm_step(_warm_pending, _warm_idx, WARM_BUDGET_MS, true)
+		if _warm_idx >= _warm_pending.size():
+			break
+		tree = _warm_tree()
+		if tree != null:
+			await tree.process_frame
+			if selfref.get_ref() == null:
+				return
+			tree = _warm_tree()
+	if _warm_restart:
 		_warm_restart = false
 		_start_warm()
 	else:
+		if not _warm_pending.is_empty():
+			print("Gnumarus Analyzer: warm pass complete.")
 		_warm_pending = []
 
 
@@ -327,9 +367,12 @@ func exit_tree() -> void:
 	_hook_signals(false)
 	_hook_filesystem(false)
 	_unwatch_code_edit()
+	if _bar != null and is_instance_valid(_bar):
+		(_bar as Object).call("clear_highlights")
 	_warm_pending = []
 	_warm_idx = 0
 	_warm_restart = false
+	_warm_gen += 1
 	_drop(_debounce)
 	_debounce = null
 	_drop(_bar)
@@ -396,7 +439,7 @@ func _hook_filesystem(connect_now: bool) -> void:
 
 ## Filesystem rescan (save/create/delete): restart the warm pass when
 ## idle so it picks up new files, else flag one restart at pass end
-## (mmtime skips keep both cheap; at most one extra pass).
+## (mtime skips keep both cheap; at most one extra pass).
 func _on_filesystem_changed() -> void:
 	if _warm_pending.is_empty():
 		_start_warm()
