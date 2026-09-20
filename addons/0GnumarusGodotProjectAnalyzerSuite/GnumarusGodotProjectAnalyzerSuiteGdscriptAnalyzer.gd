@@ -10377,6 +10377,24 @@ func _flow_notnull(vname: String, fn: Variant, scope: Dictionary, owner: String,
 	return false
 
 
+## Declaration-stamp notnull behind a name (the @var/@param marker,
+## never a flow mark): _base_decl_node with an empty env, so
+## narrowing heads can never shadow the permanent stamp. Used by the
+## `= null` write check, where stamps (contracts) error in every
+## policy but flow marks only in distrust. Pure-ish (reads decls).
+func _decl_notnull(vname: String, fn: Variant, scope: Dictionary, owner: String) -> bool:
+	if vname == "" or vname == "_":
+		return false
+	var node := _base_decl_node(vname, fn, scope, owner, {})
+	if node.is_empty():
+		return false
+	for ak in ["var_ann", "param_ann", "return_ann"]:
+		var ann: Variant = node.get(ak, {})
+		if ann is Dictionary and bool((ann as Dictionary).get("notnull", false)):
+			return true
+	return false
+
+
 ## Watch cause for unguarded member use of a chain base: "declared"
 ## for explicit `nullable` marks (stamps, mid-function @var facts via
 ## the env taint flag, call-result taint), "policy" for
@@ -10475,8 +10493,11 @@ func _flow_assign_stmt(node: Dictionary, scope: Dictionary, fn: Variant, env: Di
 
 
 ## Errors `vname = null` (bare null literal, trailing notes ignored)
-## when the target is notnull by declaration or flow state. Anything
-## else (compound values, unmarked targets) stays silent.
+## when the target is never-null. Declaration stamps (@var/@param
+## markers) are contracts: they error in every policy. Flow marks
+## (guards, invalidation, clauses) are context: they error in
+## distrust and stay silent in trust. Anything else (unmarked
+## targets, compound values) stays silent.
 func _check_null_assign(toks: Array, node: Dictionary, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
 	var tt := _trim_trivia(toks)
 	if tt.size() == 5 and (tt[0] is Dictionary) and str((tt[0] as Dictionary).get("type", "")) == "KEYWORD" and str((tt[0] as Dictionary).get("value", "")) == "self" and (tt[1] is Dictionary) and str((tt[1] as Dictionary).get("type", "")) == "DOT" and (tt[2] is Dictionary) and str((tt[2] as Dictionary).get("type", "")) == "IDENTIFIER" and (tt[3] is Dictionary) and str((tt[3] as Dictionary).get("type", "")) == "OPERATOR" and str((tt[3] as Dictionary).get("value", "")) == "=" and (tt[4] is Dictionary) and str((tt[4] as Dictionary).get("type", "")) == "NULL":
@@ -10498,7 +10519,11 @@ func _check_null_assign(toks: Array, node: Dictionary, scope: Dictionary, fn: Va
 	if not (tt[2] is Dictionary) or str((tt[2] as Dictionary).get("type", "")) != "NULL":
 		return
 	var vname := str((tt[0] as Dictionary).get("value", ""))
-	if not _flow_notnull(vname, fn, scope, owner, env):
+	if not (env as Dictionary).has(vname) and _decl_notnull(vname, fn, scope, owner):
+		pass
+	elif not _null_distrust():
+		return
+	elif not _flow_notnull(vname, fn, scope, owner, env):
 		return
 	_error(ERR_VAR_NOTNULL, "cannot assign null to notnull variable '" + vname + "'", int((tt[2] as Dictionary).get("line", int(node.get("line", 0)))), int((tt[2] as Dictionary).get("column", 0)), owner)
 

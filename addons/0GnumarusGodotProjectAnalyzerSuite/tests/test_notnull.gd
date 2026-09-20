@@ -68,11 +68,13 @@ func _n_assign(h) -> void:
 
 func _n_guard(h) -> void:
 	var src := "extends RefCounted\nfunc f(n: Node) -> void:\n\tif n != null:\n\t\tn = null\n"
-	h.check(_has_err(h.analyze_text(src, "res://tests/tmp_nn_g1.gd"), "var_notnull", "'n'"), "guard then assign errors")
+	h.check(_has_err(h.analyze_text(src, "res://tests/tmp_nn_g1.gd", "distrust"), "var_notnull", "'n'"), "guard then assign errors in distrust")
+	h.check(_clean(h.analyze_text(src, "res://tests/tmp_nn_g1b.gd")), "guard then assign silent in trust")
 	var clear := "extends RefCounted\n# @var x Node notnull\nvar x: Node\nfunc f() -> void:\n\t# @var x Node\n\tx = null\n"
 	h.check(_clean(h.analyze_text(clear, "res://tests/tmp_nn_g2.gd")), "plain redefinition clears flag")
 	var elsenull := "extends RefCounted\nfunc f(n: Node) -> void:\n\tif n == null:\n\t\tpass\n\telse:\n\t\tn = null\n"
-	h.check(_has_err(h.analyze_text(elsenull, "res://tests/tmp_nn_g3.gd"), "var_notnull", "'n'"), "else of eq errors")
+	h.check(_has_err(h.analyze_text(elsenull, "res://tests/tmp_nn_g3.gd", "distrust"), "var_notnull", "'n'"), "else of eq errors in distrust")
+	h.check(_clean(h.analyze_text(elsenull, "res://tests/tmp_nn_g3b.gd")), "else of eq silent in trust")
 
 
 func _n_param(h) -> void:
@@ -125,11 +127,14 @@ func _n_fine(h) -> void:
 	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif not n:\n\t\treturn\n\tn.queue_free()\n", "res://tests/tmp_nn_f01.gd")), "not object silent")
 	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(b: bool) -> void:\n\tif not b:\n\t\treturn\n\tprint(b)\n", "res://tests/tmp_nn_f02.gd")), "not bool silent")
 	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif n:\n\t\tn.queue_free()\n", "res://tests/tmp_nn_f03.gd")), "bare truthy silent")
-	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif not n:\n\t\tpass\n\telse:\n\t\tn = null\n", "res://tests/tmp_nn_f04.gd"), "var_notnull", "'n'"), "else of not errors assign")
-	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif n:\n\t\tn = null\n", "res://tests/tmp_nn_f05.gd"), "var_notnull", "'n'"), "then of bare errors assign")
+	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif not n:\n\t\tpass\n\telse:\n\t\tn = null\n", "res://tests/tmp_nn_f04.gd", "distrust"), "var_notnull", "'n'"), "else of not errors assign in distrust")
+	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif not n:\n\t\tpass\n\telse:\n\t\tn = null\n", "res://tests/tmp_nn_f04b.gd")), "else of not silent in trust")
+	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif n:\n\t\tn = null\n", "res://tests/tmp_nn_f05.gd", "distrust"), "var_notnull", "'n'"), "then of bare errors assign in distrust")
+	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tif n:\n\t\tn = null\n", "res://tests/tmp_nn_f05b.gd")), "then of bare silent in trust")
 	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(v: Variant) -> void:\n\tif not v:\n\t\tpass\n", "res://tests/tmp_nn_f06.gd")), "not unknown silent")
 	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\twhile n == null:\n\t\tn.queue_free()\n\t\tbreak\n", "res://tests/tmp_nn_f07.gd"), "null_access", "on null"), "while eq narrows")
-	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\twhile n != null:\n\t\tn = null\n\t\tbreak\n", "res://tests/tmp_nn_f08.gd"), "var_notnull", "'n'"), "while ne flags")
+	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\twhile n != null:\n\t\tn = null\n\t\tbreak\n", "res://tests/tmp_nn_f08.gd", "distrust"), "var_notnull", "'n'"), "while ne flags in distrust")
+	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\twhile n != null:\n\t\tn = null\n\t\tbreak\n", "res://tests/tmp_nn_f08b.gd")), "while ne silent in trust")
 	h.check(_has_err(h.analyze_text("extends RefCounted\nfunc f(v: Variant) -> void:\n\tmatch v:\n\t\tnull:\n\t\t\tv.queue_free()\n\t\t_:\n\t\t\tpass\n", "res://tests/tmp_nn_f09.gd"), "null_access", "on null"), "match null narrows")
 	h.check(_clean(h.analyze_text("extends RefCounted\nfunc f(n: Node) -> void:\n\tmatch n:\n\t\t1:\n\t\t\tn.queue_free()\n", "res://tests/tmp_nn_f10.gd")), "match other silent")
 	h.check(_has_err(h.analyze_text("extends Node\n# @var _c Node notnull\nvar _c: Node\nfunc f() -> void:\n\tself._c = null\n", "res://tests/tmp_nn_f11.gd"), "var_notnull", "'_c'"), "self assign errors")

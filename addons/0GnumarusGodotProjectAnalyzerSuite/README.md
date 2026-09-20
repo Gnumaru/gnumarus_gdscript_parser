@@ -1132,7 +1132,13 @@ alias expanding to one) as malformed, errors `= null` initializers
 (including `self.x`), `null` defaults and `= null` reassignments
 (`var_notnull`, `param_notnull`), and is set by the non-null side of
 `==`/`!=` guards
-(a plain redefinition without the marker clears it). Call sites are
+(a plain redefinition without the marker clears it). Stamp and mark
+differ on writes: a stamp is a contract and errors `= null` in every
+policy, while a flow mark is context and errors only in distrust —
+so `if impl != null: impl.close(); impl = null` (use-then-clear
+teardown) stays silent in trust. A flow refinement in scope
+(narrowed heads) suspends the stamp the same way a plain
+redefinition does. Call sites are
 checked too: passing a `null` literal to a notnull parameter errors
 (`param_notnull`) for bare, `self.`, same-file instance/static,
 `super` and lambda-held calls, one error per offending argument at
@@ -1395,6 +1401,7 @@ suites still print, so the marker alone could look green).
   generic bound violations on null arguments),
   `test_notnull.gd` (trailing `notnull`: parse, contradiction,
   `= null` violations, guard-set flags, redefinition clearing,
+  stamp-vs-mark write split (distrust errors, trust companions),
   call-site checks, fine coverage and cross-script signatures),
   `test_nullable.gd` (trailing `nullable`: parse, `notnull` /
   never-nullable contradiction, trust opt-in warnings, `@return
