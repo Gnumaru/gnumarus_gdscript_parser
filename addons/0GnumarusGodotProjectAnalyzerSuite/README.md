@@ -442,6 +442,50 @@ print(cache["by_path"].get("res://scene.tscn", ""))
 - Pairs well with the scene parser: an `ExtResource`/`SubResource`
   uid from a `.tscn` resolves through `by_uid` to its `res://` path.
 
+## 9. GnumarusGodotProjectAnalyzerSuiteResourceIntegrity
+
+Report-only integrity checker for textual resources (`.tscn`,
+`.tres`, `project.godot`) plus `preload()`/`load()` literals in
+GDScript (`.gd`), deliberately separate from the GDScript analyzer
+(which owns inference, not file references). Walks each file for
+resource paths (`res://...`)
+and UIDs (`uid://...`): referenced files must exist, UIDs must be
+well-formed and present in `uid_cache.bin`, and cache entries must
+point at existing files (an `[ext_resource]` declaring both must
+agree with the cache). `.uid` sidecars are the third source of truth
+for path-anchored references (the file's own header uid and
+`[ext_resource]` entries): a declaration disagreeing with its
+sidecar is a `sidecar_mismatch` error even with no cache, while a uid
+missing from the cache whose sidecar agrees is only a `stale_cache`
+warning instead of a `missing_uid` error. Also reports dangling `ExtResource()` /
+`SubResource()` ids, duplicate ids and malformed entries; declared
+but unused ext ids are warnings. Only whole-value single-line
+strings are checked, so multiline embedded code (`script/source`)
+and sentence fragments never false-positive. `.gd` files are scanned
+at the token level (never parsed): only complete single-string
+literals count — `preload("...")`, bare `load("...")`,
+`ResourceLoader.load("...")`, `extends "..."` and `@icon("...")` —
+with real token line/column in the report. Comments, plain strings,
+dynamic concatenation
+(`"res://" + name`), custom `obj.load()` calls and other annotations
+(e.g. `@warning_ignore` strings, which are not paths) are skipped by
+construction. Empty UID maps mean
+"unverifiable" (uid presence/agreement skipped), so a missing cache
+degrades to path-only checking.
+
+```gdscript
+var cache := GnumarusGodotProjectAnalyzerSuiteUidCache.new().parse("res://.godot/uid_cache.bin")
+var res := GnumarusGodotProjectAnalyzerSuiteResourceIntegrity.new().analyze_file(
+    "res://scene.tscn", cache.get("by_uid", {}), cache.get("by_path", {}))
+```
+
+- Standalone CLI (no writes, exits 0 clean / 1 issues / 2 infra):
+  `godot --headless --path . --script
+  res://addons/0GnumarusGodotProjectAnalyzerSuite/check_resource_integrity.gd`
+  (optional `res://` paths after `--` check only those files).
+  Prints `checking [i/n] path` progress plus one
+  `path:line: kind message` line per issue.
+
 ## Annotations
 
 Available annotations at a glance (details in each subsection below):
@@ -1398,6 +1442,11 @@ suites still print, so the marker alone could look green).
   synthetic binaries, truncation errors, reuse, plus the live
   `.godot/uid_cache.bin` cross-checked against the `.uid` sidecars
   and the scene fixtures),
+  `test_resource_integrity.gd` (integrity checking: ext path/uid
+  validation, sidecar agreement/stale-cache fallback, dangling/
+  duplicate/unused ids, bare strings, header uids, project globals,
+  gd preload/load/extends/icon literals, reuse, collect, unreadable
+  files),
   `test_null.gd` (nullability: `null` union arms and compat, reserved
   `null` names, `==`/`!=` narrowing, exact-null access errors and
   generic bound violations on null arguments),

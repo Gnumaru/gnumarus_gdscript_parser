@@ -34,6 +34,7 @@ func _init() -> void:
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_editor_bar.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_scene.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_uid_cache.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_resource_integrity.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_null.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_notnull.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_nullable.gd",

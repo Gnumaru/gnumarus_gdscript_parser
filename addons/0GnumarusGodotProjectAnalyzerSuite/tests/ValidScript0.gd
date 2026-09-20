@@ -6,7 +6,7 @@
 # FIXME: fix marker.
 @tool
 @static_unload
-@icon("res://icon.svg")
+@icon("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Sky.tres")
 class_name ValidScript0123456789654987321
 extends Node
 
@@ -383,8 +383,9 @@ func demo_all() -> void:
 	await simple_signal
 	await get_tree().create_timer(0.01).timeout
 	await ready
-	# Dynamic load (does not fail at compile time).
-	var loaded := load("res://icon.svg")
+	# Dynamic load (does not fail at compile time; the target must
+	# exist for the resource integrity checker).
+	var loaded := load("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Sky.tres")
 	print(loaded)
 	# Compile-time preload (points to itself).
 	print(SELF_SCRIPT)
