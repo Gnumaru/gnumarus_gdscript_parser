@@ -26,6 +26,7 @@ func run() -> Dictionary:
 	_r_depth(h)
 	_r_inherit(h)
 	_r_refs(h)
+	_r_inner(h)
 	return h.result()
 
 
@@ -160,3 +161,15 @@ func _r_refs(h) -> void:
 	var ana2 = H.Analyzer.new()
 	ana2.analyze(syn.parse_text("extends RefCounted\nfunc g() -> void:\n\tpass\n"), "res://tests/tmp_rs_f2.gd")
 	h.check((ana2._last_refs as Array).is_empty(), "refs reset per call")
+
+
+func _r_inner(h) -> void:
+	_drop_json("TmpRosterOuter")
+	_drop_json("TmpRosterOuter.Inner")
+	var lit := "extends RefCounted\nfunc g(x: TmpRosterOuter.Inner) -> void:\n\tx.take(null)\n"
+	h.check(_has_err(h.analyze_text(lit, "res://tests/tmp_rs_k1.gd"), "param_notnull", "'m'"), "dotted inner refusal errors")
+	var ok := "extends RefCounted\nfunc g(x: TmpRosterOuter.Inner) -> void:\n\tx.take(Node.new())\n"
+	h.check(_clean(h.analyze_text(ok, "res://tests/tmp_rs_k2.gd")), "dotted inner non-null clean")
+	var pref := "extends RefCounted\nfunc g(x: TmpRosterOuter.Kid2) -> void:\n\tx.grp(null)\n"
+	h.check(_has_err(h.analyze_text(pref, "res://tests/tmp_rs_k3.gd"), "param_notnull", "'m'"), "prefix fallback refusal errors")
+	h.check(H.Analyzer._roster_class_for_path("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterOuter.gd") == "TmpRosterOuter", "reverse prefers top-level")

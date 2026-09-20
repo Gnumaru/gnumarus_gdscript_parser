@@ -25,6 +25,10 @@ var _path: String = ""
 var _code_edit: Object = null
 var _painted: Array = []
 var _goto: Callable = Callable()
+## Analysis origin marker ("deps" when a dependency refresh
+## triggered the run, "" otherwise): shown beside the position while
+## these results stand, cleared by the next set/clear.
+var _origin := ""
 
 var _btn_prev: Button = null
 var _btn_next: Button = null
@@ -68,6 +72,15 @@ static func pos_text(pos: int, total: int) -> String:
 	if total <= 0:
 		return ""
 	return str(pos) + "/" + str(total)
+
+
+## Origin marker beside the position (" (deps)" for dependency
+## refreshes, "" otherwise): tells a dep-triggered repaint apart
+## from a normal analysis. Pure, unit-tested headless.
+static func origin_text(origin: String) -> String:
+	if origin == "deps":
+		return " (deps)"
+	return ""
 
 
 ## Error count number (red label, next to the console error icon).
@@ -173,12 +186,14 @@ static func _make_status_icon(tip: String) -> TextureRect:
 
 ## Issues: [{severity ("error"/"warning"), kind, message, line,
 ## column}]. Replaces previous results (old highlights cleared).
-func set_results(issues: Array, path: String, code_edit: Object) -> void:
+## `origin` ("deps" or "") marks dependency-triggered runs.
+func set_results(issues: Array, path: String, code_edit: Object, origin := "") -> void:
 	_ensure_built()
 	clear_highlights()
 	_issues = issues.duplicate()
 	_path = path
 	_code_edit = code_edit
+	_origin = str(origin)
 	_index = 0
 	apply()
 
@@ -189,6 +204,7 @@ func clear_results() -> void:
 	clear_highlights()
 	_issues = []
 	_path = ""
+	_origin = ""
 	_index = 0
 	refresh()
 
@@ -253,7 +269,7 @@ func refresh() -> void:
 		_opt.add_theme_color_override("font_color", MSG_WARN_COLOR)
 	var n_errors := count_errors(_issues)
 	var n_warnings := count_warnings(_issues)
-	_pos.text = pos_text(_index + 1, _issues.size())
+	_pos.text = pos_text(_index + 1, _issues.size()) + origin_text(_origin)
 	_pos.visible = true
 	_count.text = err_text(n_errors)
 	_warn_icon.visible = n_warnings > 0

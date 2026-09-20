@@ -36,7 +36,9 @@ func run() -> Dictionary:
 	_debounce_countdown(h)
 	_plugin_impl(h)
 	_warm(h)
+	_warm_order(h)
 	_deps(h)
+	_bar_origin(h)
 	_bar_model(h)
 	_tree_nulls(h)
 	return h
@@ -355,3 +357,27 @@ func _deps(h) -> void:
 	DirAccess.remove_absolute(dummy)
 	var impl = Impl.new(null)
 	_check(h, (impl._last_refs as Array).is_empty(), "refs start empty")
+
+
+func _warm_order(h) -> void:
+	Impl.Analyzer._roster_refresh(Impl.project_root())
+	Impl.Analyzer._roster_absorb(Impl.Analyzer._roster_scan_files(Impl.project_root()))
+	var child := "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterChild.gd"
+	var parent := "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterParent.gd"
+	var ordered: Array = Impl.order_for_warm([child, parent])
+	_check(h, ordered == [parent, child], "leaves before dependents")
+	_check(h, Impl.order_for_warm([parent, child]) == [parent, child], "ordered input stable")
+	var lone := "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterTarget.gd"
+	_check(h, Impl.order_for_warm([child, lone, parent]) == [parent, lone, child], "unknown keeps sorted slot")
+
+
+func _bar_origin(h) -> void:
+	_check(h, Bar.origin_text("") == "", "origin empty silent")
+	_check(h, Bar.origin_text("deps") == " (deps)", "origin deps marked")
+	_check(h, Bar.origin_text("other") == "", "origin unknown silent")
+	var bar = Bar.new()
+	bar.set_results([{"severity": "error", "kind": "e", "message": "m", "line": 2, "column": 1}], "res://x.gd", null, "deps")
+	_check(h, str(bar._pos.text) == "1/1 (deps)", "origin paints beside position")
+	bar.set_results([{"severity": "error", "kind": "e", "message": "m", "line": 2, "column": 1}], "res://x.gd", null)
+	_check(h, str(bar._pos.text) == "1/1", "plain run clears origin")
+	bar.free()

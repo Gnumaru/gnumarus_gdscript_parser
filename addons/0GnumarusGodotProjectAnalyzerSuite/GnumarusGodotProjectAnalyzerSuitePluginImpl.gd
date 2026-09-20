@@ -172,6 +172,67 @@ static func collect_project_scripts(root: String) -> Array:
 	return out
 
 
+## Dependency order for a warm batch (Kahn, leaves first): a file
+## whose extends resolves to another batch file sorts after it, so
+## parents are analyzed (JSONs written) before children cascade into
+## on-demand re-analysis. Unknown/engine/uncached heads add no edge;
+## cycles and the rest keep sorted order. Static, no IO beyond the
+## roster (callers refresh first).
+static func order_for_warm(paths: Array) -> Array:
+	var in_batch := {}
+	for p in paths:
+		in_batch[str(p)] = true
+	var file_deps: Dictionary = {}
+	for p in paths:
+		file_deps[str(p)] = []
+	for k in Analyzer._roster_names.keys():
+		var p := str(Analyzer._roster_names[k])
+		if not file_deps.has(p):
+			continue
+		var dp := _warm_dep_path(str(Analyzer._roster_extends.get(k, "")))
+		if dp != "" and dp != p and in_batch.has(dp):
+			if not (file_deps[p] as Array).has(dp):
+				(file_deps[p] as Array).append(dp)
+	var ordered: Array = []
+	var remaining: Array = paths.duplicate()
+	remaining.sort()
+	var emitted := {}
+	var progress := true
+	while progress and not remaining.is_empty():
+		progress = false
+		var rest: Array = []
+		for p in remaining:
+			var waiting := false
+			for d in (file_deps[str(p)] as Array):
+				if not emitted.has(d):
+					waiting = true
+					break
+			if waiting:
+				rest.append(p)
+			else:
+				ordered.append(p)
+				emitted[str(p)] = true
+				progress = true
+		remaining = rest
+	for p in remaining:
+		ordered.append(p)
+	return ordered
+
+
+## res:// dependency path behind a roster extends head (""): bare and
+## dotted class names via the roster, quoted `"res://..."` heads
+## directly. Static, pure.
+static func _warm_dep_path(head: String) -> String:
+	var h := head.strip_edges()
+	if h == "":
+		return ""
+	if h.begins_with("\"") and h.ends_with("\"") and h.length() >= 2:
+		return h.substr(1, h.length() - 2)
+	if Analyzer._roster_names.has(h):
+		return str(Analyzer._roster_names[h])
+	return ""
+
+
 ## OS/dir path to res:// form under root (falls back to the raw path
 ## outside the root). Static, pure.
 static func _res_path(root: String, abspath: String) -> String:
@@ -228,13 +289,17 @@ func warm_step(paths: Array, from_idx: int, budget_ms: int) -> int:
 
 
 ## Starts the background warm pass (editor only — headless instances
-## never pump, so unit tests stay hermetic).
+## never pump, so unit tests stay hermetic). Roster refreshes plus one
+## full scan (extends edges for ordering) first, then leaves-first
+## order minimizes on-demand cascades mid-pass.
 func _start_warm() -> void:
 	_warm_pending = []
 	_warm_idx = 0
 	if not Engine.is_editor_hint():
 		return
-	_warm_pending = collect_project_scripts(project_root())
+	Analyzer._roster_refresh(project_root())
+	Analyzer._roster_absorb(Analyzer._roster_scan_files(project_root()))
+	_warm_pending = order_for_warm(collect_project_scripts(project_root()))
 	_warm_idx = 0
 	if not _warm_pending.is_empty():
 		call_deferred("_warm_pump")
@@ -432,7 +497,8 @@ func analyze_current(announce := true) -> void:
 		path = "res://untitled.gd"
 	var h := text.hash()
 	var same := not announce and _has_last and path == _last_path and h == _last_hash
-	if same and not deps_changed(_last_refs, _last_run_unix, user_dir()):
+	var via_deps := same and deps_changed(_last_refs, _last_run_unix, user_dir())
+	if same and not via_deps:
 		_rewatch_code_edit()
 		return
 	_last_path = path
@@ -456,7 +522,7 @@ func analyze_current(announce := true) -> void:
 				push_error("Gnumarus [%s] %s:%d - %s" % [str((issue as Dictionary).get("kind", "?")), path, int((issue as Dictionary).get("line", 0)), str((issue as Dictionary).get("message", ""))])
 			else:
 				push_warning("Gnumarus [%s] %s:%d - %s" % [str((issue as Dictionary).get("kind", "?")), path, int((issue as Dictionary).get("line", 0)), str((issue as Dictionary).get("message", ""))])
-	(bar as Object).call("set_results", issues, path, code_edit)
+	(bar as Object).call("set_results", issues, path, code_edit, "deps" if via_deps else "")
 	_rewatch_code_edit()
 
 

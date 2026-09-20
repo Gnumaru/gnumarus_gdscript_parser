@@ -389,6 +389,11 @@ static func _read_project_strict() -> bool:
 ## calls); content comes from real files on disk, so it is
 ## deterministic. First hit wins on collisions (sorted paths).
 static var _roster_names: Dictionary = {}
+## extends head per roster class (raw text after `extends`, "" when
+## absent/unparseable): file `class_name` lines and dotted inner
+## classes alike. Advisory only (warm ordering); member data always
+## comes from JSONs. Cleared with the names on root change.
+static var _roster_extends: Dictionary = {}
 ## Project root the roster was built for (a different root resets it:
 ## headless runs can analyze several projects in one process).
 static var _roster_root := ""
@@ -423,12 +428,41 @@ static func _roster_path(tname: String) -> String:
 
 ## Roster class behind a source path ("" when absent): linear scan,
 ## roster-sized (hundreds), only used by batch tools like warm pass.
-## Static: no instance.
+## Prefers top-level names (dotted inners share the file). Static.
 static func _roster_class_for_path(source_path: String) -> String:
+	var dotted := ""
 	for k in _roster_names.keys():
 		if str(_roster_names[k]) == source_path:
+			if "." in str(k):
+				if dotted == "":
+					dotted = str(k)
+				continue
 			return str(k)
-	return ""
+	return dotted
+
+
+## Extends-head resolution order for a class in a file: the bare head
+## first, then outward lexical prefixes (`Outer.Mid` extends `Base`
+## tries `Base`, `Outer.Mid.Base`, `Outer.Base`). Quoted path heads
+## (`extends "res://..."`) are unsupported (documented gap). Static,
+## pure: no IO, callers ensure each candidate.
+static func _parent_candidates(cur_base: String, head: String) -> Array:
+	var out: Array = []
+	if head == "":
+		return out
+	if head.begins_with("\""):
+		return out
+	if "." in head:
+		out.append(head)
+		return out
+	out.append(head)
+	var prefix := cur_base
+	while "." in prefix:
+		prefix = prefix.substr(0, prefix.rfind("."))
+		var cand := prefix + "." + head
+		if not out.has(cand):
+			out.append(cand)
+	return out
 
 
 ## Refreshes the roster when the engine cache is new/changed/absent:
@@ -441,6 +475,7 @@ static func _roster_refresh(root: String) -> void:
 	if _roster_root != root:
 		_roster_root = root
 		_roster_names = {}
+		_roster_extends = {}
 		_roster_cfg_mtime = -1
 	var cfg := root + "/.godot/global_script_class_cache.cfg"
 	if FileAccess.file_exists(cfg):
@@ -450,12 +485,26 @@ static func _roster_refresh(root: String) -> void:
 		var parsed := _roster_parse_cfg(FileAccess.get_file_as_string(cfg))
 		if not parsed.is_empty():
 			_roster_names = parsed
+			for k in _roster_extends.keys():
+				if not parsed.has(k):
+					_roster_extends.erase(k)
 		_roster_cfg_mtime = mt
 		return
 	if _roster_cfg_mtime == -2 and not _roster_names.is_empty():
 		return
-	_roster_names = _roster_scan_files(root)
+	_roster_absorb(_roster_scan_files(root))
 	_roster_cfg_mtime = -2
+
+
+## Merges full scan entries into the roster: names keep the existing
+## winner (cfg authority + sorted-first determinism), extends always
+## refresh (advisory, latest scan wins). Static: no instance.
+static func _roster_absorb(full: Dictionary) -> void:
+	for k in full.keys():
+		var e: Dictionary = full[k]
+		if not _roster_names.has(k):
+			_roster_names[k] = str(e.get("path", ""))
+		_roster_extends[str(k)] = str(e.get("extends", ""))
 
 
 ## Parses engine cache text into {class_name: res:// path} (.gd only;
@@ -489,9 +538,13 @@ static func _roster_parse_cfg(text: String) -> Dictionary:
 	return out
 
 
-## Recursive `{class_name: res:// path}` line scan under root
-## (skips `.godot/`): first `class_name <Name>` line per file wins;
-## collisions keep the sorted-first path. Static: no instance.
+## Recursive full line scan under root (skips `.godot/`):
+## {class_name: {"path": res://, "extends": raw head}} for the file
+## `class_name` (with the file `extends` head) plus every dotted
+## inner class (`Outer.Inner`, with its own head). Inners of
+## class_name-less files are unreachable globally and skipped, as are
+## classes nested in functions. Collisions keep the sorted-first
+## path (with its extends). Static: no instance.
 static func _roster_scan_files(root: String) -> Dictionary:
 	var found: Dictionary = {}
 	var dirs: Array = [root]
@@ -506,49 +559,99 @@ static func _roster_scan_files(root: String) -> Dictionary:
 			if not str(f).ends_with(".gd"):
 				continue
 			var fpath := dir + "/" + str(f)
-			var cname := _roster_file_class(fpath)
-			if cname == "":
-				continue
-			if found.has(cname):
-				(found[cname] as Array).append(fpath)
-			else:
-				found[cname] = [fpath]
+			for e in _roster_file_entries(fpath):
+				(e as Dictionary)["path"] = fpath
+				var nm := str((e as Dictionary).get("name", ""))
+				if nm == "":
+					continue
+				if found.has(nm):
+					(found[nm] as Array).append(e)
+				else:
+					found[nm] = [e]
 	var out := {}
-	for cname in found.keys():
-		var paths: Array = (found[cname] as Array).duplicate()
-		paths.sort()
-		var rel := str(paths[0])
+	for nm in found.keys():
+		var lst: Array = (found[nm] as Array).duplicate()
+		lst.sort_custom(func(a: Variant, b: Variant) -> bool: return str((a as Dictionary).get("path", "")) < str((b as Dictionary).get("path", "")))
+		var win: Dictionary = lst[0]
+		var rel := str(win.get("path", ""))
 		if rel.begins_with(root):
 			rel = rel.substr(root.length())
 		if not rel.begins_with("res://"):
 			rel = "res://" + rel.trim_prefix("/")
-		out[cname] = rel
+		out[nm] = {"path": rel, "extends": str(win.get("extends", ""))}
 	return out
 
 
-## class_name behind one file's first `class_name <Name>` line (""
-## when absent or invalid). Reads plain text: broken files still
-## contribute their name. Static: no instance.
-static func _roster_file_class(fpath: String) -> String:
+## Leading-whitespace width of a line (spaces/tabs). Static.
+static func _roster_indent(line: String) -> int:
+	var n := 0
+	while n < line.length() and (line.unicode_at(n) == 32 or line.unicode_at(n) == 9):
+		n += 1
+	return n
+
+
+## Class entries behind one file: [{name, extends}] with the file
+## `class_name` first (plus the file `extends` head), then dotted
+## inners in order. [] when class_name-less. Reads plain text:
+## broken files still contribute. Static: no instance.
+static func _roster_file_entries(fpath: String) -> Array:
+	var out: Array = []
 	if not FileAccess.file_exists(fpath):
-		return ""
-	for line in FileAccess.get_file_as_string(fpath).split("\n"):
+		return out
+	var lines := FileAccess.get_file_as_string(fpath).split("\n")
+	var cname := ""
+	var fextends := ""
+	for line in lines:
 		var s := str(line).strip_edges()
-		if not s.begins_with("class_name "):
+		if s.begins_with("class_name "):
+			var cand := _roster_word(s.substr(11))
+			if _is_type_name(cand) and cname == "":
+				cname = cand
+		elif _roster_indent(str(line)) == 0 and s.begins_with("extends ") and fextends == "":
+			fextends = _roster_word(s.substr(8))
+	if cname == "":
+		return out
+	out.append({"name": cname, "extends": fextends})
+	var stack: Array = []
+	for line in lines:
+		var raw := str(line)
+		var indent := _roster_indent(raw)
+		var s := raw.strip_edges()
+		var is_func := s.begins_with("func ") or s.begins_with("static func ")
+		if not s.begins_with("class ") and not is_func:
 			continue
-		var rest := s.substr(11).strip_edges()
-		var end := rest.find(" ")
-		var tab := rest.find("\t")
-		if tab >= 0 and (end < 0 or tab < end):
-			end = tab
-		var hash := rest.find("#")
-		if hash >= 0 and (end < 0 or hash < end):
-			end = hash
-		var cname := rest if end < 0 else rest.substr(0, end)
-		if _is_type_name(cname):
-			return cname
-		return ""
-	return ""
+		while not stack.is_empty() and int((stack.back() as Array)[0]) >= indent:
+			stack.pop_back()
+		if is_func:
+			stack.append([indent, ""])
+			continue
+		var rest := s.substr(6).strip_edges()
+		var iname := _roster_word(rest)
+		if not _is_type_name(iname):
+			continue
+		if not stack.is_empty() and str((stack.back() as Array)[1]) == "":
+			continue
+		var parent := cname
+		if not stack.is_empty():
+			parent = str((stack.back() as Array)[1])
+		var dotted := parent + "." + iname
+		var ext := ""
+		var epos := rest.find("extends ")
+		if epos >= 0:
+			ext = _roster_word(rest.substr(epos + 8))
+		out.append({"name": dotted, "extends": ext})
+		stack.append([indent, dotted])
+	return out
+
+
+## First whitespace/comment-terminated word ("" when absent). Static.
+static func _roster_word(s: String) -> String:
+	var end := s.length()
+	for sep in [" ", "\t", "#", ":"]:
+		var p := s.find(sep)
+		if p >= 0 and p < end:
+			end = p
+	return s.substr(0, end).strip_edges()
 
 
 ## True for a roster-known script class with no usable info in this
@@ -605,9 +708,7 @@ func _ensure_script_info(tname: String) -> Dictionary:
 		if not _roster_swept and _project_root != "":
 			_roster_swept = true
 			var swept := _roster_scan_files(_project_root)
-			for k in swept.keys():
-				if not _roster_names.has(k):
-					_roster_names[k] = swept[k]
+			_roster_absorb(swept)
 			return _ensure_script_info(tname)
 		return {}
 	_resolve_stack.append(tname)
@@ -4389,9 +4490,20 @@ static func _vartype_name(decl: Dictionary) -> String:
 		if t is Dictionary:
 			text += str((t as Dictionary).get("value", ""))
 	text = text.strip_edges()
-	if _is_type_name(text):
+	if _is_type_name(text) or _is_dotted_type_name(text):
 		return text
 	return ""
+
+
+## True for dotted type paths (`Outer.Inner`) whose every part is a
+## type name: cross-file inner classes in vartype position. Static.
+static func _is_dotted_type_name(text: String) -> bool:
+	if text == "" or "." not in text:
+		return false
+	for part in text.split("."):
+		if not _is_type_name(str(part)):
+			return false
+	return true
 
 
 ## Raw vartype token text (unvalidated, brackets kept) or "".
@@ -5152,9 +5264,7 @@ func _type_known(tname: String) -> bool:
 	if not _roster_swept and _project_root != "":
 		_roster_swept = true
 		var swept := _roster_scan_files(_project_root)
-		for k in swept.keys():
-			if not _roster_names.has(k):
-				_roster_names[k] = swept[k]
+		_roster_absorb(swept)
 		if _roster_has(tname):
 			return true
 	return _type_file_exists(tname)
@@ -5334,21 +5444,28 @@ func _script_derives(child: String, ancestor: String) -> bool:
 ## exactly (only script infos walk here). Seen-guarded; on-demand
 ## analysis fills missing files within the shared depth cap.
 func _script_derives_json(child: String, ancestor: String, seen: Dictionary) -> bool:
-	if child == "" or ancestor == "" or seen.has(child):
+	if child == "" or ancestor == "":
 		return false
-	seen[child] = true
-	var info := _ensure_script_info(child)
-	if info.is_empty() or str(info.get("kind", "")) != "script":
-		return false
-	var base := str(info.get("extends", ""))
-	if base == "":
-		return false
-	var simple := _base_simple(base)
-	if simple == ancestor or base == ancestor:
-		return true
-	if ancestor in _engine_chain(simple):
-		return true
-	return _script_derives_json(simple, ancestor, seen)
+	var pending: Array = [child]
+	while not pending.is_empty():
+		var cur_name := str(pending.pop_front())
+		if cur_name == "" or seen.has(cur_name):
+			continue
+		seen[cur_name] = true
+		var info := _ensure_script_info(cur_name)
+		if info.is_empty() or str(info.get("kind", "")) != "script":
+			continue
+		var base := str(info.get("extends", ""))
+		if base == "":
+			continue
+		for cand in _parent_candidates(str(info.get("name", cur_name)), base):
+			if cand == ancestor or _base_simple(cand) == ancestor:
+				return true
+			if ancestor in _engine_chain(_base_simple(cand)):
+				return true
+			if not seen.has(cand):
+				pending.append(cand)
+	return false
 
 
 ## Single type name behind a "->" TYPE_REF ("void" included), or "" when
@@ -6961,7 +7078,8 @@ func _user_member_entry(tname: String, seg: String) -> Dictionary:
 	]
 	var cur := info
 	var cur_name := tname
-	var seen := {str(info.get("name", "")): true}
+	var cur_base := str(info.get("name", ""))
+	var seen := {cur_base: true}
 	while true:
 		for pair in lists:
 			for m in cur.get(pair[0], []):
@@ -6970,14 +7088,21 @@ func _user_member_entry(tname: String, seg: String) -> Dictionary:
 		var base := str(cur.get("extends", ""))
 		if base == "":
 			return {}
-		var simple := _base_simple(base)
-		if seen.has(simple):
+		var advanced := false
+		for cand in _parent_candidates(cur_base, base):
+			if seen.has(cand):
+				continue
+			seen[cand] = true
+			var nxt := _ensure_script_info(cand)
+			if nxt.is_empty() or str(nxt.get("kind", "")) != "script":
+				continue
+			cur = nxt
+			cur_name = cand
+			cur_base = str(nxt.get("name", cand))
+			advanced = true
+			break
+		if not advanced:
 			return {}
-		seen[simple] = true
-		cur = _ensure_script_info(simple)
-		if cur.is_empty() or str(cur.get("kind", "")) != "script":
-			return {}
-		cur_name = simple
 	return {}
 
 
@@ -8595,22 +8720,30 @@ func _user_method_entry_chain(tname: String, info: Dictionary, seg: String) -> D
 	var hit := _user_method_entry(info, seg)
 	if not hit.is_empty():
 		return hit
-	var seen := {str(info.get("name", "")): true}
 	var cur := info
+	var cur_base := str(info.get("name", ""))
+	var seen := {cur_base: true}
 	while true:
 		var base := str(cur.get("extends", ""))
 		if base == "":
 			return {}
-		var simple := _base_simple(base)
-		if seen.has(simple):
+		var advanced := false
+		for cand in _parent_candidates(cur_base, base):
+			if seen.has(cand):
+				continue
+			seen[cand] = true
+			var nxt := _ensure_script_info(cand)
+			if nxt.is_empty() or str(nxt.get("kind", "")) != "script":
+				continue
+			hit = _user_method_entry(nxt, seg)
+			if not hit.is_empty():
+				return hit
+			cur = nxt
+			cur_base = str(nxt.get("name", cand))
+			advanced = true
+			break
+		if not advanced:
 			return {}
-		seen[simple] = true
-		cur = _ensure_script_info(simple)
-		if cur.is_empty() or str(cur.get("kind", "")) != "script":
-			return {}
-		hit = _user_method_entry(cur, seg)
-		if not hit.is_empty():
-			return hit
 	return {}
 
 
@@ -9116,6 +9249,7 @@ func _verify_subscript(tokens: Array, i: int, scope: Dictionary, owner: String, 
 	if def.is_empty():
 		var sdef := _struct_base_def(base, fn, scope, owner, env, overlay)
 		if sdef.is_empty():
+			_check_strict_subscript(base, tokens, i, close, scope, fn, env, owner)
 			return close + 1
 		return _verify_struct_key(tokens, i, close, sdef, owner)
 	var inner: Array = []
@@ -9136,6 +9270,26 @@ func _verify_subscript(tokens: Array, i: int, scope: Dictionary, owner: String, 
 		_check_tuple_index(str(def.get("name", "")), int(def.get("size", 0)), -int(str((inner[1] as Dictionary).get("value", "0"))), int((inner[1] as Dictionary).get("line", 0)), owner)
 		return close + 1
 	return close + 1
+
+
+## Strict-untyped subscript check for an otherwise-silent subscript
+## (no tuple/struct shape): under distrust + effective strict, a
+## subscript on a declared-but-untyped slot (or loop/pattern binding)
+## warns once, like a member use. notnull state always wins; proven
+## null stays out (the null-subscript skip gap is unchanged).
+func _check_strict_subscript(base: String, tokens: Array, i: int, close: int, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
+	if not _null_distrust() or not _effective_strict():
+		return
+	if base == "" or base == "_" or base == "super" or base == "self":
+		return
+	if not _untyped_slot(base, fn, scope, owner, env):
+		return
+	if _flow_notnull(base, fn, scope, owner, env):
+		return
+	var tok: Dictionary = tokens[i]
+	if close > i and (tokens[close] is Dictionary):
+		tok = tokens[close]
+	_warn_maybe_null(base, "[]", [], false, tok, owner, "untyped")
 
 
 ## Bounds-checks one tuple index (negative wraps from the end).
@@ -9682,16 +9836,18 @@ func _decl_has_type(node: Dictionary) -> bool:
 
 ## True when a chain base is a declared-but-untyped slot (param,
 ## local, const or member without any type: no @var/@param stamp, no
-## vartype, no `:=`/const inference). env/overlay-shadowed names read
-## as opaque (never untyped here); totally unknown names are not
-## slots. Used by strict-untyped (receivers and boundary args).
+## vartype, no `:=`/const inference) or a loop/pattern binding (no
+## declaration exists by construction). env-held names read as flow
+## state (never untyped here); totally unknown names are not slots.
+## Used by strict-untyped (receivers, subscripts, boundary args).
 func _untyped_slot(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> bool:
 	if base == "" or base == "_" or base == "self" or base == "super":
 		return false
 	var node := _base_decl_node(base, fn, scope, owner, env)
-	if node.is_empty():
-		return false
-	return not _decl_has_type(node)
+	if not node.is_empty():
+		return not _decl_has_type(node)
+	var kind := str(_scope_kind(scope, base))
+	return (kind == "loop" or kind == "bind") and not (env as Dictionary).has(base)
 
 
 ## Resolves a bare-call callee for assignment tracking (same guards as
@@ -10383,8 +10539,16 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 		_apply_guard_clause(node, g, scope, owner, fn, env)
 		return
 	if t == "FOR_STMT":
-		_verify_tokens(_as_tokens(node.get("iter", null)), scope, owner, fn, env, {})
-		_flow_block(node.get("body", null), scope, owner, fn, env.duplicate())
+		var itoks := _as_tokens(node.get("iter", null))
+		_verify_tokens(itoks, scope, owner, fn, env, {})
+		var fenv := env.duplicate()
+		var target: Variant = node.get("target", null)
+		if target is Dictionary and str((target as Dictionary).get("type", "")) == "IDENTIFIER":
+			var xname := str((target as Dictionary).get("value", ""))
+			if xname != "" and xname != "_":
+				_apply_assign_invalidation(xname, itoks, scope, fn, fenv, owner)
+				_flow_assign_call(xname, itoks, {}, scope, fn, fenv, owner)
+		_flow_block(node.get("body", null), scope, owner, fn, fenv)
 		return
 	if t == "WHILE_STMT":
 		var wcond := _as_tokens(node.get("condition", null))

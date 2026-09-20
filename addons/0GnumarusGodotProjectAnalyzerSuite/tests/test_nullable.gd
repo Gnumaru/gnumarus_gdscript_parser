@@ -28,6 +28,7 @@ func run() -> Dictionary:
 	_nb_elif(h)
 	_nb_strict(h)
 	_nb_reassign(h)
+	_nb_bind(h)
 	return h.result()
 
 
@@ -425,3 +426,21 @@ func _nb_reassign(h) -> void:
 	h.check(_has_err(rc, "var_notnull", "'x'") and _has_err(rc, "null_access", "on null"), "notnull cascade reports both")
 	var proven := "extends RefCounted\nfunc g(p) -> void:\n\tp = null\n\tp.foo()\n"
 	h.check(_has_err(h.analyze_text(proven, "res://tests/tmp_nb_w11.gd", "distrust", true), "null_access", "on null"), "proven null beats strict warn")
+
+
+func _nb_bind(h) -> void:
+	var sub := "extends RefCounted\nfunc g(p) -> void:\n\tprint(p[0])\n"
+	var rs: Dictionary = h.analyze_text(sub, "res://tests/tmp_nb_q01.gd", "distrust", true)
+	h.check(_clean(rs) and h.has_warn(rs, "possible null read '[]' on 'p' (untyped 'p')"), "strict subscript warns")
+	h.check(_warn_kinds(rs) == ["maybe_null"], "subscript warn kind maybe_null")
+	h.check(h.warn_texts(h.analyze_text(sub, "res://tests/tmp_nb_q02.gd", "distrust")).is_empty(), "subscript nonstrict silent")
+	var guarded := "extends RefCounted\nfunc g(p) -> void:\n\tif p != null:\n\t\tprint(p[0])\n"
+	h.check(h.warn_texts(h.analyze_text(guarded, "res://tests/tmp_nb_q03.gd", "distrust", true)).is_empty(), "guarded subscript silent")
+	var taint := "extends RefCounted\n# @return Node nullable\nfunc make() -> Node:\n\treturn null\nfunc g() -> void:\n\tfor x in make():\n\t\tx.queue_free()\n"
+	h.check(h.has_warn(h.analyze_text(taint, "res://tests/tmp_nb_q04.gd", "distrust"), "(nullable 'Node')"), "for taint warns")
+	var dyn := "extends RefCounted\nfunc g(items: Array) -> void:\n\tfor x in items:\n\t\tx.foo()\n"
+	h.check(h.has_warn(h.analyze_text(dyn, "res://tests/tmp_nb_q05.gd", "distrust", true), "(untyped 'x')"), "loop dynamic warns")
+	h.check(h.warn_texts(h.analyze_text(dyn, "res://tests/tmp_nb_q06.gd", "distrust")).is_empty(), "loop dynamic nonstrict silent")
+	var bind := "extends RefCounted\nfunc g(d: Dictionary) -> void:\n\tmatch d:\n\t\t{\"a\": var v}:\n\t\t\tv.foo()\n"
+	h.check(h.has_warn(h.analyze_text(bind, "res://tests/tmp_nb_q07.gd", "distrust", true), "(untyped 'v')"), "match bind warns")
+	h.check(h.warn_texts(h.analyze_text(bind, "res://tests/tmp_nb_q08.gd", "distrust")).is_empty(), "match bind nonstrict silent")

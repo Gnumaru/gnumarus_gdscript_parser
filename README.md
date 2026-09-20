@@ -1167,8 +1167,11 @@ and guard-clause) silence both. Untyped/dynamic slots stay out of
 plain distrust — unless the analyzer `strict_untyped` flag (own
 property, default off, inert under trust) opts in: then member use
 on declared-but-untyped slots (plain-`=` locals, untyped params,
-typeless members) warns `maybe_null` too (`possible null call
-'foo()' on 'p' (untyped 'p')`). Totally unknown names stay silent
+typeless members, `for` targets and `var` match bindings) warns
+`maybe_null` too (`possible null call
+'foo()' on 'p' (untyped 'p')`), as do subscripts on those slots
+(`possible null read '[]' on 'p' (untyped 'p')`). Totally unknown
+names stay silent
 (they are not slots), bare uses stay legal, and guards/`notnull`
 marks still win; explicit `: Variant` member use keeps erroring
 `missing_method` by pre-existing design. Precedence mirrors the
@@ -1241,7 +1244,11 @@ Declaration initializers stay lenient: `= null` and unknown inits
 never invalidate (the null-init placeholder idiom is invisible to
 intra-procedural flow), only provably-non-null inits mark (in
 distrust).
-`self.x` writes are out — env cannot represent members.
+`self.x` writes are out — env cannot represent members. `for`
+targets bind like assignments on a body-local copy (iterable taint
+and invalidation apply, e.g. `for x in make_nullable()` watches
+`x`); `var` match bindings read as untyped slots (strict warns,
+other modes stay silent).
 
 Type tests prove non-null: `if v is Node:` runs the holding branch
 on a non-null value (proven against the engine: `null is Node` is
@@ -1254,10 +1261,13 @@ the null rules above.
 Cross-script references resolve without opening files. A process-wide
 class roster maps every global `class_name` to its source: the
 engine's `global_script_class_cache.cfg` when present (mtime-checked
-per analysis), else a recursive `class_name` line scan (works on
+per analysis), else a recursive line scan (works on
 unparseable files too; skips `.godot/`; collisions keep the
 sorted-first path; at most one rescan per analysis, on lookup miss).
-Roster-known but never-analyzed classes are opaque: annotations
+The scan also records dotted inner classes (`Outer.Inner`, inners
+of `class_name`-less files are unreachable globally) with their
+`extends` heads, which warm ordering consumes. Roster-known but
+never-analyzed classes are opaque: annotations
 accept the name, narrowing stays lenient (unknown hierarchy proves
 neither compat nor contradiction), and member positions stay silent
 — while names absent from the roster still error (typo detection is
@@ -1275,14 +1285,17 @@ Gaps (documented): guard clauses need a trailing `return`
 and nested returns stay out, and the proven side returning keeps the
 warning); with `elif` branches, every branch running in a
 possibly-null primary-false state must also return; subscripts on
-null (`x[0]`)
-skip;
+exact null skip (strict still warns on untyped slots, never on
+proven null);
 `const X = null` and
 `var x := null`
-are Godot parse errors, so inference never sees them; inherited
-members resolve cross-script through the JSON `extends` chain
-(direct members first, then the full parent chain via on-demand
-analysis; top-level classes only, cycles guarded); implicit-argument
+are Godot parse errors, so inference never sees them; cross-file
+inheritance limits: top-level classes only, dotted names work in
+vartypes and chains but not in annotations (`@var x
+Outer.Inner` is malformed — declare the vartype and refine around
+it) nor in `is` guards (dotted paths skip narrowing), and quoted
+`extends "res://..."` heads resolve for warm ordering but not for
+member walks; implicit-argument
 boundary checks cover
 static class calls and narrowed receivers only (`super` implicit
 stays silent — resolvable super is same-file, where the parent
@@ -1360,7 +1373,8 @@ green. `GODOT_BIN` overrides the engine path.
   results),
   `test_editor_bar.gd` (editor status-bar logic: formatting, counts,
   navigation, hotkey, null-safe resolvers, mock-tree placement and
-  real highlight/caret on a `TextEdit`),
+  real highlight/caret on a `TextEdit`; warm collect/order/step and
+  dep-change gating; origin marker paint),
   `test_scene.gd` (scene/resource/config parsing: value nodes,
   sections, multiline values, comments, errors, reuse, plus the
   `Node3D.tscn`, `Environment.tres`, `ProceduralSkyMaterial.tres`,
@@ -1382,8 +1396,8 @@ green. `GODOT_BIN` overrides the engine path.
   `# @nullable_policy` file tags with precedence, cross-script
   boundary consent, `is` type-test narrowing, the same-file/`super`/
   call-result frontier, member/lambda/cross-file taint shapes, `elif`
-  narrowing, strict-untyped slots with setting/tag, and reassignment
-  invalidation),
+  narrowing, strict-untyped slots with setting/tag, reassignment
+  invalidation, and loop/match bindings with strict subscripts),
   `test_roster.gd` (class roster: cold names accepted, typos still
   unknown, opaque narrowing lenient; on-demand literal errors, dep
   JSON completeness, warm-cold equivalence, transitive taint;
@@ -1456,10 +1470,12 @@ first-painted-line scan).
   runs after our immediate paint and resets every line background,
   so without it highlights would vanish until the next manual run.
   On enable, a background warm pass analyzes stale project files in
-  budgeted deferred ticks (cancellable on exit), so cross-file data
-  is ready before it is needed. Repeat triggers on an unchanged
-  buffer re-analyze only when a referenced script JSON changed
-  (new/missing data converges without edits).
+  budgeted deferred ticks (cancellable on exit), leaves first via
+  the roster extends map so parents land before children cascade,
+  so cross-file data is ready before it is needed. Repeat triggers
+  on an unchanged buffer re-analyze only when a referenced script
+  JSON changed (new/missing data converges without edits); those
+  runs mark the position readout with ` (deps)`.
   **Ctrl+Shift+Alt+F5**
   forces an immediate run that also logs to the console; automatic
   runs update only the bar and highlights. Issues are shown in file
