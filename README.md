@@ -1290,12 +1290,13 @@ proven null);
 `const X = null` and
 `var x := null`
 are Godot parse errors, so inference never sees them; cross-file
-inheritance limits: top-level classes only, dotted names work in
-vartypes and chains but not in annotations (`@var x
-Outer.Inner` is malformed — declare the vartype and refine around
-it) nor in `is` guards (dotted paths skip narrowing), and quoted
-`extends "res://..."` heads resolve for warm ordering but not for
-member walks; implicit-argument
+inheritance limits: dotted names work in vartypes, annotations
+(`@var`/`@param`/`@return`, including bracket generics) and `is`
+guards, but tuple/struct item arms stay single-name, and
+`is_instance_of` takes single names only; quoted
+`extends "res://..."` heads resolve in member walks too (absolute
+directly, relative joined to the current file dir; the roster scan
+sees quoted bases the parser drops); implicit-argument
 boundary checks cover
 static class calls and narrowed receivers only (`super` implicit
 stays silent — resolvable super is same-file, where the parent
@@ -1373,8 +1374,9 @@ green. `GODOT_BIN` overrides the engine path.
   results),
   `test_editor_bar.gd` (editor status-bar logic: formatting, counts,
   navigation, hotkey, null-safe resolvers, mock-tree placement and
-  real highlight/caret on a `TextEdit`; warm collect/order/step and
-  dep-change gating; origin marker paint),
+  real highlight/caret on a `TextEdit`; warm collect/order/step,
+  incremental re-warm on filesystem scans, and dep-change gating;
+  origin marker paint),
   `test_scene.gd` (scene/resource/config parsing: value nodes,
   sections, multiline values, comments, errors, reuse, plus the
   `Node3D.tscn`, `Environment.tres`, `ProceduralSkyMaterial.tres`,
@@ -1403,7 +1405,9 @@ green. `GODOT_BIN` overrides the engine path.
   JSON completeness, warm-cold equivalence, transitive taint;
   mutual-cycle termination with sequential equivalence; depth-cap
   blocking and release; cross-file inheritance (`extends` in JSON,
-  chain lookups, derived compat); recorded cross references per
+  chain lookups, derived compat); dotted inner classes with prefix
+  fallback; quoted `extends` walks; dotted annotations, `is`
+  narrowing and bracket generics; recorded cross references per
   analysis).
 - `tests/AnnotationsStressTest.gd` is a non-suite fixture: a
   single-file stress of every annotation, valid and invalid uses
@@ -1472,7 +1476,9 @@ first-painted-line scan).
   On enable, a background warm pass analyzes stale project files in
   budgeted deferred ticks (cancellable on exit), leaves first via
   the roster extends map so parents land before children cascade,
-  so cross-file data is ready before it is needed. Repeat triggers
+  so cross-file data is ready before it is needed. Editor filesystem
+  rescans re-warm incrementally (a restart when idle, one flagged
+  extra pass otherwise; mtime skips keep both cheap). Repeat triggers
   on an unchanged buffer re-analyze only when a referenced script
   JSON changed (new/missing data converges without edits); those
   runs mark the position readout with ` (deps)`.

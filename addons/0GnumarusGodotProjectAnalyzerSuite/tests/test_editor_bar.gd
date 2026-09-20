@@ -37,6 +37,7 @@ func run() -> Dictionary:
 	_plugin_impl(h)
 	_warm(h)
 	_warm_order(h)
+	_warm_fs(h)
 	_deps(h)
 	_bar_origin(h)
 	_bar_model(h)
@@ -108,9 +109,12 @@ func _plugin_impl(h) -> void:
 	_check(h, impl._debounce != null and is_instance_valid(impl._debounce), "context change keeps timer")
 	impl.analyze_current(false)
 	_check(h, not impl._has_last, "headless analyze stays clean")
-	_check(h, not impl.handle_input(InputEventMouseButton.new()), "non-key ignored by impl")
-	_check(h, impl.handle_input(_hotkey_event(KEY_F5)), "hotkey consumed")
-	_check(h, not impl.handle_input(_hotkey_event(KEY_F6)), "other key ignored by impl")
+	impl._input(InputEventMouseButton.new())
+	_check(h, true, "non-key input safe headless")
+	impl._input(_hotkey_event(KEY_F5))
+	_check(h, true, "hotkey input safe headless")
+	impl._input(_hotkey_event(KEY_F6))
+	_check(h, true, "other key input safe headless")
 	impl.enter_tree()
 	_check(h, impl._debounce != null and is_instance_valid(impl._debounce), "enter keeps timer")
 	impl.exit_tree()
@@ -381,3 +385,16 @@ func _bar_origin(h) -> void:
 	bar.set_results([{"severity": "error", "kind": "e", "message": "m", "line": 2, "column": 1}], "res://x.gd", null)
 	_check(h, str(bar._pos.text) == "1/1", "plain run clears origin")
 	bar.free()
+
+
+func _warm_fs(h) -> void:
+	var impl = Impl.new(null)
+	impl._on_filesystem_changed()
+	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "idle fs change stays quiet headless")
+	impl._warm_pending = ["res://x.gd"]
+	impl._warm_idx = 1
+	impl._on_filesystem_changed()
+	_check(h, impl._warm_restart, "active fs change flags restart")
+	_check(h, impl._warm_pending == ["res://x.gd"] and impl._warm_idx == 1, "flagged pass untouched")
+	impl.exit_tree()
+	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "exit clears warm state")

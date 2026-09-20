@@ -52,10 +52,14 @@ func _init() -> void:
 			total_f += 1
 			printerr("FAIL [run_all]: suite has no run(): ", f)
 			continue
-		var r: Dictionary = inst.call("run")
-		total_p += int(r.get("passed", 0))
-		total_f += int(r.get("failed", 0))
-		print("SUITE ", str(r.get("suite", "?")), ": PASS ", int(r.get("passed", 0)), " FAIL ", int(r.get("failed", 0)))
+		var r: Variant = inst.call("run")
+		if not (r is Dictionary) or not (r as Dictionary).has("suite") or not (r as Dictionary).has("passed") or not (r as Dictionary).has("failed"):
+			total_f += 1
+			printerr("FAIL [run_all]: suite returned malformed result (mid-run crash?): ", f)
+			continue
+		total_p += int((r as Dictionary).get("passed", 0))
+		total_f += int((r as Dictionary).get("failed", 0))
+		print("SUITE ", str((r as Dictionary).get("suite", "?")), ": PASS ", int((r as Dictionary).get("passed", 0)), " FAIL ", int((r as Dictionary).get("failed", 0)))
 	print("TOTAL PASS: ", total_p, " FAIL: ", total_f)
 	if total_f == 0:
 		print("ALL TESTS PASSED")

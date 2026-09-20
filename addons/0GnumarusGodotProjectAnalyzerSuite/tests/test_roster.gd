@@ -27,6 +27,8 @@ func run() -> Dictionary:
 	_r_inherit(h)
 	_r_refs(h)
 	_r_inner(h)
+	_r_quoted(h)
+	_r_dotted(h)
 	return h.result()
 
 
@@ -173,3 +175,31 @@ func _r_inner(h) -> void:
 	var pref := "extends RefCounted\nfunc g(x: TmpRosterOuter.Kid2) -> void:\n\tx.grp(null)\n"
 	h.check(_has_err(h.analyze_text(pref, "res://tests/tmp_rs_k3.gd"), "param_notnull", "'m'"), "prefix fallback refusal errors")
 	h.check(H.Analyzer._roster_class_for_path("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterOuter.gd") == "TmpRosterOuter", "reverse prefers top-level")
+
+
+func _r_quoted(h) -> void:
+	_drop_json("TmpRosterParent")
+	_drop_json("TmpRosterQuoted")
+	var lit := "extends RefCounted\nfunc g() -> void:\n\tTmpRosterQuoted.take(null)\n"
+	h.check(_has_err(h.analyze_text(lit, "res://tests/tmp_rs_e1.gd"), "param_notnull", "'m'"), "quoted walk refusal errors")
+	h.check(str(H.Analyzer._roster_extends.get("TmpRosterQuoted", "")).begins_with("\"res://"), "roster keeps quoted head")
+	var rel: Array = H.Analyzer._parent_candidates("TmpRosterOuter.Kid2", "\"Foo.gd\"")
+	h.check(rel == ["res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Foo.gd"], "relative joins file dir")
+
+
+func _r_dotted(h) -> void:
+	_drop_json("TmpRosterOuter")
+	_drop_json("TmpRosterOuter.Inner")
+	var ann := "extends RefCounted\n# @var x TmpRosterOuter.Inner\nvar x: Variant\n"
+	h.check(_clean(h.analyze_text(ann, "res://tests/tmp_rs_w1.gd")), "dotted var accepted cold")
+	var ret := "extends RefCounted\n# @return TmpRosterOuter.Inner\nfunc f():\n\tpass\n"
+	h.check(_clean(h.analyze_text(ret, "res://tests/tmp_rs_w2.gd")), "dotted return accepted cold")
+	var narrow := "extends RefCounted\nfunc g(v: Variant) -> void:\n\tif v is TmpRosterOuter.Inner:\n\t\tv.take(Node.new())\n"
+	h.check(_clean(h.analyze_text(narrow, "res://tests/tmp_rs_w3.gd")), "dotted is narrows clean")
+	var lit := "extends RefCounted\nfunc g(v: Variant) -> void:\n\tif v is TmpRosterOuter.Inner:\n\t\tv.take(null)\n"
+	h.check(_has_err(h.analyze_text(lit, "res://tests/tmp_rs_w4.gd"), "param_notnull", "'m'"), "dotted is refusal errors")
+	var grab := "extends RefCounted\nfunc g(v: Variant) -> void:\n\tif v is Nope VCC:\n\t\tpass\n"
+	var rg: Dictionary = h.analyze_text(grab, "res://tests/tmp_rs_w5.gd")
+	h.check(_clean(rg) and (rg.get("warnings", []) as Array).is_empty(), "garbage is silent")
+	var cplx := "extends RefCounted\n# @var x Array[TmpRosterOuter.Inner]\nvar x: Variant\n"
+	h.check(_clean(h.analyze_text(cplx, "res://tests/tmp_rs_w6.gd")), "dotted inside brackets accepted")

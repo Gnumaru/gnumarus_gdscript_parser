@@ -42,6 +42,7 @@ var _last_refs: Array = []
 var _last_run_unix := 0.0
 var _warm_pending: Array = []
 var _warm_idx := 0
+var _warm_restart := false
 
 
 func _init(p_plugin: EditorPlugin = null) -> void:
@@ -95,6 +96,7 @@ func enter_tree() -> void:
 	_ensure_strict_setting()
 	_ensure_debounce()
 	_hook_signals(true)
+	_hook_filesystem(true)
 	ensure_bar()
 	_rewatch_code_edit()
 	analyze_current(false)
@@ -313,6 +315,9 @@ func _warm_pump() -> void:
 	_warm_idx = warm_step(_warm_pending, _warm_idx, WARM_BUDGET_MS)
 	if _warm_idx < _warm_pending.size():
 		call_deferred("_warm_pump")
+	elif _warm_restart:
+		_warm_restart = false
+		_start_warm()
 	else:
 		_warm_pending = []
 
@@ -320,9 +325,11 @@ func _warm_pump() -> void:
 ## Editor exit point (forwarded by the proxy).
 func exit_tree() -> void:
 	_hook_signals(false)
+	_hook_filesystem(false)
 	_unwatch_code_edit()
 	_warm_pending = []
 	_warm_idx = 0
+	_warm_restart = false
 	_drop(_debounce)
 	_debounce = null
 	_drop(_bar)
@@ -330,12 +337,13 @@ func exit_tree() -> void:
 	_has_last = false
 
 
-## Editor input point (forwarded by the proxy). Returns true when the
-## hotkey consumed the event (the proxy marks it handled).
+## Editor input point (forwarded by the proxy). Marks the event
+## handled when the hotkey consumed it (the proxy marks it handled).
 func _input(event: InputEvent) -> void:
 	if is_analyze_hotkey(event):
 		analyze_current(true)
-		plugin.get_viewport().set_input_as_handled()
+		if plugin != null and is_instance_valid(plugin):
+			plugin.get_viewport().set_input_as_handled()
 
 
 ## Frees a Node now when it is outside the tree (headless/tests) and
@@ -362,6 +370,38 @@ func _hook_signals(connect_now: bool) -> void:
 			(se as Object).connect(sig, _on_context_changed)
 		elif not connect_now and already:
 			(se as Object).disconnect(sig, _on_context_changed)
+
+
+## Editor filesystem scan hook (saves, new files): re-warms so new
+## and changed scripts fill their JSONs without reopening anything.
+## Editor-only (headless has no filesystem singleton); safe no-op
+## there. Kept symmetric like the editor hooks above.
+func _hook_filesystem(connect_now: bool) -> void:
+	if not Engine.is_editor_hint() or not Engine.has_singleton("EditorInterface"):
+		return
+	var ei: Object = Engine.get_singleton("EditorInterface")
+	if ei == null or not is_instance_valid(ei) or not (ei as Object).has_method("get_resource_filesystem"):
+		return
+	var fs: Variant = (ei as Object).call("get_resource_filesystem")
+	if fs == null or not (fs is Object) or not is_instance_valid(fs):
+		return
+	if not (fs as Object).has_signal("filesystem_changed"):
+		return
+	var already: bool = (fs as Object).is_connected("filesystem_changed", _on_filesystem_changed)
+	if connect_now and not already:
+		(fs as Object).connect("filesystem_changed", _on_filesystem_changed)
+	elif not connect_now and already:
+		(fs as Object).disconnect("filesystem_changed", _on_filesystem_changed)
+
+
+## Filesystem rescan (save/create/delete): restart the warm pass when
+## idle so it picks up new files, else flag one restart at pass end
+## (mmtime skips keep both cheap; at most one extra pass).
+func _on_filesystem_changed() -> void:
+	if _warm_pending.is_empty():
+		_start_warm()
+	else:
+		_warm_restart = true
 
 
 ## Returns the live bar, building it on first use and repairing its

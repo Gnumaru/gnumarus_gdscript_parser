@@ -441,16 +441,41 @@ static func _roster_class_for_path(source_path: String) -> String:
 	return dotted
 
 
+## Extends head for walks: the JSON value first, else the roster
+## scan (which sees quoted `extends "..."` the parser drops).
+## Static: no instance.
+static func _walk_base(info: Dictionary) -> String:
+	var b := str(info.get("extends", ""))
+	if b != "":
+		return b
+	return str(_roster_extends.get(str(info.get("name", "")), ""))
+
+
 ## Extends-head resolution order for a class in a file: the bare head
 ## first, then outward lexical prefixes (`Outer.Mid` extends `Base`
 ## tries `Base`, `Outer.Mid.Base`, `Outer.Base`). Quoted path heads
-## (`extends "res://..."`) are unsupported (documented gap). Static,
-## pure: no IO, callers ensure each candidate.
+## (`extends "res://..."`, absolute or relative to the current file)
+## resolve to the path itself; walks fetch it by path. Static, pure:
+## no IO, callers ensure each candidate.
 static func _parent_candidates(cur_base: String, head: String) -> Array:
 	var out: Array = []
 	if head == "":
 		return out
 	if head.begins_with("\""):
+		var p := head
+		if p.ends_with("\"") and p.length() >= 2:
+			p = p.substr(1, p.length() - 2)
+		else:
+			p = p.trim_prefix("\"")
+		p = p.strip_edges()
+		if p == "":
+			return out
+		if not p.begins_with("res://") and not p.begins_with("user://"):
+			var cur_path := _roster_path(cur_base)
+			if cur_path == "":
+				return out
+			p = cur_path.get_base_dir() + "/" + p
+		out.append(p)
 		return out
 	if "." in head:
 		out.append(head)
@@ -644,14 +669,22 @@ static func _roster_file_entries(fpath: String) -> Array:
 	return out
 
 
-## First whitespace/comment-terminated word ("" when absent). Static.
+## First whitespace/comment-terminated word ("" when absent), honoring
+## double-quoted spans (`extends "res://a b.gd"` keeps spaces inside
+## quotes). Static.
 static func _roster_word(s: String) -> String:
-	var end := s.length()
+	var t := s.strip_edges()
+	if t.begins_with("\""):
+		var q := t.find("\"", 1)
+		if q > 1:
+			return t.substr(0, q + 1)
+		return t
+	var end := t.length()
 	for sep in [" ", "\t", "#", ":"]:
-		var p := s.find(sep)
+		var p := t.find(sep)
 		if p >= 0 and p < end:
 			end = p
-	return s.substr(0, end).strip_edges()
+	return t.substr(0, end).strip_edges()
 
 
 ## True for a roster-known script class with no usable info in this
@@ -690,6 +723,8 @@ func _opaque_script(tname: String) -> bool:
 func _ensure_script_info(tname: String) -> Dictionary:
 	if tname == "" or tname == "_" or tname == "null" or tname == "self" or tname == "super":
 		return {}
+	if tname.begins_with("res://") or tname.begins_with("user://"):
+		return _ensure_script_path(tname)
 	if tname == _script_class and tname != "":
 		return {}
 	if not _last_refs.has(tname):
@@ -699,19 +734,48 @@ func _ensure_script_info(tname: String) -> Dictionary:
 		return info
 	if not _roster_has(tname):
 		return {}
-	if tname in _resolve_stack:
+	return _ensure_script_key(tname, _roster_path(tname))
+
+
+## Script info behind a source path (quoted `extends` heads resolve
+## here): roster reverse hit preferred, else the path-derived stem
+## (mirrors the writers, for class_name-less bases). Analyzes the
+## file on demand like names do. {} when unresolvable.
+func _ensure_script_path(path: String) -> Dictionary:
+	var stem := _roster_class_for_path(path)
+	if stem == "":
+		stem = SemParser.user_file_base("", "", path)
+	if stem == "" or stem == "_" or stem == "null":
+		return {}
+	if _script_class != "" and stem == _script_class:
+		return {}
+	if not _last_refs.has(stem):
+		_last_refs.append(stem)
+	var info := _type_info(stem)
+	if not info.is_empty():
+		return info
+	if not FileAccess.file_exists(path):
+		return {}
+	return _ensure_script_key(stem, path)
+
+
+## Shared tail: analyzes the file at path under the resolve-stack
+## guard (cycles read as missing) and depth cap, drops the local
+## miss cache and re-reads. Callers own the ref recording.
+func _ensure_script_key(key: String, path: String) -> Dictionary:
+	if key in _resolve_stack:
 		return {}
 	if _resolve_stack.size() >= MAX_DEP_DEPTH:
 		return {}
-	var path := _roster_path(tname)
 	if path == "" or not FileAccess.file_exists(path):
 		if not _roster_swept and _project_root != "":
 			_roster_swept = true
-			var swept := _roster_scan_files(_project_root)
-			_roster_absorb(swept)
-			return _ensure_script_info(tname)
+			_roster_absorb(_roster_scan_files(_project_root))
+			if key.begins_with("res://") or key.begins_with("user://"):
+				return _ensure_script_path(key)
+			return _ensure_script_info(key)
 		return {}
-	_resolve_stack.append(tname)
+	_resolve_stack.append(key)
 	var sub := GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.new()
 	if _policy_explicit:
 		sub.null_policy = null_policy
@@ -719,8 +783,8 @@ func _ensure_script_info(tname: String) -> Dictionary:
 		sub.strict_untyped = strict_untyped
 	sub.analyze(SynParser.new().parse_text(FileAccess.get_file_as_string(path)), path)
 	_resolve_stack.pop_back()
-	_type_cache.erase(tname)
-	return _type_info(tname)
+	_type_cache.erase(key)
+	return _type_info(key)
 
 
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
@@ -4797,7 +4861,7 @@ static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary
 			if bool(nn.get("nullable", false)):
 				return {"ok": false, "error": what + " 'nullable' cannot combine with 'void'"}
 			return {"ok": true, "types": [], "void": true, "raw": raw}
-		if not _is_type_name(name):
+		if not _is_type_name(name) and not _is_dotted_type_name(name):
 			return {"ok": false, "error": what + " has an invalid type name '" + name + "'"}
 		types.append(name)
 	return {"ok": true, "types": types, "void": false, "raw": raw, "notnull": bool(nn.get("notnull", false)), "nullable": bool(nn.get("nullable", false))}
@@ -5144,8 +5208,9 @@ static func _parse_type_union(s: String, pos: int, depth: int, what: String) -> 
 	return {"ok": true, "node": {"kind": "union", "arms": arms}, "pos": p}
 
 
-## Parses one primary: `*` (any), an identifier, or an identifier
-## followed by "[args]". Returns {"ok","node","pos"}.
+## Parses one primary: `*` (any), an identifier (dotted paths like
+## `Outer.Inner` join across dots), or an identifier followed by
+## "[args]". Returns {"ok","node","pos"}.
 static func _parse_type_primary(s: String, pos: int, depth: int, what: String) -> Dictionary:
 	var raw := s.strip_edges()
 	var p := _skip_type_ws(s, pos)
@@ -5162,6 +5227,17 @@ static func _parse_type_primary(s: String, pos: int, depth: int, what: String) -
 	while p < s.length() and _is_type_part(s.unicode_at(p)):
 		name += s.substr(p, 1)
 		p += 1
+	while p < s.length() and s.unicode_at(p) == 46:
+		var dot_pos := p
+		p += 1
+		var part := ""
+		while p < s.length() and _is_type_part(s.unicode_at(p)):
+			part += s.substr(p, 1)
+			p += 1
+		if part == "":
+			p = dot_pos
+			break
+		name += "." + part
 	p = _skip_type_ws(s, p)
 	if p >= s.length() or s.unicode_at(p) != 91:
 		return {"ok": true, "node": {"kind": "name", "name": name}, "pos": p}
@@ -5455,7 +5531,7 @@ func _script_derives_json(child: String, ancestor: String, seen: Dictionary) -> 
 		var info := _ensure_script_info(cur_name)
 		if info.is_empty() or str(info.get("kind", "")) != "script":
 			continue
-		var base := str(info.get("extends", ""))
+		var base := _walk_base(info)
 		if base == "":
 			continue
 		for cand in _parent_candidates(str(info.get("name", cur_name)), base):
@@ -7085,7 +7161,7 @@ func _user_member_entry(tname: String, seg: String) -> Dictionary:
 			for m in cur.get(pair[0], []):
 				if m is Dictionary and str((m as Dictionary).get("name", "")) == seg:
 					return {"kind": pair[1], "decl_owner": cur_name, "private": (m as Dictionary).get("private", {}), "dep": (m as Dictionary).get("deprecated", {})}
-		var base := str(cur.get("extends", ""))
+		var base := _walk_base(cur)
 		if base == "":
 			return {}
 		var advanced := false
@@ -8724,7 +8800,7 @@ func _user_method_entry_chain(tname: String, info: Dictionary, seg: String) -> D
 	var cur_base := str(info.get("name", ""))
 	var seen := {cur_base: true}
 	while true:
-		var base := str(cur.get("extends", ""))
+		var base := _walk_base(cur)
 		if base == "":
 			return {}
 		var advanced := false
@@ -9426,10 +9502,10 @@ static func _dotted_parts(tokens: Array, s: int, e: int) -> Array:
 	return parts
 
 
-## Recognizes `x is Y` / `x is not Y` (leading not/! flips). Y must be
-## a single known type name (dotted paths are skipped: without engine
-## backing they could not verify anything anyway). Returns
-## {name, types, eq} or {}.
+## Recognizes `x is Y` / `x is not Y` (leading not/! flips). Y is a
+## single known type name or a dotted path (`Outer.Inner`); dotted
+## paths resolve through the roster like names. Returns {name, types,
+## eq} or {}.
 func _guard_is(tokens: Array) -> Dictionary:
 	var be := _guard_bounds(tokens)
 	var s := int(be[0])
@@ -9438,7 +9514,7 @@ func _guard_is(tokens: Array) -> Dictionary:
 	if s < e and ((_vt_type(tokens, s) == "KEYWORD" and _vt_val(tokens, s) == "not") or (_vt_type(tokens, s) == "OPERATOR" and _vt_val(tokens, s) == "!")):
 		neg = true
 		s += 1
-	if e - s != 3 and e - s != 4:
+	if e - s < 3:
 		return {}
 	if _vt_type(tokens, s) != "IDENTIFIER":
 		return {}
@@ -9446,15 +9522,19 @@ func _guard_is(tokens: Array) -> Dictionary:
 		return {}
 	var idx := s + 2
 	var positive := true
-	if e - s == 4:
-		if not (_vt_type(tokens, s + 2) == "KEYWORD" and _vt_val(tokens, s + 2) == "not"):
-			return {}
+	if idx < e and _vt_type(tokens, idx) == "KEYWORD" and _vt_val(tokens, idx) == "not":
 		positive = false
-		idx = s + 3
-	var ytype := _vt_type(tokens, idx)
-	if ytype != "IDENTIFIER" and ytype != "BUILTIN_TYPE":
+		idx += 1
+	var parts := _dotted_parts(tokens, idx, e)
+	if parts.is_empty():
 		return {}
-	var yname := _vt_val(tokens, idx)
+	var dots := 0
+	for k in range(idx, e):
+		if _vt_type(tokens, k) == "DOT":
+			dots += 1
+	if dots != parts.size() - 1:
+		return {}
+	var yname := ".".join(parts)
 	if yname == "" or yname == "null" or not _type_known(yname):
 		return {}
 	var eq := positive
