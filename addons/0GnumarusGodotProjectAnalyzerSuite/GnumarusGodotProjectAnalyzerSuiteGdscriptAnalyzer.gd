@@ -777,10 +777,10 @@ func _ensure_script_key(key: String, path: String) -> Dictionary:
 		return {}
 	_resolve_stack.append(key)
 	var sub := GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.new()
-	if _policy_explicit:
-		sub.null_policy = null_policy
-	if _strict_explicit:
-		sub.strict_untyped = strict_untyped
+	# No config carryover: dependencies analyze under their own
+	# effective policy (file tag, else ProjectSetting), so a
+	# distrust caller never stamps a trust file's JSON as distrust
+	# (which would silence legitimate boundary warnings, persistently).
 	sub.analyze(SynParser.new().parse_text(FileAccess.get_file_as_string(path)), path)
 	_resolve_stack.pop_back()
 	_type_cache.erase(key)
@@ -1394,7 +1394,7 @@ func _parse_tuple_item(word: String, line: int) -> Dictionary:
 	var types: Array = []
 	for arm in raw.split("|"):
 		var aname := str(arm).strip_edges()
-		if aname == "" or aname == "void" or not _is_type_name(aname):
+		if aname == "" or aname == "void" or (not _is_type_name(aname) and not _is_dotted_type_name(aname)):
 			_error(ERR_TUPLE_MALFORMED, "@tuple has an invalid type '" + str(arm) + "'", line, 0, "")
 			return {}
 		var cm := _canon_type(aname)
@@ -8358,6 +8358,61 @@ func _check_notnull_super(base: String, tokens: Array, j: int, scope: Dictionary
 	_check_notnull_links([{"kind": "script", "key": key}], seg, tokens, j + 1, scope, fn, env, overlay, owner)
 
 
+## Super cross-file boundary: `super.m(...)` whose parent is another
+## file (same-file parents stay on the node path above). The parent
+## name comes from extends, or from the roster scan when the parser
+## drops it (quoted `extends "..."`); quoted heads absolutize
+## against the current file. All three boundary directions run
+## through the usual cross checks (literal errors everywhere,
+## maybe-warnings in distrust): private stays out (descendants are
+## family by design).
+func _check_super_cross(base: String, tokens: Array, j: int, scope: Dictionary, fn: Variant, env: Dictionary, overlay: Dictionary, owner: String) -> void:
+	if base != "super":
+		return
+	var b: String = _script_extends if owner == "" else str(_class_extends.get(owner, ""))
+	if b == "":
+		var rkey: String = owner if owner != "" else _script_class
+		if rkey == "":
+			rkey = _roster_class_for_path(_script_resource_path)
+		if rkey != "":
+			b = str(_roster_extends.get(rkey, ""))
+	if b == "":
+		return
+	var key := _resolve_private_owner(b, owner)
+	if key != "" and _members.has(key):
+		return
+	if j >= tokens.size() or not (tokens[j] is Dictionary):
+		return
+	if str((tokens[j] as Dictionary).get("type", "")) != "DOT":
+		return
+	if j + 1 >= tokens.size() or not (tokens[j + 1] is Dictionary):
+		return
+	if str((tokens[j + 1] as Dictionary).get("type", "")) not in ["IDENTIFIER", "BUILTIN_TYPE", "KEYWORD"]:
+		return
+	var seg := str((tokens[j + 1] as Dictionary).get("value", ""))
+	if seg == "" or seg == "_" or seg == "new":
+		return
+	if j + 2 >= tokens.size() or not (tokens[j + 2] is Dictionary):
+		return
+	if str((tokens[j + 2] as Dictionary).get("type", "")) != "LPAREN":
+		return
+	var pname := b
+	if b.begins_with("\""):
+		var p := b.substr(1).rstrip("\"").strip_edges()
+		if not p.begins_with("res://") and not p.begins_with("user://"):
+			if _script_resource_path == "":
+				return
+			p = _script_resource_path.get_base_dir() + "/" + p
+		pname = _roster_class_for_path(p)
+		if pname == "":
+			pname = SemParser.user_file_base("", "", p)
+	if pname == "" or pname == "_" or pname == "null":
+		return
+	_check_cross_notnull(pname, tokens, j, owner)
+	_check_cross_maybe(pname, tokens, j, scope, fn, env, overlay, owner)
+	_check_cross_notnull_maybe(pname, tokens, j, scope, fn, env, overlay, owner)
+
+
 ## Chain call-site check across one segment's script links (self and
 ## same-file instances). Union dispatch is lenient: errors only when
 ## every resolving callee flags the position. Engine, dynamic and
@@ -8893,6 +8948,7 @@ func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: 
 	if kind == "skip":
 		_check_cross_static(base, tokens, j, scope, fn, env, overlay, owner)
 		_check_notnull_super(base, tokens, j, scope, fn, env, overlay, owner)
+		_check_super_cross(base, tokens, j, scope, fn, env, overlay, owner)
 		_check_strict_untyped(base, tokens, j, scope, fn, env, owner)
 		var bj := _verify_bare_generic(tokens, i, j, scope, fn, env, overlay, owner)
 		if bj >= 0:
@@ -9828,6 +9884,10 @@ func _guard_instanceof(tokens: Array, fn: Variant, scope: Dictionary, owner: Str
 					var mapped2 := str(VARIANT_TYPE_MAP[last])
 					if mapped2 != "" and _type_known(mapped2):
 						resolved = mapped2
+				else:
+					var joined := ".".join(parts)
+					if _type_known(joined):
+						resolved = joined
 	if resolved == "":
 		return {}
 	var eq := not neg

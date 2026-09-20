@@ -7,3 +7,12 @@ extends "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterParent.g
 
 func ownq() -> void:
 	pass
+
+
+# @var qx Node nullable
+var qx: Node
+
+
+func via_super() -> void:
+	super.take(null)
+	super.plain(qx)

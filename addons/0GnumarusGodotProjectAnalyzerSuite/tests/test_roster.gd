@@ -29,6 +29,7 @@ func run() -> Dictionary:
 	_r_inner(h)
 	_r_quoted(h)
 	_r_dotted(h)
+	_r_super(h)
 	return h.result()
 
 
@@ -203,3 +204,21 @@ func _r_dotted(h) -> void:
 	h.check(_clean(rg) and (rg.get("warnings", []) as Array).is_empty(), "garbage is silent")
 	var cplx := "extends RefCounted\n# @var x Array[TmpRosterOuter.Inner]\nvar x: Variant\n"
 	h.check(_clean(h.analyze_text(cplx, "res://tests/tmp_rs_w6.gd")), "dotted inside brackets accepted")
+
+
+func _r_super(h) -> void:
+	_drop_json("TmpRosterParent")
+	_drop_json("TmpRosterQuoted")
+	var lit := "extends TmpRosterParent\nfunc f() -> void:\n\tsuper.take(null)\n"
+	h.check(_has_err(h.analyze_text(lit, "res://tests/tmp_rs_u1.gd"), "param_notnull", "'m'"), "super literal errors")
+	var imp := "extends TmpRosterParent\n# @var x Node nullable\nvar x: Node\nfunc f() -> void:\n\tsuper.plain(x)\n"
+	var ri: Dictionary = h.analyze_text(imp, "res://tests/tmp_rs_u2.gd", "distrust")
+	h.check(_clean(ri) and h.has_warn(ri, "possible null argument 'x'"), "super implicit warns")
+	h.check(h.warn_texts(h.analyze_text(imp, "res://tests/tmp_rs_u3.gd")).is_empty(), "super implicit trust silent")
+	var may := "extends TmpRosterParent\n# @var x Node nullable\nvar x: Node\nfunc f() -> void:\n\tsuper.take(x)\n"
+	h.check(h.has_warn(h.analyze_text(may, "res://tests/tmp_rs_u4.gd", "distrust"), "for notnull parameter 'm'"), "super maybe warns")
+	var qtrust: Dictionary = _analyze_file("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterQuoted.gd")
+	h.check(_has_err(qtrust, "param_notnull", "'m'"), "quoted super literal errors")
+	h.check((qtrust.get("warnings", []) as Array).is_empty(), "quoted super trust silent")
+	var qdis: Dictionary = _analyze_file("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpRosterQuoted.gd", "distrust")
+	h.check(h.has_warn(qdis, "possible null argument 'qx'"), "quoted super implicit warns")

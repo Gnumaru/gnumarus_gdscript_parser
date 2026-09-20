@@ -1276,8 +1276,10 @@ neither compat nor contradiction), and member positions stay silent
 — while names absent from the roster still error (typo detection is
 now sound: unknown means typo, not unseen). Member data arrives via
 bounded on-demand analysis: the first cross check against a class
-without JSON analyzes its file in a fresh instance (explicit
-policy/strict carry over; its own file tags apply; its JSON lands on
+without JSON analyzes its file in a fresh instance under its own
+effective policy (file tag, else ProjectSetting — never the
+caller's override, so a distrust caller cannot stamp a trust file's
+JSON as distrust; its JSON lands on
 disk as a side effect), guarded by a shared resolve stack (cycles
 read as missing — partial first pass, converges on re-analysis) and
 a depth cap of 4. No user action needed: open one file and its
@@ -1294,22 +1296,19 @@ proven null);
 `var x := null`
 are Godot parse errors, so inference never sees them; cross-file
 inheritance limits: dotted names work in vartypes, annotations
-(`@var`/`@param`/`@return`, including bracket generics) and `is`
-guards, but tuple/struct item arms stay single-name, and
-`is_instance_of` takes single names only; quoted
+(`@var`/`@param`/`@return`, including bracket generics and
+tuple/struct arms) and in `is` / `is_instance_of` guards; quoted
 `extends "res://..."` heads resolve in member walks too (absolute
 directly, relative joined to the current file dir; the roster scan
 sees quoted bases the parser drops); implicit-argument
 boundary checks cover
-static class calls and narrowed receivers only (`super` implicit
-stays silent — resolvable super is same-file, where the parent
-already warns at its own uses — plus engine and dynamic callees);
+static class calls, narrowed receivers and cross-file `super`
+(same-file super resolves through member nodes instead);
 explicit `: Variant` member use errors
 `missing_method` by pre-existing engine-link design (both policies
 alike); direct call chains (`make().foo()`), member taint targets
 (`self.x = make()`) and engine/dynamic receivers stay silent for
-return-taint purposes; cross-file `super` stays shallow (same-file
-parents only); unsaved buffers are invisible to the roster (save
+return-taint purposes; unsaved buffers are invisible to the roster (save
 triggers rescan); scripts without `class_name` resolve by path
 only, never by name.
 
@@ -1343,13 +1342,16 @@ project root) runs every
 `addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_*.gd` suite
 headlessly inside this project's own directory
 — no scratch copies needed. It exits 0 only when Godot exits 0 AND
-the `ALL TESTS PASSED` marker is printed, so crashes can never look
-green. `GODOT_BIN` overrides the engine path.
+the `ALL TESTS PASSED` marker is printed AND no `SCRIPT ERROR`
+appears (a mid-suite crash aborts only that function while later
+suites still print, so the marker alone could look green).
+`GODOT_BIN` overrides the engine path.
 
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/run_all.gd` loads
   each suite (they expose `run()`), prints a
   per-suite `PASS`/`FAIL` line plus the grand total. A suite that
-  fails to load counts as a failure.
+  fails to load, lacks `run()`, or returns a malformed result
+  (mid-run crash) counts as a failure.
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd` holds
   the shared assertions: one instance per
   suite, `check()` per expectation, failed names via printerr.
@@ -1409,9 +1411,10 @@ green. `GODOT_BIN` overrides the engine path.
   mutual-cycle termination with sequential equivalence; depth-cap
   blocking and release; cross-file inheritance (`extends` in JSON,
   chain lookups, derived compat); dotted inner classes with prefix
-  fallback; quoted `extends` walks; dotted annotations, `is`
-  narrowing and bracket generics; recorded cross references per
-  analysis).
+  fallback; quoted `extends` walks; dotted annotations, `is` /
+  `is_instance_of` narrowing, bracket generics and tuple/struct arms;
+  cross-file `super` (literal, maybe, implicit, quoted); recorded
+  cross references per analysis).
 - `tests/AnnotationsStressTest.gd` is a non-suite fixture: a
   single-file stress of every annotation, valid and invalid uses
   with documented verdicts. It parses in Godot, so its diagnostics
