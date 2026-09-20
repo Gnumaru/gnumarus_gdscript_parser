@@ -332,11 +332,10 @@ func exit_tree() -> void:
 
 ## Editor input point (forwarded by the proxy). Returns true when the
 ## hotkey consumed the event (the proxy marks it handled).
-func handle_input(event: InputEvent) -> bool:
+func _input(event: InputEvent) -> void:
 	if is_analyze_hotkey(event):
 		analyze_current(true)
-		return true
-	return false
+		plugin.get_viewport().set_input_as_handled()
 
 
 ## Frees a Node now when it is outside the tree (headless/tests) and

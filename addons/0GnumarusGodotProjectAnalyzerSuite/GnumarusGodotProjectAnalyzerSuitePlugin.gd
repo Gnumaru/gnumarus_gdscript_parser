@@ -24,5 +24,5 @@ func _exit_tree() -> void:
 
 
 func _input(event: InputEvent) -> void:
-	if _impl != null and _impl.handle_input(event):
-		get_viewport().set_input_as_handled()
+	if _impl:
+		_impl._input(event)
