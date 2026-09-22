@@ -72,11 +72,26 @@ static func project_root() -> String:
 
 ## Fresh analyzer carrying the current ProjectSetting policy as its
 ## explicit base (file tags still override per file inside analyze).
-static func _fresh_analyzer() -> RefCounted:
+## `opts` optionally pins the snapshot instead ({"policy","strict"}):
+## worker dispatch passes a main-thread snapshot so scan threads never
+## touch singletons mid-scan.
+static func _fresh_analyzer(opts := {}) -> RefCounted:
 	var ana = Analyzer.new()
-	ana.null_policy = str(ProjectSettings.get_setting("gnumarus_analyzer/nullable_policy", "trust"))
-	ana.strict_untyped = bool(ProjectSettings.get_setting("gnumarus_analyzer/strict_untyped", false))
+	if (opts as Dictionary).has("policy"):
+		ana.null_policy = str((opts as Dictionary).get("policy", "trust"))
+	else:
+		ana.null_policy = str(ProjectSettings.get_setting("gnumarus_analyzer/nullable_policy", "trust"))
+	if (opts as Dictionary).has("strict"):
+		ana.strict_untyped = bool((opts as Dictionary).get("strict", false))
+	else:
+		ana.strict_untyped = bool(ProjectSettings.get_setting("gnumarus_analyzer/strict_untyped", false))
 	return ana
+
+
+## Main-thread snapshot of the analyzer policy settings for worker
+## dispatch (see _fresh_analyzer). Static, pure reads.
+static func policy_snapshot() -> Dictionary:
+	return {"policy": str(ProjectSettings.get_setting("gnumarus_analyzer/nullable_policy", "trust")), "strict": bool(ProjectSettings.get_setting("gnumarus_analyzer/strict_untyped", false))}
 
 
 ## Empty report (also the fallback for missing/corrupt files).
@@ -293,8 +308,10 @@ static func store_census(census: Dictionary) -> Dictionary:
 ## GDScript stage: analyzes every project .gd (or `targets` when
 ## given) with fresh analyzers and stores stage "gdscript".
 ## `targets`/`root_os` exist for hermetic tests; real runs pass
-## nothing. Returns the full stored doc.
-func run_gdscript(root_os := "", targets := []) -> Dictionary:
+## nothing. `opts` pins the policy snapshot (worker dispatch);
+## `cancel` (Callable() -> bool, worker-owned) aborts between files.
+## Returns the full stored doc.
+func run_gdscript(root_os := "", targets := [], opts := {}, cancel := Callable()) -> Dictionary:
 	var root := root_os if root_os != "" else project_root()
 	var files: Array = (targets as Array).duplicate() if not (targets as Array).is_empty() else Integrity.collect_gd_scripts(root)
 	files.sort()
@@ -304,13 +321,16 @@ func run_gdscript(root_os := "", targets := []) -> Dictionary:
 	var warnings: Array = []
 	var i := 0
 	for src in files:
+		if cancel.is_valid() and bool(cancel.call()):
+			print("Gnumarus Full Scan: gdscript cancelled.")
+			return {"errors": errors, "warnings": warnings, "path": "", "cancelled": true}
 		i += 1
 		var path := str(src)
 		print("Gnumarus Full Scan: gdscript [%d/%d] %s" % [i, files.size(), path])
 		if path == "" or not FileAccess.file_exists(path):
 			errors.append(_issue(STAGE_GDSCRIPT, "error", "unreadable", "Cannot open file: " + path, path))
 			continue
-		var ana = _fresh_analyzer()
+		var ana = _fresh_analyzer(opts)
 		var res: Dictionary = ana.analyze(SynParser.new().parse_text(FileAccess.get_file_as_string(path)), path)
 		for e in res.get("errors", []):
 			errors.append(_tag(STAGE_GDSCRIPT, e, path))
@@ -324,8 +344,9 @@ func run_gdscript(root_os := "", targets := []) -> Dictionary:
 ## `by_uid`/`by_path` plus `exists`/`read_text` exist for hermetic
 ## tests (a valid `exists` stub means "use the given maps as-is");
 ## real runs load .godot/uid_cache.bin when the maps are empty.
+## `cancel` aborts between files (worker dispatch).
 ## Returns the full stored doc.
-func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, exists := Callable(), read_text := Callable()) -> Dictionary:
+func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, exists := Callable(), read_text := Callable(), cancel := Callable()) -> Dictionary:
 	var root := root_os if root_os != "" else project_root()
 	var files: Array = (targets as Array).duplicate() if not (targets as Array).is_empty() else Integrity.collect_text_resources(root) + Integrity.collect_gd_scripts(root)
 	files.sort()
@@ -346,6 +367,9 @@ func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, ex
 	var warnings: Array = []
 	var i := 0
 	for target in files:
+		if cancel.is_valid() and bool(cancel.call()):
+			print("Gnumarus Full Scan: integrity cancelled.")
+			return {"errors": errors, "warnings": warnings, "path": "", "cancelled": true}
 		i += 1
 		var path := str(target)
 		print("Gnumarus Full Scan: integrity [%d/%d] %s" % [i, files.size(), path])
@@ -360,10 +384,15 @@ func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, ex
 ## Full run: every stage in order (each persists, so the report is
 ## complete even if a later stage is interrupted), then the project
 ## file census. Prints one completion line. Returns the full doc.
-func run(root_os := "") -> Dictionary:
+## `opts`/`cancel` are the worker-dispatch plumbs (see run_gdscript).
+func run(root_os := "", opts := {}, cancel := Callable()) -> Dictionary:
 	var root := root_os if root_os != "" else project_root()
-	run_gdscript(root)
-	run_integrity(root)
+	var gd := run_gdscript(root, [], opts, cancel)
+	if bool(gd.get("cancelled", false)):
+		return gd
+	var ri := run_integrity(root, [], {}, {}, Callable(), Callable(), cancel)
+	if bool(ri.get("cancelled", false)):
+		return ri
 	var doc := store_census(collect_file_census(root))
 	var s: Dictionary = doc.get("summary", {})
 	print("Gnumarus Full Scan: %d files, %d errors, %d warnings. Results in %s" % [int(s.get("files", 0)), int(s.get("errors", 0)), int(s.get("warnings", 0)), results_path()])

@@ -1590,6 +1590,9 @@ suites still print, so the marker alone could look green).
   row format and status text, per-file overlay plus scan-report
   replacement, toggle wiring, row navigation, rescan/clear, editor
   openers headless-safe, dock lifecycle null-safety).
+  `test_scan_worker.gd` (background scans: pool dispatch/done/
+  cancel/wait mechanics, FullScan policy-snapshot and cancel plumbs,
+  plugin dispatch null-safety headless).
 - `tests/AnnotationsStressTest.gd` is a non-suite fixture: a
   single-file stress of every annotation, valid and invalid uses
   with documented verdicts. It parses in Godot, so its diagnostics
@@ -1655,13 +1658,21 @@ first-painted-line scan).
   runs after our immediate paint and resets every line background,
   so without it highlights would vanish until the next manual run.
   On enable, a background warm pass analyzes stale project files in
-  budgeted deferred ticks (cancellable on exit), leaves first via
-  the roster extends map so parents land before children cascade,
-  so cross-file data is ready before it is needed. Enabling never
-  blocks the editor: collection itself is deferred past the toggle
-  paint, each tick prints its file (`warming [i/n] path`) and yields
-  a frame, and teardown cancels cleanly. Editor filesystem
-  rescans re-warm incrementally (a restart when idle, one flagged
+  one WorkerThreadPool task (leaves first via the roster extends
+  map, so parents land before children cascade, so cross-file data
+  is ready before it is needed): no frame slicing, no main-thread
+  work at all — the editor stays fully usable, progress still prints
+  per file (`warming [i/n] path`), and completion is polled from the
+  plugin's `_process` (enabled only while a scan owns the process).
+  The pool is exclusive-mode: while a scan runs, realtime analysis
+  skips (a manual hotkey prints a note instead of silently idling;
+  file switches clear a stale bar), because Analyzer statics
+  (roster, resolve stack) and user JSON writes belong to the worker
+  alone. Teardown cancels between files and joins the task; a scan
+  requested mid-scan queues behind it (warm restarts, manual full
+  scans preempt it). Web builds keep the legacy budgeted frame pump
+  (pool tasks run inline there). Enabling never blocks the editor.
+  Editor filesystem rescans re-warm incrementally (a restart when idle, one flagged
   extra pass otherwise; mtime skips keep both cheap). Repeat triggers
   on an unchanged buffer re-analyze only when a referenced script
   JSON changed (new/missing data converges without edits); those
@@ -1690,11 +1701,15 @@ first-painted-line scan).
   and caret movement on mock trees and a real `TextEdit`, and the
   plugin-impl lifecycle on headless instances.
 - Structure: `GnumarusGodotProjectAnalyzerSuitePlugin.gd` is a dumb
-  `EditorPlugin` proxy (forwards `_enter_tree`/`_exit_tree`/`_input`
+  `EditorPlugin` proxy (forwards `_enter_tree`/`_exit_tree`/`_input`/`_process`
   only); every behavior lives in
   `GnumarusGodotProjectAnalyzerSuitePluginImpl.gd` (`RefCounted`,
   holding the host reference for Node services), precisely so the
   logic instantiates headless in unit tests.
+  `GnumarusGodotProjectAnalyzerSuiteScanWorker.gd` owns the pool
+  mechanics only (dispatch/done/cancel/wait + one mutex); scan bodies
+  stay in the impl/FullScan cores, which tests and the CLI keep using
+  synchronously.
 - Limitations: GDScript editors only; unsaved (`untitled`) scripts
   analyze under a fallback path; each run writes the usual
   `user/*.json` analysis files like any other analyze() call.

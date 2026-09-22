@@ -21,6 +21,7 @@ const SynParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/Gnuma
 const Analyzer = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
 const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
 const FullScan = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
+const ScanWorker = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteScanWorker.gd")
 const Dock = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteDock.gd")
 const Integrity = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteResourceIntegrity.gd")
 const UidCache = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteUidCache.gd")
@@ -62,6 +63,15 @@ var _fs_dirty := false
 var _uid_by_uid := {}
 var _uid_by_path := {}
 var _uid_cache_mtime := -2
+## Background scan worker (single exclusive task, warm or full): while
+## set, the main thread performs no analysis (realtime skips, the
+## frame pump sleeps), so Analyzer statics and user JSON writes belong
+## to the worker alone. Polled from _process; joined in exit_tree.
+var _worker: RefCounted = null
+var _worker_kind := ""
+## Manual full scan requested while a warm worker runs: queued for
+## the worker finish instead of racing it.
+var _pending_full := false
 
 
 func _init(p_plugin: EditorPlugin = null) -> void:
@@ -153,10 +163,18 @@ static func _ensure_strict_setting() -> void:
 ## Fresh analyzer carrying the current ProjectSetting policy as its
 ## explicit base (file tags still override per file inside analyze).
 ## Kept in one place so every analysis entry point stays consistent.
-static func _fresh_analyzer() -> RefCounted:
+## `opts` optionally pins a main-thread snapshot instead (worker
+## dispatch; see FullScan.policy_snapshot).
+static func _fresh_analyzer(opts := {}) -> RefCounted:
 	var ana = Analyzer.new()
-	ana.null_policy = str(ProjectSettings.get_setting("gnumarus_analyzer/nullable_policy", "trust"))
-	ana.strict_untyped = bool(ProjectSettings.get_setting("gnumarus_analyzer/strict_untyped", false))
+	if (opts as Dictionary).has("policy"):
+		ana.null_policy = str((opts as Dictionary).get("policy", "trust"))
+	else:
+		ana.null_policy = str(ProjectSettings.get_setting("gnumarus_analyzer/nullable_policy", "trust"))
+	if (opts as Dictionary).has("strict"):
+		ana.strict_untyped = bool((opts as Dictionary).get("strict", false))
+	else:
+		ana.strict_untyped = bool(ProjectSettings.get_setting("gnumarus_analyzer/strict_untyped", false))
 	return ana
 
 
@@ -291,9 +309,11 @@ static func deps_changed(refs: Array, since_unix: float, dir: String) -> bool:
 ## One warm chunk: analyzes stale/missing-JSON sources from
 ## paths[idx:], stopping at the chunk/budget cap. Returns the next
 ## index (== size when done). Headless-runnable; editors pump it one
-## frame at a time (see _warm_pump). Skips up-to-date files by mtime.
-## Verbose prints every analyzed file for console progress.
-func warm_step(paths: Array, from_idx: int, budget_ms: int, verbose := false) -> int:
+## frame at a time (see _warm_pump), or run it in the scan worker
+## (see _warm_task) with a wide budget. Skips up-to-date files by
+## mtime. Verbose prints every analyzed file for console progress.
+## `opts` pins the policy snapshot (worker dispatch).
+func warm_step(paths: Array, from_idx: int, budget_ms: int, verbose := false, opts := {}) -> int:
 	var i := mini(maxi(from_idx, 0), paths.size())
 	var t0 := Time.get_ticks_msec()
 	var done := 0
@@ -305,13 +325,22 @@ func warm_step(paths: Array, from_idx: int, budget_ms: int, verbose := false) ->
 			if not FileAccess.file_exists(js) or sm > FileAccess.get_modified_time(js):
 				if verbose:
 					print("Gnumarus Analyzer: warming [%d/%d] %s" % [i + 1, paths.size(), src])
-				var ana = _fresh_analyzer()
+				var ana = _fresh_analyzer(opts)
 				ana.analyze(SynParser.new().parse_text(FileAccess.get_file_as_string(src)), src)
 		i += 1
 		done += 1
 		if done >= WARM_CHUNK or Time.get_ticks_msec() - t0 >= budget_ms:
 			break
 	return i
+
+
+## True when scans may run in the background pool (editor native
+## builds). Web builds run pool tasks inline on the calling thread,
+## so they keep the frame pump / sync run instead. Static, pure.
+static func _worker_available() -> bool:
+	if OS.has_feature("web"):
+		return false
+	return Engine.has_singleton("WorkerThreadPool")
 
 
 ## Starts the background warm pass (editor only — headless instances
@@ -325,15 +354,25 @@ func _start_warm() -> void:
 	_warm_restart = false
 	if not Engine.is_editor_hint():
 		return
+	if _worker != null:
+		_warm_restart = true
+		return
 	_warm_gen += 1
 	call_deferred("_warm_begin", _warm_gen)
 
 
 ## Deferred warm setup: collects and orders the project scripts,
 ## then pumps. Generation-guarded (a disable/enable cycle in between
-## cancels this begin).
+## cancels this begin). Prefers the scan worker (no frame slicing);
+## the pump remains for web builds and headless tests.
 func _warm_begin(g: int) -> void:
 	if g != _warm_gen:
+		return
+	if _worker != null:
+		_warm_restart = true
+		return
+	if _use_worker():
+		_dispatch_warm()
 		return
 	Analyzer._roster_refresh(project_root())
 	Analyzer._roster_absorb(Analyzer._roster_scan_files(project_root()))
@@ -343,6 +382,101 @@ func _warm_begin(g: int) -> void:
 		return
 	print("Gnumarus Analyzer: warming %d project scripts in the background..." % _warm_pending.size())
 	_warm_pump()
+
+
+## Pool predicate (owns no state; headless tests stub past it).
+func _use_worker() -> bool:
+	if plugin == null or not is_instance_valid(plugin):
+		return false
+	return _worker_available()
+
+
+## Dispatches the warm pass as one background task (collect, order
+## and analyze all happen on the worker; the main thread only snaps
+## the root and the policy). No-op without a plugin host.
+func _dispatch_warm() -> void:
+	if plugin == null or not is_instance_valid(plugin):
+		return
+	_worker_kind = "warm"
+	var worker = ScanWorker.new()
+	_worker = worker
+	worker.dispatch(Callable(self, "_warm_task").bind(worker, project_root(), FullScan.policy_snapshot()), "warm")
+	(plugin as Object).call("set_process", true)
+	print("Gnumarus Analyzer: warming project scripts in the background...")
+
+
+## Worker body for the warm pass: roster, order, then budgeted chunks
+## with cancel checks (warm_step is reused with a wide budget since
+## no frame is waiting). Runs fully off the main thread.
+func _warm_task(worker: Object, root_os: String, opts: Dictionary) -> void:
+	Analyzer._roster_refresh(root_os)
+	Analyzer._roster_absorb(Analyzer._roster_scan_files(root_os))
+	var paths := order_for_warm(collect_project_scripts(root_os))
+	print("Gnumarus Analyzer: warming %d project scripts in the background..." % paths.size())
+	var idx := 0
+	while idx < paths.size():
+		if (worker as Object).call("is_cancelled"):
+			print("Gnumarus Analyzer: warm pass cancelled.")
+			return
+		idx = warm_step(paths, idx, 60000, true, opts)
+	if not (worker as Object).call("is_cancelled"):
+		print("Gnumarus Analyzer: warm pass complete.")
+
+
+## Dispatches the full scan as one background task. No-op without a
+## plugin host.
+func _dispatch_full() -> void:
+	if plugin == null or not is_instance_valid(plugin):
+		return
+	_worker_kind = "full"
+	_pending_full = false
+	var worker = ScanWorker.new()
+	_worker = worker
+	worker.dispatch(Callable(self, "_full_task").bind(worker, project_root(), FullScan.policy_snapshot()), "full")
+	(plugin as Object).call("set_process", true)
+	print("Gnumarus Analyzer: full scan running in the background...")
+
+
+## Worker body for the full scan: every stage plus census, persisted
+## like the sync run. The main thread only refreshes the dock.
+func _full_task(worker: Object, root_os: String, opts: Dictionary) -> void:
+	(worker as Object).call("set_result", FullScan.new().run(root_os, opts, Callable(worker as Object, "is_cancelled")))
+
+
+## Worker completion poll (the proxy forwards _process while the
+## plugin lives). One flag check per frame; the finish itself runs
+## on the main thread.
+func _process(_delta: float) -> void:
+	if _worker == null:
+		return
+	if not ((_worker as ScanWorker).is_done()):
+		return
+	_finish_worker()
+
+
+## Applies a finished worker scan on the main thread: dock refresh
+## for full scans, then queued follow-ups (a requested full scan
+## first, else a flagged warm restart). Never dispatches when the
+## host is gone.
+func _finish_worker() -> void:
+	_worker = null
+	var kind := _worker_kind
+	_worker_kind = ""
+	if plugin != null and is_instance_valid(plugin) and (plugin as Object).has_method("set_process"):
+		(plugin as Object).call("set_process", false)
+	if kind == "full":
+		if _dock != null and is_instance_valid(_dock):
+			(_dock as Object).call("set_scan_results", FullScan.load_results())
+		_reveal_dock()
+		analyze_current(false)
+	if _pending_full:
+		_pending_full = false
+		if plugin != null and is_instance_valid(plugin):
+			_dispatch_full()
+		return
+	if _warm_restart:
+		_warm_restart = false
+		_start_warm()
 
 
 ## Editor SceneTree for frame yields (null headless or detached: the
@@ -384,6 +518,12 @@ func _warm_pump() -> void:
 
 ## Editor exit point (forwarded by the proxy).
 func exit_tree() -> void:
+	if _worker != null:
+		(_worker as ScanWorker).cancel()
+		(_worker as ScanWorker).wait_done()
+		_worker = null
+		_worker_kind = ""
+	_pending_full = false
 	_remove_tool_menu()
 	_remove_dock()
 	_hook_signals(false)
@@ -467,6 +607,9 @@ func _hook_filesystem(connect_now: bool) -> void:
 ## elsewhere that breaks or fixes a ref shows up immediately.
 func _on_filesystem_changed() -> void:
 	_fs_dirty = true
+	if _worker != null:
+		_warm_restart = true
+		return
 	if _warm_pending.is_empty():
 		_start_warm()
 	else:
@@ -501,10 +644,24 @@ func _remove_tool_menu() -> void:
 	(plugin as Object).call("remove_tool_menu_item", FULL_SCAN_MENU)
 
 
-## Tool-menu callback: runs the full scan synchronously (the impl
-## prints per-file progress plus one completion line), replaces the
-## dock list with the report and reveals the dock.
+## Tool-menu callback: runs the full scan in the background pool
+## (warm worker is cancelled and the full scan queued behind it),
+## then replaces the dock list with the report and reveals the dock.
+## Falls back to the synchronous run where no pool exists.
 func _on_full_scan_menu() -> void:
+	if _worker != null:
+		if _worker_kind == "full":
+			print("Gnumarus Analyzer: full scan already running.")
+		else:
+			_pending_full = true
+			(_worker as ScanWorker).cancel()
+			print("Gnumarus Analyzer: full scan queued behind the warm pass.")
+		_reveal_dock()
+		return
+	if _use_worker():
+		_dispatch_full()
+		_reveal_dock()
+		return
 	var doc: Dictionary = FullScan.new().run()
 	if _dock != null and is_instance_valid(_dock):
 		(_dock as Object).call("set_scan_results", doc)
@@ -730,6 +887,14 @@ func analyze_current(announce := true) -> void:
 	if path.strip_edges() == "":
 		path = "res://untitled.gd" # @integrity_ignore (virtual display label)
 	var h := text.hash()
+	if _worker != null:
+		if announce:
+			print("Gnumarus Analyzer: background scan running; live analysis resumes when it finishes.")
+		if path != _last_path:
+			(bar as Object).call("clear_results")
+		_has_last = false
+		_rewatch_code_edit()
+		return
 	var same := not announce and _has_last and path == _last_path and h == _last_hash
 	var via_deps := same and deps_changed(_last_refs, _last_run_unix, user_dir())
 	if same and not via_deps and not _fs_dirty:

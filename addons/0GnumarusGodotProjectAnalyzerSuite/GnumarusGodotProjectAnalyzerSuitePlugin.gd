@@ -26,3 +26,10 @@ func _exit_tree() -> void:
 func _input(event: InputEvent) -> void:
 	if _impl:
 		_impl._input(event)
+
+
+## Completion poll for the background scan worker (the impl enables
+## processing only while a scan owns the process).
+func _process(delta: float) -> void:
+	if _impl:
+		_impl._process(delta)

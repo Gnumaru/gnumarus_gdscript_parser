@@ -30,11 +30,15 @@ Install from Project → Plugins and open any script:
   Godot's own validator pass. Repeat runs on unchanged buffers
   refresh only when a dependency changed (marked `(deps)`).
 - On enable, a background warm pass pre-analyzes the project in
-  budgeted ticks, so cross-file results are ready immediately.
+  a single WorkerThreadPool task (one scan at a time; realtime
+  analysis pauses while it runs), so cross-file results are ready
+  immediately and the editor never freezes.
 - Project → Tools → Gnumaru's Full Scan (or File → Run on the
   `GnumarusGodotProjectAnalyzerSuiteFullScan` script) runs every
   analysis pass over the whole project and merges all errors and
   warnings into `.godot/0GnumarusGodotProjectAnalyzerSuiteData/ScanResults.json`.
+  From the Tools menu it runs in the background pool (same
+  exclusive mode as the warm pass); File → Run stays synchronous.
 - A bottom-panel dock lists every known issue with severity toggles
   (errors / warnings / future notes) and per-type toggles (`gd`,
   `tscn`, `tres`, `godot`, other); picking a row jumps to it and
