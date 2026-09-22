@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## @private nested-family rule suite (migrated from the scratch runner).

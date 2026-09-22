@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Instance-reuse suite: every stage must parse a second input with the

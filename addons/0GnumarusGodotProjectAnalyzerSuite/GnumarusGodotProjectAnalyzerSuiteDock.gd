@@ -74,7 +74,7 @@ static func severity_mark(sev: String) -> String:
 	return "E"
 
 
-## One-line row text: "[E] res://x.gd:10: [kind] message". Pure.
+## One-line row text: "[E] res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd:10: [kind] message". Pure.
 static func format_row(issue: Dictionary) -> String:
 	var sev := normalize_severity(issue)
 	var line := maxi(int(issue.get("line", 1)), 1)

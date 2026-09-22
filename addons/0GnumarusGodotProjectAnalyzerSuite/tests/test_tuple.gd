@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## @tuple suite: definitions (explicit size, unions, markers), semantic

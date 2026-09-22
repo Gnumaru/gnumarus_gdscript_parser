@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Resource integrity suite (phase 1, report-only): ext_resource
@@ -38,6 +39,7 @@ func run() -> Dictionary:
 	_r_header(h)
 	_r_sidecar(h)
 	_r_gd(h)
+	_r_gd_strings(h)
 	_r_gd_refs(h)
 	_r_reuse(h)
 	_r_collect(h)
@@ -237,11 +239,21 @@ func _r_gd(h) -> void:
 	h.check(int((_errs(mres, "missing_file")[0] as Dictionary).get("column", 0)) > 0, "gd missing carries column")
 	h.check(c.last_error != "", "gd last_error set")
 	var comment := "# preload(\"res://gone/fake.gd\")\nextends Node\nvar s := \"res://gone/plain_string.gd\"\n"
-	h.check((c.analyze_gd_text(comment, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd comments and plain strings skipped")
+	var cres: Dictionary = c.analyze_gd_text(comment, "res://x.gd", maps[0], maps[1], Callable(self, "_exists"))
+	var cmsgs := []
+	for e in cres.get("errors", []):
+		cmsgs.append(str((e as Dictionary).get("message", "")))
+	h.check(_errs(cres, "missing_file").size() == 2, "gd comments and plain strings scanned")
+	h.check(cmsgs.any(func(m: String) -> bool: return m.begins_with("Comment ")), "gd comment labeled")
+	h.check(cmsgs.any(func(m: String) -> bool: return m.begins_with("String ")), "gd plain string labeled")
 	var dyn := "extends Node\nfunc f() -> void:\n\tvar a := load(\"res://\" + name)\n\tvar b := load(\"res://gone/\" + \"part.gd\")\n"
 	h.check((c.analyze_gd_text(dyn, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd concatenation fragments skipped")
 	var custom := "extends Node\nfunc f() -> void:\n\tvar x := loader.load(\"res://gone/custom.gd\")\n\tvar y := ResourceLoader.exists(\"res://gone/other.gd\")\n"
-	h.check((c.analyze_gd_text(custom, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd custom load and exists skipped")
+	var customres: Dictionary = c.analyze_gd_text(custom, "res://x.gd", maps[0], maps[1], Callable(self, "_exists"))
+	h.check(_errs(customres, "missing_file").size() == 1, "gd custom load scanned, probe skipped")
+	h.check(str((_errs(customres, "missing_file")[0] as Dictionary).get("message", "")).begins_with("String "), "gd custom load uses plain label")
+	var probe := "extends Node\nfunc f() -> bool:\n\treturn FileAccess.file_exists(\"res://gone/probed.gd\") or DirAccess.dir_exists_absolute(\"res://gone/dir\")\n"
+	h.check((c.analyze_gd_text(probe, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd existence probes skipped")
 	var uidmiss := "extends Node\nfunc f() -> void:\n\tvar u := load(\"" + OTHER_UID + "\")\n"
 	h.check(_errs(c.analyze_gd_text(uidmiss, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")), "missing_uid").size() == 1, "gd unknown uid missing")
 	h.check(_errs(c.analyze_gd_text(uidmiss, "res://x.gd", {}, {}, Callable(self, "_exists")), "missing_uid").is_empty(), "gd empty maps skip uid presence")
@@ -267,6 +279,43 @@ func _r_gd(h) -> void:
 	h.check(_errs(gunread, "unreadable").size() == 1, "gd unreadable errors once")
 
 
+func _r_gd_strings(h) -> void:
+	var c := _checker()
+	var maps := _maps()
+	var triple := "extends Node\nvar c := \"\"\"see res://gone/triple.tscn.\"\"\"\n"
+	var tres: Dictionary = c.analyze_gd_text(triple, "res://x.gd", maps[0], maps[1], Callable(self, "_exists"))
+	h.check(_errs(tres, "missing_file").size() == 1, "gd triple-quoted scanned")
+	h.check("res://gone/triple.tscn" in str((_errs(tres, "missing_file")[0] as Dictionary).get("message", "")), "gd sentence period stripped")
+	h.check(int((_errs(tres, "missing_file")[0] as Dictionary).get("line", 0)) == 2, "gd embedded line")
+	h.check(int((_errs(tres, "missing_file")[0] as Dictionary).get("column", 0)) > 0, "gd embedded column")
+	var single := "extends Node\nvar a := 'res://gone/single.tscn'\n"
+	h.check(_errs(c.analyze_gd_text(single, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")), "missing_file").size() == 1, "gd single-quoted scanned")
+	var second := "extends Node\nfunc f() -> void:\n\tfoo(\"ok\", \"res://gone/second.tscn\")\n"
+	h.check(_errs(c.analyze_gd_text(second, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")), "missing_file").size() == 1, "gd non-first arg scanned")
+	var fmt := "extends Node\nfunc f() -> void:\n\tvar s := \"res://gone/%s.tscn\" % name\n"
+	h.check((c.analyze_gd_text(fmt, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd format operand skipped")
+	var meta := "extends Node\nvar s := \"example: \\\"res://gone/meta.tscn\\\" end\"\n"
+	h.check((c.analyze_gd_text(meta, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd escaped meta skipped")
+	var uidstr := "extends Node\nvar u := \"ref " + OTHER_UID + " here\"\n"
+	h.check(_errs(c.analyze_gd_text(uidstr, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")), "missing_uid").size() == 1, "gd embedded uid scanned")
+	var linesuf := "extends Node\n# broke at res://gone/logged.tscn:10:4 yesterday\n"
+	var lres: Dictionary = c.analyze_gd_text(linesuf, "res://x.gd", maps[0], maps[1], Callable(self, "_exists"))
+	h.check(_errs(lres, "missing_file").size() == 1, "gd path:line suffix scanned")
+	h.check("res://gone/logged.tscn" in str((_errs(lres, "missing_file")[0] as Dictionary).get("message", "")) and ":10" not in str((_errs(lres, "missing_file")[0] as Dictionary).get("message", "")), "gd path:line suffix stripped")
+	var doc := "## Example: checker.analyze_file(\"res://gone/doc.tscn\")\nextends Node\n"
+	var dres: Dictionary = c.analyze_gd_text(doc, "res://x.gd", maps[0], maps[1], Callable(self, "_exists"))
+	h.check(_errs(dres, "missing_file").size() == 1, "gd doc comments scanned")
+	h.check(str((_errs(dres, "missing_file")[0] as Dictionary).get("message", "")).begins_with("Comment "), "gd doc comment labeled")
+	var ignline := "extends Node\nvar s := \"res://gone/ignored.tscn\" # @integrity_ignore\nvar t := \"res://gone/kept.tscn\"\n"
+	var ignres: Dictionary = c.analyze_gd_text(ignline, "res://x.gd", maps[0], maps[1], Callable(self, "_exists"))
+	h.check(_errs(ignres, "missing_file").size() == 1, "gd line ignore drops its line only")
+	h.check("res://gone/kept.tscn" in str((_errs(ignres, "missing_file")[0] as Dictionary).get("message", "")), "gd line ignore keeps other lines")
+	var ignfile := "# @integrity_ignore_file\nextends Node\nvar s := \"res://gone/anything.tscn\"\n"
+	h.check((c.analyze_gd_text(ignfile, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd file ignore exempts")
+	var latemarker := "extends Node\n# @integrity_ignore_file\nvar s := \"res://gone/late.tscn\"\n"
+	h.check(_errs(c.analyze_gd_text(latemarker, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")), "missing_file").size() == 1, "gd late file marker ignored")
+
+
 func _r_gd_refs(h) -> void:
 	var c := _checker()
 	var maps := _maps()
@@ -283,6 +332,8 @@ func _r_gd_refs(h) -> void:
 	var ident := "extends Node\n"
 	h.check((c.analyze_gd_text(ident, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd identifier extends skipped")
 	var other := "@warning_ignore(\"res://gone/not_a_path.gd\")\nextends Node\n"
-	h.check((c.analyze_gd_text(other, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")).get("errors", []) as Array).is_empty(), "gd other annotations skipped")
+	var otherres: Dictionary = c.analyze_gd_text(other, "res://x.gd", maps[0], maps[1], Callable(self, "_exists"))
+	h.check(_errs(otherres, "missing_file").size() == 1, "gd other annotations scanned as plain strings")
+	h.check(str((_errs(otherres, "missing_file")[0] as Dictionary).get("message", "")).begins_with("String "), "gd other annotations use plain label")
 	var iconuid := "@icon(\"" + OTHER_UID + "\")\nextends Node\n"
 	h.check(_errs(c.analyze_gd_text(iconuid, "res://x.gd", maps[0], maps[1], Callable(self, "_exists")), "missing_uid").size() == 1, "gd icon unknown uid missing")

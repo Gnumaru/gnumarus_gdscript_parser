@@ -51,7 +51,7 @@ extends RefCounted
 ## script/source string or the myvar array in the test scene).
 ##
 ## Usage with a file path:
-##   var data := GnumarusGodotProjectAnalyzerSuiteTextResourceParser.new().parse("res://scene.tscn")
+##   var data := GnumarusGodotProjectAnalyzerSuiteTextResourceParser.new().parse("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Node3D.tscn")
 ## Usage with a source string:
 ##   var data := GnumarusGodotProjectAnalyzerSuiteTextResourceParser.new().parse_text("[resource]\na = 1\n")
 

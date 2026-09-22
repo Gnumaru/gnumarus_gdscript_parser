@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## @interface suite: multi/single-line blocks, member forms, static

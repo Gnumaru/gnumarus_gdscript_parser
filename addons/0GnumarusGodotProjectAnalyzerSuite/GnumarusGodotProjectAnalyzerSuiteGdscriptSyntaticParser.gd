@@ -32,11 +32,11 @@ extends RefCounted
 ## TYPE_REF / PATTERN nodes holding the original token Dictionaries.
 ##
 ## Usage with a token array:
-##   var tokens: Array = post.process("res://script.gd")
+##   var tokens: Array = post.process("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 ##   var ast: Dictionary = GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new().parse_tokens(tokens)
 ## Usage with source code or a file path:
 ##   var ast: Dictionary = GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new().parse_text("var x := 1\n")
-##   var ast: Dictionary = GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new().parse("res://script.gd")
+##   var ast: Dictionary = GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new().parse("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 
 const GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer = preload('GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.gd')
 const GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer = preload('GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.gd')

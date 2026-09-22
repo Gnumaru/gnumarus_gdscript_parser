@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## @var rule suite: before-declaration narrowing with :=/= inference,

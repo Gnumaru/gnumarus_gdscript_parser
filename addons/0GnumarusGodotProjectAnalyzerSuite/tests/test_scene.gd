@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Scene/resource/config suite: tscn/tres/project.godot parsing into

@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Flow suite: Phase 1 strict member calls on known types plus Phase 2

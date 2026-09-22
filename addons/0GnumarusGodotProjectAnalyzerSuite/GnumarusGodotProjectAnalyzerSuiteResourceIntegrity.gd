@@ -3,7 +3,7 @@ extends RefCounted
 
 ## Integrity checker for textual Godot resources (.tscn, .tres,
 ## project.godot and any other file in the same INI-like format) plus
-## preload()/load() literals in GDScript (.gd).
+## every static resource string in GDScript (.gd).
 ##
 ## Report-only: walks each file looking for resource paths (res://...)
 ## and UIDs (uid://...) and validates them: referenced files must
@@ -18,13 +18,15 @@ extends RefCounted
 ## inference, not file references): this stage owns no inference, no
 ## JSON output and no Editor dependency, so it stays headless-runnable
 ## and hermetic. .gd files are scanned at the token level (never
-## parsed), so only complete single-string literals count:
-## preload("res://..."), bare load("..."),
-## ResourceLoader.load("..."), extends "res://..." and
-## @icon("res://..."). Comments, plain strings, dynamic concatenation
-## ("res://" + name), custom obj.load() calls and other annotations
-## (e.g. @warning_ignore strings, which are not paths) are skipped by
-## construction.
+## parsed): trigger literals (preload("..."), bare load("..."),
+## ResourceLoader.load("..."), extends "...", @icon("...")) keep
+## their labeled checks, and every other static string — assignments,
+## call args, any quoting (single, double, triple-double) — plus
+## every comment is scanned for embedded references at in-token
+## positions. Only dynamic content stays out: concatenation/format
+## operands ("res://" + name, "res://%s" % x), custom obj.load()
+## calls, bare prefixes and backslash-escaped meta content (example
+## code nested in an outer string).
 ##
 ## Result shape (mirrors the gdscript analyzer split):
 ## {
@@ -61,7 +63,8 @@ extends RefCounted
 ## Usage:
 ##   var cache := UidCache.new().parse("res://.godot/uid_cache.bin")
 ##   var checker := ResourceIntegrity.new()
-##   var res := checker.analyze_file("res://scene.tscn",
+##   var res := checker.analyze_file(
+##       "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Node3D.tscn",
 ##       cache.get("by_uid", {}), cache.get("by_path", {}))
 
 const TextParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteTextResourceParser.gd")
@@ -74,6 +77,14 @@ const TEXT_EXTS := [".tscn", ".tres"]
 ## Token types ignored when looking at neighbors of a load literal
 ## (layout tokens that can sit inside a parenthesized call).
 const _GD_BLANK := ["NEWLINE", "INDENT", "DEDENT"]
+
+## Characters ending a resource reference inside a string or
+## comment body: whitespace, quotes, brackets, commas and format
+## placeholders (`%`, `{}`). A trailing run of sentence punctuation
+## (`.,;:!?`) is stripped separately, so "see
+## res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd."
+## still resolves to the file.
+const _GD_REF_STOP := " \t\r\n\"'()[]{},;%<>"
 
 ## Last failure message ("" when the previous call was clean).
 var last_error := ""
@@ -165,14 +176,10 @@ static func _res_path(root: String, abspath: String) -> String:
 	return abspath
 
 
-## Analyzes GDScript source for load literals. Token-level scan (no
-## parse): only complete single-string literals count —
-## preload("..."), bare load("..."), ResourceLoader.load("..."),
-## extends "..." and @icon("...").
-## A parenthesized literal counts only when the next significant token
-## is ")" or ",", so dynamic concatenation ("res://" + name) never
-## counts; an extends literal counts only at statement end. Never
-## fails.
+## Analyzes GDScript source for resource references. Token-level scan
+## (no parse): trigger literals (preload/load/extends/@icon) plus
+## every other static string in any quoting and every comment. Only
+## dynamic concatenation/format operands stay out. Never fails.
 func analyze_gd_text(text: String, path: String = "", by_uid: Dictionary = {}, by_path: Dictionary = {}, exists: Callable = Callable()) -> Dictionary:
 	last_error = ""
 	var errors: Array = []
@@ -180,7 +187,13 @@ func analyze_gd_text(text: String, path: String = "", by_uid: Dictionary = {}, b
 	var toks: Array = GdTokenizer.new().tokenize_text(text)
 	if toks.is_empty():
 		return {"errors": errors, "warnings": warnings, "path": path}
+	if _gd_ignore_file(toks):
+		return {"errors": errors, "warnings": warnings, "path": path}
 	_check_gd_tokens(toks, path, by_uid, exists, errors, warnings)
+	var ignored := _gd_ignored_lines(toks)
+	if not ignored.is_empty():
+		errors = errors.filter(func(e: Variant) -> bool: return not (e is Dictionary and ignored.has(int((e as Dictionary).get("line", 1)))))
+		warnings = warnings.filter(func(e: Variant) -> bool: return not (e is Dictionary and ignored.has(int((e as Dictionary).get("line", 1)))))
 	if not errors.is_empty():
 		last_error = str(errors[0].get("message", ""))
 	return {"errors": errors, "warnings": warnings, "path": path}
@@ -230,15 +243,26 @@ func _check_gd_tokens(toks: Array, path: String, by_uid: Dictionary, exists: Cal
 			label = "Icon"
 		elif ttype == "IDENTIFIER" and tval == "load" and _gd_load_host(toks, i):
 			label = "Loaded"
-		if label == "":
-			i += 1
+		if label != "":
+			var st := _gd_paren_string(toks, i)
+			if st < 0:
+				i += 1
+				continue
+			_check_gd_literal(str((toks[st] as Dictionary).get("value", "")), int((toks[st] as Dictionary).get("line", 1)), int((toks[st] as Dictionary).get("column", 0)), path, by_uid, verify_uids, exists, errors, warnings, label)
+			i = st + 1
 			continue
-		var st := _gd_paren_string(toks, i)
-		if st < 0:
-			i += 1
-			continue
-		_check_gd_literal(str((toks[st] as Dictionary).get("value", "")), int((toks[st] as Dictionary).get("line", 1)), int((toks[st] as Dictionary).get("column", 0)), path, by_uid, verify_uids, exists, errors, warnings, label)
-		i = st + 1
+		# Trigger-adjacent literals are consumed above (the jump over
+		# `st` skips them), so every STRING/COMMENT reaching here is a
+		# plain static string: scan its whole content for references.
+		if ttype == "STRING":
+			if not _gd_dynamic_neighbor(toks, i) and not _gd_existence_probe(toks, i):
+				var raw := str(d.get("value", ""))
+				_scan_gd_refs(_unquote(raw), int(d.get("line", 1)), int(d.get("column", 0)) + _gd_body_offset(raw), path, by_uid, verify_uids, exists, errors, warnings, "String")
+		elif ttype == "COMMENT":
+			_scan_gd_refs(_gd_comment_body(str(d.get("value", ""))), int(d.get("line", 1)), int(d.get("column", 0)) + _gd_comment_offset(str(d.get("value", ""))), path, by_uid, verify_uids, exists, errors, warnings, "Comment")
+		elif ttype == "DOC_COMMENT":
+			_scan_gd_refs(_gd_comment_body(str(d.get("value", ""))), int(d.get("line", 1)), int(d.get("column", 0)) + _gd_comment_offset(str(d.get("value", ""))), path, by_uid, verify_uids, exists, errors, warnings, "Comment")
+		i += 1
 
 
 ## extends "..." trigger: validates the base-path literal only at
@@ -282,17 +306,166 @@ func _gd_load_host(toks: Array, i: int) -> bool:
 	return host >= 0 and str((toks[host] as Dictionary).get("value", "")) == "ResourceLoader"
 
 
+## Quote-layer width of a raw STRING token (triple-double or single):
+## the column offset where the string body starts.
+static func _gd_body_offset(raw: String) -> int:
+	if raw.begins_with("\"\"\""):
+		return 3
+	return 1
+
+
+## Comment body with the leading `#`/`##` marker stripped (only the
+## first line's marker: continuation markers stay in the body, which
+## keeps raw columns right for later lines).
+static func _gd_comment_body(raw: String) -> String:
+	if raw.begins_with("##"):
+		return raw.substr(2)
+	if raw.begins_with("#"):
+		return raw.substr(1)
+	return raw
+
+
+## Column offset where the comment body starts.
+static func _gd_comment_offset(raw: String) -> int:
+	if raw.begins_with("##"):
+		return 2
+	if raw.begins_with("#"):
+		return 1
+	return 0
+
+
+## True when a STRING token is an existence-probe argument
+## (FileAccess.file_exists(X), DirAccess.dir_exists_absolute(X),
+## *.exists(X)): a question, not a demand — absence is handled by
+## the caller, so nothing is reported. Never fails.
+func _gd_existence_probe(toks: Array, i: int) -> bool:
+	var lp := _gd_prev_sig(toks, i)
+	if lp < 0 or str((toks[lp] as Dictionary).get("type", "")) != "LPAREN":
+		return false
+	var host := _gd_prev_sig(toks, lp)
+	if host < 0 or str((toks[host] as Dictionary).get("type", "")) != "IDENTIFIER":
+		return false
+	var v := str((toks[host] as Dictionary).get("value", ""))
+	return v == "file_exists" or v == "exists" or v == "dir_exists_absolute"
+
+
+## Whole-file opt-out: "@integrity_ignore_file" inside the file's
+## leading comment block (before the first code token, like a
+## modeline) exempts the file from .gd scanning — for sources that
+## deliberately traffic in virtual paths, like analyzer test
+## harnesses. Leading-block scoping also keeps deep mentions of the
+## marker (like this very paragraph) from self-exempting. Pure.
+static func _gd_ignore_file(toks: Array) -> bool:
+	for t in toks:
+		var d := t as Dictionary
+		var ttype := str(d.get("type", ""))
+		if ttype == "COMMENT" or ttype == "DOC_COMMENT":
+			if "@integrity_ignore_file" in str(d.get("value", "")):
+				return true
+		elif ttype != "NEWLINE" and ttype != "INDENT" and ttype != "DEDENT":
+			return false
+	return false
+
+
+## Lines holding a "@integrity_ignore" comment ({line: true}): issues
+## reported on those lines are dropped. (A file-marker match does not
+## count as a line marker.) Pure.
+static func _gd_ignored_lines(toks: Array) -> Dictionary:
+	var out := {}
+	for t in toks:
+		var d := t as Dictionary
+		var ttype := str(d.get("type", ""))
+		if ttype == "COMMENT" or ttype == "DOC_COMMENT":
+			var v := str(d.get("value", ""))
+			if "@integrity_ignore" in v and not ("@integrity_ignore_file" in v):
+				out[int(d.get("line", 1))] = true
+	return out
+
+
+## True when a STRING token touches a concatenation/format operator:
+## a PLUS or PERCENT significant neighbor on either side means
+## dynamic content ("res://" + name, "res://%s" % x), out of scope.
+func _gd_dynamic_neighbor(toks: Array, i: int) -> bool:
+	var neighbors := [_gd_prev_sig(toks, i), _gd_sig(toks, i + 1)]
+	for n in neighbors:
+		var ni := int(n)
+		if ni < 0:
+			continue
+		var d := toks[ni] as Dictionary
+		if str(d.get("type", "")) == "OPERATOR" and (str(d.get("value", "")) == "+" or str(d.get("value", "")) == "%"):
+			return true
+	return false
+
+
+## Reference candidate starting at a resource occurrence: the
+## maximal run up to a stop character, minus trailing sentence
+## punctuation and trailing :line[:column] suffixes (path:line idioms
+## in logs and quick-open strings). Pure, unit-tested headless.
+static func _gd_ref_candidate(body: String, start: int) -> String:
+	var j := start
+	while j < body.length() and not _GD_REF_STOP.contains(body.substr(j, 1)):
+		j += 1
+	var s := body.substr(start, j - start)
+	while s.length() > 0 and ".,;:!?".contains(s.substr(s.length() - 1, 1)):
+		s = s.substr(0, s.length() - 1)
+	var cut := true
+	while cut and s.length() > 0:
+		cut = false
+		var ci := s.rfind(":")
+		if ci >= 7:
+			var tail := s.substr(ci + 1)
+			if tail != "" and tail.is_valid_int():
+				s = s.substr(0, ci)
+				cut = true
+	return s
+
+
+## Reports every static resource reference inside a STRING or
+## COMMENT token body (any quoting — single, double, triple-double —
+## comments included) at its in-token position (multiline bodies
+## advance the line). Bare prefixes never report; candidates
+## containing a backslash are escaped/meta content (example code
+## nested in an outer string) and skipped. Never fails.
+func _scan_gd_refs(body: String, line: int, column: int, path: String, by_uid: Dictionary, verify_uids: bool, exists: Callable, errors: Array, warnings: Array, label: String) -> void:
+	var i := 0
+	while i < body.length():
+		var r := body.find("res://", i)
+		var u := body.find("uid://", i)
+		var start := u
+		if r >= 0 and (u < 0 or r < u):
+			start = r
+		if start < 0:
+			return
+		var head := body.substr(0, start)
+		var nl := head.count("\n")
+		var ocol := column + start
+		if nl > 0:
+			ocol = start - (head.rfind("\n") + 1)
+		var cand := _gd_ref_candidate(body, start)
+		if cand != "" and not ("\\" in cand):
+			_check_gd_candidate(cand, line + nl, ocol, path, by_uid, verify_uids, exists, errors, warnings, label)
+		i = start + maxi(cand.length(), 1)
+
+
 ## Validates one complete load literal at its token line/column.
 ## Non-resource strings pass silently; bare "res://"/"uid://" prefixes
 ## (concatenation fragments) are skipped, never reported.
 func _check_gd_literal(raw: String, line: int, column: int, path: String, by_uid: Dictionary, verify_uids: bool, exists: Callable, errors: Array, warnings: Array, label: String = "Loaded") -> void:
-	var s := _unquote(raw).strip_edges()
+	_check_gd_candidate(_unquote(raw).strip_edges(), line, column, path, by_uid, verify_uids, exists, errors, warnings, label)
+
+
+## Validates one unquoted path candidate at its position. Same
+## silence rules as the literal above, shared by the trigger checks
+## and the all-strings scan below. Directories count as existing
+## (prefix comparisons like begins_with("res://addons/") are static
+## strings too).
+func _check_gd_candidate(s: String, line: int, column: int, path: String, by_uid: Dictionary, verify_uids: bool, exists: Callable, errors: Array, warnings: Array, label: String) -> void:
 	if s == "res://" or s == "uid://":
 		return
 	if s.begins_with("res://"):
 		if " " in s or "\t" in s or "\n" in s:
 			return
-		if not _exists(s, exists):
+		if not _gd_ref_exists(s, exists):
 			errors.append(_gd_issue("error", "missing_file", label + " file does not exist: " + s, line, column, path))
 	elif s.begins_with("uid://"):
 		if Uid.text_to_id(s) < 0:
@@ -326,6 +499,15 @@ func _exists(p: String, exists: Callable) -> bool:
 	if exists.is_valid():
 		return bool(exists.call(p))
 	return FileAccess.file_exists(p)
+
+
+## A res:// reference resolves to a file or a directory (the
+## `exists` stub, when given, answers for both, keeping hermetic
+## tests in control of the whole universe).
+func _gd_ref_exists(p: String, exists: Callable) -> bool:
+	if exists.is_valid():
+		return bool(exists.call(p))
+	return FileAccess.file_exists(p) or DirAccess.dir_exists_absolute(p)
 
 
 func _check(parsed: Dictionary, path: String, by_uid: Dictionary, by_path: Dictionary, exists: Callable, read_text: Callable, errors: Array, warnings: Array) -> void:

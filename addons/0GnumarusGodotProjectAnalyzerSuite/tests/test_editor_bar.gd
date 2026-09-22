@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Editor-bar suite: pure status-bar logic (formatting, counts,
@@ -35,6 +36,7 @@ func run() -> Dictionary:
 	_hotkey(h)
 	_debounce_countdown(h)
 	_plugin_impl(h)
+	_live_integrity(h)
 	_warm(h)
 	_warm_order(h)
 	_warm_fs(h)
@@ -126,6 +128,28 @@ func _plugin_impl(h) -> void:
 	_check(h, not impl._has_last, "exit resets state")
 	impl.enter_tree()
 	_check(h, impl._debounce != null and is_instance_valid(impl._debounce), "re-enter rebuilds")
+	impl.exit_tree()
+
+
+## Live integrity: gdscript + buffer token-scan merge (stage tags,
+## sort, non-dict tolerance), mtime-cached uid maps and the
+## filesystem-dirty flag that forces re-analysis on save.
+func _live_integrity(h) -> void:
+	_check(h, Impl.merge_file_issues([], []).is_empty(), "merge empty")
+	var gd := [{"severity": "error", "kind": "null_use", "message": "n", "line": 9, "column": 1, "path": "res://x.gd"}, "junk"]
+	var integ := [{"severity": "error", "kind": "missing_file", "message": "m", "line": 2, "column": 4, "path": "res://x.gd"}]
+	var merged: Array = Impl.merge_file_issues(gd, integ)
+	_check(h, merged.size() == 2, "merge drops non-dicts")
+	_check(h, int((merged[0] as Dictionary).get("line", 0)) == 2, "merge sorts by line")
+	_check(h, str((merged[0] as Dictionary).get("stage", "")) == "resource_integrity", "merge tags integrity")
+	_check(h, str((merged[1] as Dictionary).get("stage", "")) == "gdscript", "merge tags gdscript")
+	var impl = Impl.new(null)
+	_check(h, not impl._fs_dirty, "fs starts clean")
+	var maps := impl.uid_maps()
+	_check(h, maps.size() == 2 and (maps[0] is Dictionary) and (maps[1] is Dictionary), "uid maps shape headless")
+	_check(h, is_same(impl.uid_maps()[0], maps[0]), "uid maps cached")
+	impl._on_filesystem_changed()
+	_check(h, impl._fs_dirty, "save flags live analysis dirty")
 	impl.exit_tree()
 
 

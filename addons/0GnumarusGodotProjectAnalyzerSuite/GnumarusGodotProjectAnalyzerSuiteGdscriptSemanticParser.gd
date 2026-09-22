@@ -35,7 +35,7 @@ extends RefCounted
 ## Usage:
 ##   var syn := GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.new()
 ##   var sem := GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.new()
-##   var ast: Dictionary = sem.analyze(syn.parse("res://script.gd"), "res://script.gd")
+##   var ast: Dictionary = sem.analyze(syn.parse("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd"), "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 ##   print(ast["semantic_errors"], ast["user_types_written"])
 
 const KIND_UNKNOWN_TYPE := "unknown_type"
@@ -208,7 +208,9 @@ static func resource_path_for(script_path: String, project_root: String) -> Stri
 
 ## File base name for user type files: the class_name, or the resource
 ## path without res:// and .gd with slashes as underscores
-## (res://a/b.gd becomes a_b). Falls back to the plain file name.
+## (res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd
+## becomes addons_0GnumarusGodotProjectAnalyzerSuite_tests_ValidScript0).
+## Falls back to the plain file name.
 static func user_file_base(cls_name: String, resource_path: String, script_path: String) -> String:
 	if cls_name != "":
 		return cls_name
@@ -242,9 +244,10 @@ func _compute_bases(root: String) -> Array:
 			var g = _rstrip_slash(ProjectSettings.globalize_path(r))
 			if g != r:
 				bases.append(g + "/" + NativeDumper.DATA_DIR_NAME)
-	# Legacy fallback: pre-addon-layout root types_info/.
+	# Legacy fallback: pre-addon-layout root types_info/ (intentionally
+	# stale: kept for ancient projects).
 	bases.append("types_info")
-	bases.append("res://types_info")
+	bases.append("res://types_info") # @integrity_ignore (stale by design)
 	var seen = {}
 	var out: Array = []
 	for b in bases:

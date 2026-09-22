@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Native-database guard suite: the dumper's is_present()/ensure_present()

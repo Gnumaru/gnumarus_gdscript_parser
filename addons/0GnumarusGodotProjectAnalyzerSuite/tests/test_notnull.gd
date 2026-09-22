@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## notnull suite: trailing `notnull` on @var/@param/@return (parse,

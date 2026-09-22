@@ -445,7 +445,7 @@ print(cache["by_path"].get("res://scene.tscn", ""))
 ## 9. GnumarusGodotProjectAnalyzerSuiteResourceIntegrity
 
 Report-only integrity checker for textual resources (`.tscn`,
-`.tres`, `project.godot`) plus `preload()`/`load()` literals in
+`.tres`, `project.godot`) plus every static resource string in
 GDScript (`.gd`), deliberately separate from the GDScript analyzer
 (which owns inference, not file references). Walks each file for
 resource paths (`res://...`)
@@ -462,14 +462,24 @@ warning instead of a `missing_uid` error. Also reports dangling `ExtResource()` 
 but unused ext ids are warnings. Only whole-value single-line
 strings are checked, so multiline embedded code (`script/source`)
 and sentence fragments never false-positive. `.gd` files are scanned
-at the token level (never parsed): only complete single-string
-literals count — `preload("...")`, bare `load("...")`,
-`ResourceLoader.load("...")`, `extends "..."` and `@icon("...")` —
-with real token line/column in the report. Comments, plain strings,
-dynamic concatenation
-(`"res://" + name`), custom `obj.load()` calls and other annotations
-(e.g. `@warning_ignore` strings, which are not paths) are skipped by
-construction. Empty UID maps mean
+at the token level (never parsed): trigger literals keep their
+labels — `preload("...")`, bare `load("...")`,
+`ResourceLoader.load("...")`, `extends "..."` and `@icon("...")`,
+with real token line/column — and every other static string in any
+quoting (single, double, triple-double: assignments, call args) plus
+every `#`/`##` comment is scanned for embedded references at
+in-token positions (trailing sentence punctuation and `:line[:col]`
+suffixes stripped, so `path:line` log idioms resolve). Out of scope
+by construction: dynamic operands (`"res://" + name, "res://%s" %
+x`), custom `obj.load()` calls, existence probes
+(`FileAccess.file_exists(X)`, `*.exists(X)` — a question, not a
+demand), bare prefixes, backslash-escaped meta content (example code
+nested in an outer string) and directories (a trailing-slash
+reference resolving to a dir counts as existing). Two opt-outs:
+`# @integrity_ignore` (trailing, suppresses its own line) and
+`# @integrity_ignore_file` (leading comment block only, exempts the
+file — for sources deliberately trafficking in virtual paths, like
+the analyzer test harnesses). Empty UID maps mean
 "unverifiable" (uid presence/agreement skipped), so a missing cache
 degrades to path-only checking.
 
@@ -485,6 +495,15 @@ var res := GnumarusGodotProjectAnalyzerSuiteResourceIntegrity.new().analyze_file
   (optional `res://` paths after `--` check only those files).
   Prints `checking [i/n] path` progress plus one
   `path:line: kind message` line per issue.
+- Live in the editor: every `analyze_current` run also token-scans
+  the current `.gd` buffer (unsaved text included), so broken
+  `preload()`/`load()`/`extends`/`@icon()` refs surface on open,
+  edit and hotkey runs without waiting for a full scan — merged with
+  the analyzer issues (tagged `resource_integrity`, like the report)
+  in the status bar and the dock. UID maps come from
+  `.godot/uid_cache.bin`, cached by file mtime; any filesystem scan
+  (save/create/delete elsewhere) flags the live pass dirty, forcing
+  one recheck even on an unchanged buffer.
 
 ## 10. GnumarusGodotProjectAnalyzerSuiteFullScan
 
@@ -1515,8 +1534,10 @@ suites still print, so the marker alone could look green).
   `test_resource_integrity.gd` (integrity checking: ext path/uid
   validation, sidecar agreement/stale-cache fallback, dangling/
   duplicate/unused ids, bare strings, header uids, project globals,
-  gd preload/load/extends/icon literals, reuse, collect, unreadable
-  files),
+  gd preload/load/extends/icon literals plus every static string in
+  any quoting and every comment (labels, in-token positions,
+  punctuation/line-suffix stripping, dynamic/probe/meta skips,
+  ignore directives), reuse, collect, unreadable files),
   `test_null.gd` (nullability: `null` union arms and compat, reserved
   `null` names, `==`/`!=` narrowing, exact-null access errors and
   generic bound violations on null arguments),

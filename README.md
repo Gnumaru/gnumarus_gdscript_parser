@@ -38,6 +38,8 @@ Install from Project → Plugins and open any script:
 - A bottom-panel dock lists every known issue with severity toggles
   (errors / warnings / future notes) and per-type toggles (`gd`,
   `tscn`, `tres`, `godot`, other); picking a row jumps to it.
+- Broken resource refs (`preload`/`load`/`extends`/`@icon`) are
+  rechecked live on open, edit and save — no full scan needed.
 
 ## Annotations
 

@@ -22,7 +22,7 @@ extends RefCounted
 ## Usage with a tokenizer instance (it is iterable, so it is drained here):
 ##   var tokens: Array = post.process_tokenizer(tok)
 ## Usage with a file path or a source string:
-##   var tokens: Array = post.process("res://script.gd")
+##   var tokens: Array = post.process("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 ##   var tokens: Array = post.process_text("var x := 1 # @param x\n")
 ## Direct iteration (every process_* method is just a collector over it):
 ##   var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()

@@ -100,8 +100,8 @@ extends RefCounted
 ## Usage:
 ##   var sem := GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.new()
 ##   var ana := GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.new()
-##   var ast: Dictionary = sem.analyze(syn.parse("res://s.gd"), "res://s.gd")
-##   var result: Dictionary = ana.analyze(ast, "res://s.gd")
+##   var ast: Dictionary = sem.analyze(syn.parse("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd"), "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
+##   var result: Dictionary = ana.analyze(ast, "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 ##   print(result["warnings"])
 
 const WARN_DEPRECATED_USE := "deprecated_use"
@@ -670,7 +670,7 @@ static func _roster_file_entries(fpath: String) -> Array:
 
 
 ## First whitespace/comment-terminated word ("" when absent), honoring
-## double-quoted spans (`extends "res://a b.gd"` keeps spaces inside
+## double-quoted spans (`extends "my dir/mod.gd"` keeps spaces inside
 ## quotes). Static.
 static func _roster_word(s: String) -> String:
 	var t := s.strip_edges()

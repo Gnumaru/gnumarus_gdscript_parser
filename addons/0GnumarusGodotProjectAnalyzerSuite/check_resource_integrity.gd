@@ -13,7 +13,7 @@ extends SceneTree
 ##
 ## Usage (from the project root):
 ##   godot --headless --path . --script res://addons/0GnumarusGodotProjectAnalyzerSuite/check_resource_integrity.gd
-##   godot --headless --path . --script res://addons/0GnumarusGodotProjectAnalyzerSuite/check_resource_integrity.gd -- res://scene.tscn
+##   godot --headless --path . --script res://addons/0GnumarusGodotProjectAnalyzerSuite/check_resource_integrity.gd -- res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Node3D.tscn
 ##
 ## Exits 0 when clean, 1 when issues found, 2 on infra failure.
 

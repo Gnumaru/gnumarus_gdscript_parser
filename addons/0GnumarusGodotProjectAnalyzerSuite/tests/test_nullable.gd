@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## nullable suite: trailing `nullable` on @var/@param/@return (parse,

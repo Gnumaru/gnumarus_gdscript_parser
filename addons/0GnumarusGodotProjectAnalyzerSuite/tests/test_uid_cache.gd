@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## UID cache suite: id/text conversion, synthetic binary parsing,

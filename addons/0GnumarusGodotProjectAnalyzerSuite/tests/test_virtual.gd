@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Virtual-type suite: tuples, structs, aliases and interfaces are

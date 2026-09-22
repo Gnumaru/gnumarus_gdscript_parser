@@ -1,3 +1,4 @@
+# @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
 ## Full-scan suite: the aggregated ScanResults.json report (merge,

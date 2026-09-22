@@ -22,7 +22,7 @@ extends RefCounted
 ##
 ## Usage with the project cache:
 ##   var cache := GnumarusGodotProjectAnalyzerSuiteUidCache.new().parse("res://.godot/uid_cache.bin")
-##   print(cache["by_path"].get("res://scene.tscn", ""))
+##   print(cache["by_path"].get("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Node3D.tscn", ""))
 ## Usage with raw bytes (hermetic tests):
 ##   var cache := GnumarusGodotProjectAnalyzerSuiteUidCache.new().parse_bytes(bytes)
 

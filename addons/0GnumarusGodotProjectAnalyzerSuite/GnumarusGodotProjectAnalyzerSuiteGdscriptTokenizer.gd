@@ -19,7 +19,7 @@ extends RefCounted
 ## DEDENT and EOF values are "".
 ##
 ## Usage with a file path:
-##   var tokens := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new().tokenize("res://script.gd")
+##   var tokens := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new().tokenize("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 ## Usage with a source string:
 ##   var tokens := GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer.new().tokenize("var x := 1\n")
 ## Direct iteration (tokenize_text() itself is just a collector over it):

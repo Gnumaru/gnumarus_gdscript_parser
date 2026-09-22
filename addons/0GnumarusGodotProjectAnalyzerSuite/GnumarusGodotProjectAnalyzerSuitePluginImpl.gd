@@ -22,6 +22,8 @@ const Analyzer = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/Gnumar
 const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
 const FullScan = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
 const Dock = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteDock.gd")
+const Integrity = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteResourceIntegrity.gd")
+const UidCache = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteUidCache.gd")
 
 const DEBOUNCE_SEC := 1.0
 ## Files per warm pump tick (deferred chain, cancellable).
@@ -53,6 +55,13 @@ var _warm_gen := 0
 var _tool_menu_added := false
 var _dock: Control = null
 var _dock_added := false
+## Set by filesystem scans (saves, new/deleted files): the next
+## analysis re-runs even on an unchanged buffer, so broken resource
+## refs surface without waiting for a full scan. Consumed per run.
+var _fs_dirty := false
+var _uid_by_uid := {}
+var _uid_by_path := {}
+var _uid_cache_mtime := -2
 
 
 func _init(p_plugin: EditorPlugin = null) -> void:
@@ -452,8 +461,12 @@ func _hook_filesystem(connect_now: bool) -> void:
 
 ## Filesystem rescan (save/create/delete): restart the warm pass when
 ## idle so it picks up new files, else flag one restart at pass end
-## (mtime skips keep both cheap; at most one extra pass).
+## (mtime skips keep both cheap; at most one extra pass). Also flags
+## the live analysis dirty: the next analyze_current re-runs (cheap
+## token scan included) even on an unchanged buffer, so a save
+## elsewhere that breaks or fixes a ref shows up immediately.
 func _on_filesystem_changed() -> void:
+	_fs_dirty = true
 	if _warm_pending.is_empty():
 		_start_warm()
 	else:
@@ -644,6 +657,52 @@ func _on_debounce_timeout() -> void:
 	analyze_current(false)
 
 
+## UID maps for live integrity checks, cached by cache-file mtime
+## (the editor rewrites uid_cache.bin on rescan, so a stale copy
+## never survives it). Missing/unreadable cache degrades to
+## path-only checking, like the CLI. Headless-safe.
+func uid_maps() -> Array:
+	var mtime := -1
+	if FileAccess.file_exists(FullScan.UID_CACHE):
+		mtime = FileAccess.get_modified_time(FullScan.UID_CACHE)
+	if mtime == _uid_cache_mtime and mtime >= 0:
+		return [_uid_by_uid, _uid_by_path]
+	_uid_cache_mtime = mtime
+	_uid_by_uid = {}
+	_uid_by_path = {}
+	if mtime >= 0:
+		var cache: Dictionary = UidCache.new().parse(FullScan.UID_CACHE)
+		if int(cache.get("errors", 0)) == 0:
+			_uid_by_uid = cache.get("by_uid", {})
+			_uid_by_path = cache.get("by_path", {})
+	return [_uid_by_uid, _uid_by_path]
+
+
+## Merges gdscript-analyzer issues with live integrity issues for one
+## file: tags each side with its stage ("gdscript" /
+## "resource_integrity", matching the full-scan report) and sorts.
+## Pure, unit-tested headless.
+static func merge_file_issues(gd_issues: Array, int_issues: Array) -> Array:
+	var out: Array = []
+	for e in gd_issues:
+		if e is Dictionary:
+			var d := (e as Dictionary).duplicate()
+			d["stage"] = "gdscript"
+			out.append(d)
+	for e in int_issues:
+		if e is Dictionary:
+			var d := (e as Dictionary).duplicate()
+			d["stage"] = "resource_integrity"
+			out.append(d)
+	out.sort_custom(_issue_less)
+	return out
+
+
+## Live analysis of the current script-editor file: the full analyzer
+## plus a token-level integrity scan of the buffer (preload/load/
+## extends/icon refs), so broken refs surface on open, edit and save
+## without waiting for a full scan. Feeds the status bar and the
+## dock; the hotkey run also logs to console.
 func analyze_current(announce := true) -> void:
 	var bar := ensure_bar()
 	if bar == null:
@@ -669,13 +728,14 @@ func analyze_current(announce := true) -> void:
 		return
 	var path := EdTree.current_path(se)
 	if path.strip_edges() == "":
-		path = "res://untitled.gd"
+		path = "res://untitled.gd" # @integrity_ignore (virtual display label)
 	var h := text.hash()
 	var same := not announce and _has_last and path == _last_path and h == _last_hash
 	var via_deps := same and deps_changed(_last_refs, _last_run_unix, user_dir())
-	if same and not via_deps:
+	if same and not via_deps and not _fs_dirty:
 		_rewatch_code_edit()
 		return
+	_fs_dirty = false
 	_last_path = path
 	_last_hash = h
 	_has_last = true
@@ -683,14 +743,16 @@ func analyze_current(announce := true) -> void:
 	var res: Dictionary = ana.analyze(SynParser.new().parse_text(text), path)
 	_last_refs = (ana._last_refs as Array).duplicate() if ana._last_refs is Array else []
 	_last_run_unix = Time.get_unix_time_from_system()
-	var issues: Array = []
+	var gd_issues: Array = []
 	for e in res.get("errors", []):
 		if e is Dictionary:
-			issues.append({"severity": "error", "kind": str((e as Dictionary).get("kind", "?")), "message": str((e as Dictionary).get("message", "")), "line": int((e as Dictionary).get("line", 0)), "column": int((e as Dictionary).get("column", 0)), "path": path})
+			gd_issues.append({"severity": "error", "kind": str((e as Dictionary).get("kind", "?")), "message": str((e as Dictionary).get("message", "")), "line": int((e as Dictionary).get("line", 0)), "column": int((e as Dictionary).get("column", 0)), "path": path})
 	for w in res.get("warnings", []):
 		if w is Dictionary:
-			issues.append({"severity": "warning", "kind": str((w as Dictionary).get("kind", "?")), "message": str((w as Dictionary).get("message", "")), "line": int((w as Dictionary).get("line", 0)), "column": int((w as Dictionary).get("column", 0)), "path": path})
-	issues.sort_custom(func(a: Variant, b: Variant) -> bool: return _issue_less(a, b))
+			gd_issues.append({"severity": "warning", "kind": str((w as Dictionary).get("kind", "?")), "message": str((w as Dictionary).get("message", "")), "line": int((w as Dictionary).get("line", 0)), "column": int((w as Dictionary).get("column", 0)), "path": path})
+	var maps := uid_maps()
+	var live: Dictionary = Integrity.new().analyze_gd_text(text, path, maps[0], maps[1])
+	var issues := merge_file_issues(gd_issues, (live.get("errors", []) as Array) + (live.get("warnings", []) as Array))
 	if announce:
 		for issue in issues:
 			if (issue as Dictionary).get("severity", "error") == "error":
