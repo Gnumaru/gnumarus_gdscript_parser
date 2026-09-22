@@ -31,10 +31,13 @@ Install from Project → Plugins and open any script:
   refresh only when a dependency changed (marked `(deps)`).
 - On enable, a background warm pass pre-analyzes the project in
   budgeted ticks, so cross-file results are ready immediately.
-- Project → Tools → Gnumarus Full Scan (or File → Run on the
+- Project → Tools → Gnumaru's Full Scan (or File → Run on the
   `GnumarusGodotProjectAnalyzerSuiteFullScan` script) runs every
   analysis pass over the whole project and merges all errors and
   warnings into `.godot/0GnumarusGodotProjectAnalyzerSuiteData/ScanResults.json`.
+- A bottom-panel dock lists every known issue with severity toggles
+  (errors / warnings / future notes) and per-type toggles (`gd`,
+  `tscn`, `tres`, `godot`, other); picking a row jumps to it.
 
 ## Annotations
 

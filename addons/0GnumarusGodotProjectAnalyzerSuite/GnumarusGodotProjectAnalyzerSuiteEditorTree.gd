@@ -426,3 +426,48 @@ static func goto_line(code_edit: Object, script_editor: Object, line: int) -> bo
 		(script_editor as Object).call("goto_line", line)
 		return true
 	return false
+
+
+## The EditorInterface singleton, or null outside the editor.
+## Every opener below goes through here (never a bare singleton
+## reference), so all of them are null-safe and headless-testable.
+static func editor_interface() -> Object:
+	if not Engine.is_editor_hint():
+		return null
+	if not Engine.has_singleton("EditorInterface"):
+		return null
+	var ei: Object = Engine.get_singleton("EditorInterface")
+	if ei == null or not is_instance_valid(ei):
+		return null
+	return ei
+
+
+## Opens a .gd path in the script editor and moves to a 1-based line
+## (line jump via the ScriptEditor fallback, since edit_script takes
+## the script only here). False headless or when anything is missing.
+static func open_script_at(path: String, line: int) -> bool:
+	var ei := editor_interface()
+	if ei == null or not (ei as Object).has_method("edit_script"):
+		return false
+	if path.strip_edges() == "" or not FileAccess.file_exists(path):
+		return false
+	var res: Variant = load(path)
+	if not (res is Script):
+		return false
+	(ei as Object).call("edit_script", res)
+	var se := script_editor()
+	if se != null and line >= 1:
+		goto_line(null, se, line)
+	return true
+
+
+## Opens a scene path in the editor (2D/3D main screen). False
+## headless or without editor support.
+static func open_scene(path: String) -> bool:
+	var ei := editor_interface()
+	if ei == null or not (ei as Object).has_method("open_scene_from_path"):
+		return false
+	if path.strip_edges() == "":
+		return false
+	(ei as Object).call("open_scene_from_path", path)
+	return true

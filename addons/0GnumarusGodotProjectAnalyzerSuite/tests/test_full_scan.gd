@@ -31,6 +31,8 @@ func run() -> Dictionary:
 	_r_empty(h)
 	_r_store_merge(h)
 	_r_sort(h)
+	_r_filters(h)
+	_r_census(h)
 	_r_corrupt(h)
 	_r_gdscript_stage(h)
 	_r_integrity_stage(h)
@@ -119,6 +121,64 @@ func _r_sort(h) -> void:
 	DirAccess.remove_absolute(Impl.results_path())
 
 
+func _r_filters(h) -> void:
+	DirAccess.remove_absolute(Impl.results_path())
+	h.check((Impl.empty_doc().get("filters", {}) as Dictionary).get("show", {}) is Dictionary, "empty doc carries filters")
+	var doc_a: Dictionary = Impl.store_stage("zz_keep", [_mk_issue("res://a.gd", 1, 0, "k")], [], 1)
+	var doc_b: Dictionary = Impl.store_filters({"error": false, "warning": true, "note": true}, {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true})
+	h.check(((doc_b.get("stages", {}) as Dictionary) as Dictionary).has("zz_keep"), "store_filters keeps stages")
+	h.check((doc_b.get("errors", []) as Array).size() == 1, "store_filters keeps aggregates")
+	h.check(not bool((((doc_b.get("filters", {}) as Dictionary).get("show", {}) as Dictionary).get("error", true))), "store_filters stores toggles")
+	h.check(int((doc_a.get("summary", {}) as Dictionary).get("errors", 0)) == 1, "pre-filter summary intact")
+	DirAccess.remove_absolute(Impl.results_path())
+
+
+func _r_census(h) -> void:
+	var grouped := Impl.census_of(["res://a.GD", "res://b.gd", "res://c.tscn", "res://LICENSE", "res://a.gd"])
+	h.check(int((grouped.get("extensions", {}) as Dictionary).get("gd", 0)) == 3, "census groups case-insensitive")
+	h.check(int((grouped.get("extensions", {}) as Dictionary).get("(no ext)", 0)) == 1, "census buckets extensionless")
+	h.check(int(grouped.get("total", 0)) == 5, "census totals")
+	var dotted_dirs := Impl.census_of(["res://my.dir/LICENSE", "res://my.dir/notes", "res://my.dir/readme.txt", "res://archive.tar.gz"])
+	h.check(int((dotted_dirs.get("extensions", {}) as Dictionary).get("(no ext)", 0)) == 2, "census ignores dots in directories")
+	h.check(int((dotted_dirs.get("extensions", {}) as Dictionary).get("txt", 0)) == 1, "census reads file name extension")
+	h.check(int((dotted_dirs.get("extensions", {}) as Dictionary).get("gz", 0)) == 1, "census uses last name dot")
+	h.check(Impl.census_of([]) == {"extensions": {}, "total": 0}, "census empty")
+	var root := Impl.project_root()
+	var files := Impl.collect_project_files(root)
+	h.check(not files.is_empty(), "collect finds project files")
+	var clean_walk := true
+	for f in files:
+		if not str(f).begins_with("res://") or "/.godot/" in str(f) or "/.git/" in str(f):
+			clean_walk = false
+	h.check(clean_walk, "collect skips generated dirs")
+	h.check(Impl.collect_project_files("/nope_xyz_missing").is_empty(), "collect missing root empty")
+	var census := Impl.collect_file_census(root)
+	h.check(int(census.get("total", 0)) == files.size(), "census matches walk")
+	h.check(int((census.get("extensions", {}) as Dictionary).get("gd", 0)) > 0, "census sees scripts")
+	h.check(Impl.is_addons_path("res://addons/x.gd"), "addons file detected")
+	h.check(Impl.is_addons_path("res://addons"), "addons dir itself detected")
+	h.check(not Impl.is_addons_path("res://addons2/x.gd"), "addons prefix not confused")
+	h.check(not Impl.is_addons_path("res://x.gd"), "plain file not addons")
+	h.check(not Impl.is_addons_path(""), "empty not addons")
+	var manual_addons := 0
+	for f in files:
+		if Impl.is_addons_path(str(f)):
+			manual_addons += 1
+	h.check(int((census.get("addons", {}) as Dictionary).get("total", -1)) == manual_addons, "addons partition matches walk")
+	h.check(manual_addons > 0, "repo has addons files")
+	var split_sum := int((census.get("project", {}) as Dictionary).get("total", -1)) + int((census.get("addons", {}) as Dictionary).get("total", -1))
+	h.check(split_sum == int(census.get("total", -2)), "partitions sum to merged")
+	DirAccess.remove_absolute(Impl.results_path())
+	h.check((Impl.empty_doc().get("census", {}) as Dictionary).get("total", -1) == 0, "empty doc censused zero")
+	Impl.store_stage("zz_keep", [_mk_issue("res://a.gd", 1, 0, "k")], [], 1)
+	Impl.store_filters({"error": true, "warning": true, "note": true}, {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true})
+	var doc := Impl.store_census({"extensions": {"gd": 2}, "total": 2})
+	h.check(((doc.get("stages", {}) as Dictionary) as Dictionary).has("zz_keep"), "store_census keeps stages")
+	h.check(((doc.get("filters", {}) as Dictionary).get("show", {}) as Dictionary).has("error"), "store_census keeps filters")
+	h.check(int((doc.get("census", {}) as Dictionary).get("total", 0)) == 2, "store_census stores")
+	DirAccess.remove_absolute(Impl.results_path())
+
+
 func _r_corrupt(h) -> void:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(Impl.data_dir()))
 	var f := FileAccess.open(Impl.results_path(), FileAccess.WRITE)
@@ -183,7 +243,7 @@ func _r_proxy(h) -> void:
 
 
 func _r_menu(h) -> void:
-	h.check(PluginImpl.FULL_SCAN_MENU == "Gnumarus Full Scan", "menu name")
+	h.check(PluginImpl.FULL_SCAN_MENU == "Gnumaru's Full Scan", "menu name")
 	var impl = PluginImpl.new(null)
 	h.check(impl.has_method("_on_full_scan_menu"), "menu callback exists")
 	impl.enter_tree()

@@ -81,7 +81,14 @@ static func _fresh_analyzer() -> RefCounted:
 
 ## Empty report (also the fallback for missing/corrupt files).
 static func empty_doc() -> Dictionary:
-	return {"version": 1, "generated_unix": 0.0, "stages": {}, "errors": [], "warnings": [], "summary": {"stages": [], "files": 0, "errors": 0, "warnings": 0}}
+	return {"version": 1, "generated_unix": 0.0, "stages": {}, "errors": [], "warnings": [], "summary": {"stages": [], "files": 0, "errors": 0, "warnings": 0}, "filters": default_filters(), "census": {"extensions": {}, "total": 0, "project": {"extensions": {}, "total": 0}, "addons": {"extensions": {}, "total": 0}}}
+
+
+## Default dock filter state (everything visible, addons counted).
+## The dock owns the same shape; this copy lets the report carry it
+## without depending on the dock script.
+static func default_filters() -> Dictionary:
+	return {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "include_addons": true}
 
 
 ## Loads the on-disk report, or an empty doc when missing/unreadable.
@@ -175,6 +182,13 @@ static func store_stage(stage: String, errors: Array, warnings: Array, files: in
 	doc["errors"] = all_errors
 	doc["warnings"] = all_warnings
 	doc["summary"] = {"stages": names, "files": total_files, "errors": all_errors.size(), "warnings": all_warnings.size()}
+	return _write_doc(doc)
+
+
+## Writes the report doc to disk (creating the data dir). Never fails
+## (a write failure prints and still returns the doc). Shared by
+## store_stage and store_filters.
+static func _write_doc(doc: Dictionary) -> Dictionary:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(data_dir()))
 	var f := FileAccess.open(results_path(), FileAccess.WRITE)
 	if f == null:
@@ -183,6 +197,97 @@ static func store_stage(stage: String, errors: Array, warnings: Array, files: in
 	(f as FileAccess).store_string(JSON.stringify(doc, "  "))
 	(f as FileAccess).close()
 	return doc
+
+
+## Stores dock filter state ("show"/"types" toggle maps plus the
+## addons-census flag) in the report without touching any stage entry
+## or aggregate. Returns the full doc. The dock calls this as its
+## file-level persistence; the EditorSettings copy (when available)
+## takes precedence on load.
+static func store_filters(show: Dictionary, types: Dictionary, include_addons := true) -> Dictionary:
+	var doc := load_results()
+	doc["filters"] = {"show": show.duplicate(), "types": types.duplicate(), "include_addons": bool(include_addons)}
+	doc["generated_unix"] = Time.get_unix_time_from_system()
+	return _write_doc(doc)
+
+
+## Groups file paths by lowercased extension of the file name only
+## (dots in directory names never count; extensionless names group
+## under "(no ext)"). Pure, unit-tested headless.
+static func census_of(paths: Array) -> Dictionary:
+	var exts := {}
+	for p in paths:
+		var s := str(p)
+		var file_name := s.substr(s.rfind("/") + 1)
+		var dot := file_name.rfind(".")
+		var ext := file_name.substr(dot + 1).to_lower() if dot >= 0 else ""
+		if ext == "":
+			ext = "(no ext)"
+		exts[ext] = int(exts.get(ext, 0)) + 1
+	var total := 0
+	for k in exts.keys():
+		total += int(exts[k])
+	return {"extensions": exts, "total": total}
+
+
+## Every project file under root as res:// paths, skipping generated
+## and version-control dirs (`.godot/`, `.git/`). Static, pure IO,
+## headless-safe.
+static func collect_project_files(root: String) -> Array:
+	var out: Array = []
+	if root == "" or not DirAccess.dir_exists_absolute(root):
+		return out
+	var dirs: Array = [root]
+	while not dirs.is_empty():
+		var dir: String = str(dirs.pop_back())
+		if dir == "" or not DirAccess.dir_exists_absolute(dir):
+			continue
+		for sub in DirAccess.get_directories_at(dir):
+			if str(sub) != ".godot" and str(sub) != ".git":
+				dirs.append(dir + "/" + str(sub))
+		for f in DirAccess.get_files_at(dir):
+			out.append(_res_path(root, dir + "/" + str(f)))
+	out.sort()
+	return out
+
+
+## OS/dir path to res:// form under root (raw path outside root).
+static func _res_path(root: String, abspath: String) -> String:
+	if root != "" and abspath.begins_with(root):
+		return "res://" + abspath.substr(root.length()).trim_prefix("/")
+	return abspath
+
+
+## True for paths inside res://addons/ (the dir itself counts too).
+## Pure, unit-tested headless.
+static func is_addons_path(path: String) -> bool:
+	var p := path.strip_edges()
+	return p == "res://addons" or p.begins_with("res://addons/")
+
+
+## Counts every project file by extension, split into the plain
+## project tree ("project", res://addons/ excluded) and the addons
+## subtree ("addons"), plus the merged view ("extensions"/"total",
+## kept for backward compatibility). Static, pure IO.
+static func collect_file_census(root: String) -> Dictionary:
+	var project: Array = []
+	var addons: Array = []
+	for p in collect_project_files(root):
+		if is_addons_path(str(p)):
+			addons.append(p)
+		else:
+			project.append(p)
+	var merged := census_of(project + addons)
+	return {"extensions": merged.get("extensions", {}), "total": int(merged.get("total", 0)), "project": census_of(project), "addons": census_of(addons)}
+
+
+## Stores the file census in the report without touching any stage
+## entry or aggregate. Returns the full doc.
+static func store_census(census: Dictionary) -> Dictionary:
+	var doc := load_results()
+	doc["census"] = {"extensions": ((census.get("extensions", {}) as Dictionary).duplicate()), "total": maxi(int(census.get("total", 0)), 0)}
+	doc["generated_unix"] = Time.get_unix_time_from_system()
+	return _write_doc(doc)
 
 
 ## GDScript stage: analyzes every project .gd (or `targets` when
@@ -253,12 +358,13 @@ func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, ex
 
 
 ## Full run: every stage in order (each persists, so the report is
-## complete even if a later stage is interrupted). Prints one
-## completion line. Returns the full stored doc.
+## complete even if a later stage is interrupted), then the project
+## file census. Prints one completion line. Returns the full doc.
 func run(root_os := "") -> Dictionary:
 	var root := root_os if root_os != "" else project_root()
 	run_gdscript(root)
-	var doc := run_integrity(root)
+	run_integrity(root)
+	var doc := store_census(collect_file_census(root))
 	var s: Dictionary = doc.get("summary", {})
 	print("Gnumarus Full Scan: %d files, %d errors, %d warnings. Results in %s" % [int(s.get("files", 0)), int(s.get("errors", 0)), int(s.get("warnings", 0)), results_path()])
 	return doc

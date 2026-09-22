@@ -21,6 +21,7 @@ const SynParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/Gnuma
 const Analyzer = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
 const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
 const FullScan = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
+const Dock = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteDock.gd")
 
 const DEBOUNCE_SEC := 1.0
 ## Files per warm pump tick (deferred chain, cancellable).
@@ -28,7 +29,9 @@ const WARM_CHUNK := 5
 ## Milliseconds per warm tick (whichever hits first with the chunk).
 const WARM_BUDGET_MS := 120
 ## Project > Tools menu entry running the aggregated full scan.
-const FULL_SCAN_MENU := "Gnumarus Full Scan"
+const FULL_SCAN_MENU := "Gnumaru's Full Scan"
+## Bottom-panel dock title listing every known issue.
+const DOCK_TITLE := "GNMR Analysis"
 
 ## EditorPlugin host (null headless). Only Node services are used
 ## (add_child, get_viewport): everything else goes through singletons.
@@ -48,6 +51,8 @@ var _warm_idx := 0
 var _warm_restart := false
 var _warm_gen := 0
 var _tool_menu_added := false
+var _dock: Control = null
+var _dock_added := false
 
 
 func _init(p_plugin: EditorPlugin = null) -> void:
@@ -104,6 +109,7 @@ func enter_tree() -> void:
 	_hook_filesystem(true)
 	ensure_bar()
 	_add_tool_menu()
+	ensure_dock()
 	_rewatch_code_edit()
 	analyze_current(false)
 	_start_warm()
@@ -370,6 +376,7 @@ func _warm_pump() -> void:
 ## Editor exit point (forwarded by the proxy).
 func exit_tree() -> void:
 	_remove_tool_menu()
+	_remove_dock()
 	_hook_signals(false)
 	_hook_filesystem(false)
 	_unwatch_code_edit()
@@ -482,9 +489,55 @@ func _remove_tool_menu() -> void:
 
 
 ## Tool-menu callback: runs the full scan synchronously (the impl
-## prints per-file progress plus one completion line).
+## prints per-file progress plus one completion line), replaces the
+## dock list with the report and reveals the dock.
 func _on_full_scan_menu() -> void:
-	FullScan.new().run()
+	var doc: Dictionary = FullScan.new().run()
+	if _dock != null and is_instance_valid(_dock):
+		(_dock as Object).call("set_scan_results", doc)
+	_reveal_dock()
+
+
+## Returns the live bottom-panel dock, building it on first use and
+## pre-filling it with the last full-scan report when one exists.
+## Headless (null plugin) it stays null: every caller null-checks.
+func ensure_dock() -> Control:
+	if plugin == null or not is_instance_valid(plugin):
+		return null
+	if _dock == null or not is_instance_valid(_dock):
+		_dock = Dock.new()
+		(_dock as Object).call("set_navigate_fn", Callable(self, "_goto_dock_issue"))
+		(_dock as Object).call("set_rescan_fn", Callable(self, "_on_full_scan_menu"))
+		(_dock as Object).call("set_scan_results", FullScan.load_results())
+	if _dock_added:
+		return _dock
+	if not (plugin as Object).has_method("add_control_to_bottom_panel"):
+		return _dock
+	(plugin as Object).call("add_control_to_bottom_panel", _dock, DOCK_TITLE)
+	_dock_added = true
+	return _dock
+
+
+## Drops the bottom-panel dock. Clears the flag first so a dead host
+## never blocks a later re-add.
+func _remove_dock() -> void:
+	if _dock_added:
+		_dock_added = false
+		if plugin != null and is_instance_valid(plugin) and (plugin as Object).has_method("remove_control_from_bottom_panel") and _dock != null and is_instance_valid(_dock):
+			(plugin as Object).call("remove_control_from_bottom_panel", _dock)
+	_drop(_dock)
+	_dock = null
+
+
+## Reveals the dock tab after a scan (no-op without editor support).
+func _reveal_dock() -> void:
+	if plugin == null or not is_instance_valid(plugin):
+		return
+	if _dock == null or not is_instance_valid(_dock):
+		return
+	if not (plugin as Object).has_method("make_bottom_panel_item_visible"):
+		return
+	(plugin as Object).call("make_bottom_panel_item_visible", _dock)
 
 
 ## Returns the live bar, building it on first use and repairing its
@@ -645,6 +698,8 @@ func analyze_current(announce := true) -> void:
 			else:
 				push_warning("Gnumarus [%s] %s:%d - %s" % [str((issue as Dictionary).get("kind", "?")), path, int((issue as Dictionary).get("line", 0)), str((issue as Dictionary).get("message", ""))])
 	(bar as Object).call("set_results", issues, path, code_edit, "deps" if via_deps else "")
+	if _dock != null and is_instance_valid(_dock):
+		(_dock as Object).call("set_file_results", path, issues)
 	_rewatch_code_edit()
 
 
@@ -682,3 +737,23 @@ func _goto_issue(issue: Dictionary) -> void:
 		return
 	var code_edit := EdTree.resolve_code_edit(ed)
 	EdTree.goto_line(code_edit, se, int(issue.get("line", 0)))
+
+
+## Dock-row navigation: same-file issues reuse the bar path (paint +
+## caret); any other .gd opens in the script editor first, scenes
+## open on the main screen, anything else falls back to the bar path
+## (harmless no-op when the file is not the current one).
+func _goto_dock_issue(issue: Dictionary) -> void:
+	var path := str(issue.get("path", ""))
+	var line := int(issue.get("line", 0))
+	var se := EdTree.script_editor()
+	if se != null and (path == "" or path == EdTree.current_path(se)):
+		_goto_issue(issue)
+		return
+	if path.ends_with(".gd"):
+		if EdTree.open_script_at(path, line):
+			return
+	elif path.ends_with(".tscn") or path.ends_with(".scn"):
+		if EdTree.open_scene(path):
+			return
+	_goto_issue(issue)

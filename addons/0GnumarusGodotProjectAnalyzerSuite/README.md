@@ -510,11 +510,47 @@ aggregates and summary), so no existing code changes.
 `ScanResults.json` shape: `version`, `generated_unix`, per-stage
 `stages` (`errors` / `warnings` / `files` each), flat sorted
 `errors` / `warnings` (every issue tagged with its `stage`, ordered
-by path, line, column, severity) and a `summary` (sorted stage
-names, total files/errors/warnings).
+by path, line, column, severity), a `summary` (sorted stage
+names, total files/errors/warnings) and the dock `filters` toggle
+state (`show` / `types`, written by `store_filters()` without
+touching any stage). `census` holds the project file count by file
+name extension: the merged view (`extensions` / `total`) plus the
+`project` (res://addons/ excluded) and `addons` partitions, so the
+dock addons toggle switches views without rescanning; dots in
+directory names never count, so extensionless names group under
+`(no ext)`; the walk skips `.godot/` and `.git/`).
 
 ```gdscript
 var res: Dictionary = GnumarusGodotProjectAnalyzerSuiteFullScanImpl.new().run()
+```
+
+## 11. GnumarusGodotProjectAnalyzerSuiteDock
+
+Bottom-panel dock (next to Output, Debugger, …) listing every known
+issue: live per-file results from each analysis overlaid on the last
+full-scan report (`ScanResults.json` is loaded when the dock builds,
+so it starts populated). Two toggle groups filter the rows, like the
+Output panel buttons: severities (Errors / Warnings / Notes —
+nothing emits notes yet, the toggle is ready) and resource types
+(`gd` / `tscn` / `tres` / `godot` / `other`, derived from the issue
+path, so script issues and resource-integrity issues toggle
+independently). A status label counts visible issues and how many
+the filters hide; picking a row navigates to it (same-file `.gd`
+reuses the status-bar path, other scripts open in the script editor,
+scenes open on the main screen). Rescan re-runs the full scan and
+reveals the dock; Clear drops the list. Toggle state persists in
+both `EditorSettings` (`gnumarus_analyzer/dock_filters`, which wins
+on load) and the `ScanResults.json` `filters` copy, so it survives
+editor restarts with or without editor settings. A census label
+shows the project file count by extension from the report's
+`census` key (`12 files (8 gd, 3 tscn, 1 tres)`), with an `addons`
+toggle that includes or drops `res://addons/` (and nested dirs)
+from the count — persisted like the other toggles, no rescan
+needed.
+
+```gdscript
+dock.set_file_results("res://x.gd", issues) # live overlay, one file
+dock.set_scan_results(FullScan.load_results()) # whole-project report
 ```
 
 ## Annotations
@@ -1511,6 +1547,10 @@ suites still print, so the marker alone could look green).
   merge/sort/summary, corrupt-file fallback, hermetic gdscript +
   integrity stages, EditorScript dumb-proxy shape, Project > Tools
   wiring null-safety).
+  `test_dock.gd` (bottom-panel dock: severity/type filter logic,
+  row format and status text, per-file overlay plus scan-report
+  replacement, toggle wiring, row navigation, rescan/clear, editor
+  openers headless-safe, dock lifecycle null-safety).
 - `tests/AnnotationsStressTest.gd` is a non-suite fixture: a
   single-file stress of every annotation, valid and invalid uses
   with documented verdicts. It parses in Godot, so its diagnostics
