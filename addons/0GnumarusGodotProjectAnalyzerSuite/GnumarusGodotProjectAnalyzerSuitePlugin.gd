@@ -18,7 +18,7 @@ func _enter_tree() -> void:
 
 
 func _exit_tree() -> void:
-	if _impl != null:
+	if _impl:
 		_impl.exit_tree()
 		_impl = null
 

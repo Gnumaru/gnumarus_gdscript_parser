@@ -486,6 +486,37 @@ var res := GnumarusGodotProjectAnalyzerSuiteResourceIntegrity.new().analyze_file
   Prints `checking [i/n] path` progress plus one
   `path:line: kind message` line per issue.
 
+## 10. GnumarusGodotProjectAnalyzerSuiteFullScan
+
+Project-wide aggregator over every static-analysis pass, runnable
+two ways: the `GnumarusGodotProjectAnalyzerSuiteFullScan`
+`@tool` `EditorScript` (Script Editor File > Run) and the
+`Gnumarus Full Scan` entry under Project > Tools (registered by the
+analyzer plugin via `add_tool_menu_item`, removed on exit). Both are
+dumb forwards: every behavior lives in
+`GnumarusGodotProjectAnalyzerSuiteFullScanImpl` (RefCounted, no
+Editor dependency, headless-testable — the same proxy split as the
+analyzer plugin itself).
+
+`run()` executes each stage in order — currently `gdscript` (the
+full analyzer over every project `.gd`) and `resource_integrity`
+(text resources plus `.gd` load literals) — and each stage persists
+`ScanResults.json` when it finishes, so the report stays complete
+even if a later stage is interrupted. Future stages only add a stage
+name plus one `store_stage()` call: the report merges generically
+(load on-disk doc, replace only that stage entry, recompute sorted
+aggregates and summary), so no existing code changes.
+
+`ScanResults.json` shape: `version`, `generated_unix`, per-stage
+`stages` (`errors` / `warnings` / `files` each), flat sorted
+`errors` / `warnings` (every issue tagged with its `stage`, ordered
+by path, line, column, severity) and a `summary` (sorted stage
+names, total files/errors/warnings).
+
+```gdscript
+var res: Dictionary = GnumarusGodotProjectAnalyzerSuiteFullScanImpl.new().run()
+```
+
 ## Annotations
 
 Available annotations at a glance (details in each subsection below):
@@ -1384,6 +1415,9 @@ it never pollutes the project tree):
   and merges newly declared members into the
   roster (existing entries keep their data; nothing is ever removed,
   so a partially parsed re-analysis cannot wipe it).
+- `ScanResults.json` is written by the full scan (section 10): the
+  merged report over every analysis stage (per-stage issues plus
+  sorted flat aggregates and summary).
 
 ## tests
 
@@ -1473,6 +1507,10 @@ suites still print, so the marker alone could look green).
   `is_instance_of` narrowing, bracket generics and tuple/struct arms;
   cross-file `super` (literal, maybe, implicit, quoted); recorded
   cross references per analysis).
+  `test_full_scan.gd` (aggregated full scan: `ScanResults.json`
+  merge/sort/summary, corrupt-file fallback, hermetic gdscript +
+  integrity stages, EditorScript dumb-proxy shape, Project > Tools
+  wiring null-safety).
 - `tests/AnnotationsStressTest.gd` is a non-suite fixture: a
   single-file stress of every annotation, valid and invalid uses
   with documented verdicts. It parses in Godot, so its diagnostics

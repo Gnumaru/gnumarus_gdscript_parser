@@ -1,3 +1,6 @@
+
 .godot/
 project.godot
 *.uid
+*.sublime-*
+*.old

@@ -20,12 +20,15 @@ const EdTree = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/Gnumarus
 const SynParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
 const Analyzer = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
 const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
+const FullScan = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
 
 const DEBOUNCE_SEC := 1.0
 ## Files per warm pump tick (deferred chain, cancellable).
 const WARM_CHUNK := 5
 ## Milliseconds per warm tick (whichever hits first with the chunk).
 const WARM_BUDGET_MS := 120
+## Project > Tools menu entry running the aggregated full scan.
+const FULL_SCAN_MENU := "Gnumarus Full Scan"
 
 ## EditorPlugin host (null headless). Only Node services are used
 ## (add_child, get_viewport): everything else goes through singletons.
@@ -44,6 +47,7 @@ var _warm_pending: Array = []
 var _warm_idx := 0
 var _warm_restart := false
 var _warm_gen := 0
+var _tool_menu_added := false
 
 
 func _init(p_plugin: EditorPlugin = null) -> void:
@@ -99,6 +103,7 @@ func enter_tree() -> void:
 	_hook_signals(true)
 	_hook_filesystem(true)
 	ensure_bar()
+	_add_tool_menu()
 	_rewatch_code_edit()
 	analyze_current(false)
 	_start_warm()
@@ -364,6 +369,7 @@ func _warm_pump() -> void:
 
 ## Editor exit point (forwarded by the proxy).
 func exit_tree() -> void:
+	_remove_tool_menu()
 	_hook_signals(false)
 	_hook_filesystem(false)
 	_unwatch_code_edit()
@@ -445,6 +451,40 @@ func _on_filesystem_changed() -> void:
 		_start_warm()
 	else:
 		_warm_restart = true
+
+
+## Project > Tools entry for the aggregated full scan (every analysis
+## pass, merged into ScanResults.json). Null-guarded like every other
+## plugin call, so headless instances stay quiet; idempotent across
+## re-enables.
+func _add_tool_menu() -> void:
+	if _tool_menu_added:
+		return
+	if plugin == null or not is_instance_valid(plugin):
+		return
+	if not (plugin as Object).has_method("add_tool_menu_item"):
+		return
+	(plugin as Object).call("add_tool_menu_item", FULL_SCAN_MENU, Callable(self, "_on_full_scan_menu"))
+	_tool_menu_added = true
+
+
+## Drops the Project > Tools entry. Clears the flag first so a dead
+## host never blocks a later re-add.
+func _remove_tool_menu() -> void:
+	if not _tool_menu_added:
+		return
+	_tool_menu_added = false
+	if plugin == null or not is_instance_valid(plugin):
+		return
+	if not (plugin as Object).has_method("remove_tool_menu_item"):
+		return
+	(plugin as Object).call("remove_tool_menu_item", FULL_SCAN_MENU)
+
+
+## Tool-menu callback: runs the full scan synchronously (the impl
+## prints per-file progress plus one completion line).
+func _on_full_scan_menu() -> void:
+	FullScan.new().run()
 
 
 ## Returns the live bar, building it on first use and repairing its

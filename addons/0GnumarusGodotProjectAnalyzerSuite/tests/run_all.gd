@@ -39,6 +39,7 @@ func _init() -> void:
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_notnull.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_nullable.gd",
 		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_roster.gd",
+		"res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/test_full_scan.gd",
 	]
 	var total_p := 0
 	var total_f := 0
