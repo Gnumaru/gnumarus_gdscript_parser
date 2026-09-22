@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @deprecated rule suite (migrated from the scratch runner).
+## \@deprecated rule suite (migrated from the scratch runner).
 
 const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
 const Ana = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")

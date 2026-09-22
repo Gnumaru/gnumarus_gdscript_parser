@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @alias suite: block syntax (single/multi-line, @endalias delimiter),
+## \@alias suite: block syntax (single/multi-line, \@endalias delimiter),
 ## placement, conflicts, cycles, JSON storage, global availability and
 ## narrowing through expansion.
 

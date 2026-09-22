@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @struct suite: definitions (mandatory size, fields, markers),
+## \@struct suite: definitions (mandatory size, fields, markers),
 ## semantic compatibility, literal shapes, key/member access.
 
 const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")

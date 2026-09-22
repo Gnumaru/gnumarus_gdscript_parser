@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @generic suite: class declarations (placement, shapes), generic
+## \@generic suite: class declarations (placement, shapes), generic
 ## vartypes (arity, bounds, leniency) and substitution in member
 ## lookup (fields and methods with pre-bound class arguments).
 

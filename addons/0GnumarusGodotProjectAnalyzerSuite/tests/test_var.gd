@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @var rule suite: before-declaration narrowing with :=/= inference,
+## \@var rule suite: before-declaration narrowing with :=/= inference,
 ## free redefinition over visible variables, and placement/shape errors.
 
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")

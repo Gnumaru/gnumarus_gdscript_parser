@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @tuple suite: definitions (explicit size, unions, markers), semantic
+## \@tuple suite: definitions (explicit size, unions, markers), semantic
 ## compatibility, literal shapes, index access and Array fallback.
 
 const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")

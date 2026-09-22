@@ -1,8 +1,8 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @param rule suite: before-parameter (multiline lists) and
-## before-function/lambda uses, with @var-style narrowing.
+## \@param rule suite: before-parameter (multiline lists) and
+## before-function/lambda uses, with \@var-style narrowing.
 
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 

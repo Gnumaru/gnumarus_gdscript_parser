@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @private nested-family rule suite (migrated from the scratch runner).
+## \@private nested-family rule suite (migrated from the scratch runner).
 
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
@@ -42,7 +42,7 @@ func _f_inner_uses_root(h) -> void:
 	h.check(h.priv_errors(res).is_empty(), "inner code may use outer privates")
 	# NOTE: `self._cache` inside Inner is invalid scoping (Godot itself
 	# rejects outer members in inner classes); the family rule governs
-	# @private visibility only, so missing_member is expected while
+	# \@private visibility only, so missing_member is expected while
 	# private_use stays empty.
 	var non_missing := 0
 	var scoped := false

@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @interface suite: multi/single-line blocks, member forms, static
+## \@interface suite: multi/single-line blocks, member forms, static
 ## rules, defaults/vararg, enums/signals, conflicts, JSON shape.
 
 const Syn = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")

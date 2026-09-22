@@ -601,7 +601,12 @@ Type annotations live in comments and follow the general shape:
 Only same-line text is read for now; multi-line struct/tuple
 definitions with dictionaries and arrays are future work. A comment
 counts as an annotation only under the post-tokenizer rule
-(`@` glued to `#` or after whitespace, followed by a letter).
+(`@` glued to `#` or after whitespace, followed by a letter). To
+mention an annotation without using it (docs, section headers),
+escape it with a backslash: `\@param` is a mention and never
+analyzes — the same backslash-means-meta convention as the integrity
+scanner. An escaped mention beside a real tag still lets the real
+one through.
 Type names in annotations are case-corrected silently: a lowercase
 `string` resolves as `String` (in type position it can only mean the
 type).

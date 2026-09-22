@@ -55,6 +55,21 @@ func _r_post(h) -> void:
 		if str((tk as Dictionary).get("type", "")) == "TYPE_INFO":
 			n2 += 1
 	h.check(n1 == 1 and n2 == 0, "post-tokenizer reuse is independent")
+	var r3: Array = p.process_text("var z := 3 # \\@param z\n")
+	var n3 := 0
+	for tk in r3:
+		if str((tk as Dictionary).get("type", "")) == "TYPE_INFO":
+			n3 += 1
+	h.check(n3 == 0, "backslash mention stays a plain comment")
+	var r4: Array = p.process_text("var w := 4 # \\@fake and @return int\nfunc g() -> int:\n\treturn 1\n")
+	var n4 := 0
+	for tk in r4:
+		if str((tk as Dictionary).get("type", "")) == "TYPE_INFO":
+			n4 += 1
+	h.check(n4 == 1, "escaped mention beside a real tag still converts")
+	h.check(Post.has_type_annotation("# @param x"), "plain mention converts")
+	h.check(not Post.has_type_annotation("# \\@param x"), "escaped mention skipped")
+	h.check(Post.has_type_annotation("# \\@fake and @param x"), "real tag beside escape converts")
 
 
 func _r_syntactic(h) -> void:
@@ -84,6 +99,24 @@ func _r_analyzer(h) -> void:
 	h.check((ax2.get("warnings", []) as Array).is_empty(), "analyzer reuse has no leaked warnings")
 	h.check((ax2.get("errors", []) as Array).is_empty(), "analyzer reuse has no leaked errors")
 	_r_order(h)
+	_r_escaped_mentions(h)
+
+
+## Documenting annotations must not analyze them: escaped mentions
+## stay plain comments even where a real tag would misplace-error.
+func _r_escaped_mentions(h) -> void:
+	var s = Syn.new()
+	var ana = Ana.new()
+	var noisy: Dictionary = ana.analyze(s.parse_text("# --- @param helpers\nfunc f(x: int) -> void:\n\tpass\n"), "res://tests/tmp_reuse_noisy.gd")
+	var noisy_kinds: Array = []
+	for e in noisy.get("errors", []):
+		noisy_kinds.append(str((e as Dictionary).get("kind", "")))
+	h.check(noisy_kinds.has("param_misplaced"), "prose mention misplaces without escape")
+	var quiet: Dictionary = ana.analyze(s.parse_text("# --- \\@param helpers\nfunc f(x: int) -> void:\n\tpass\n"), "res://tests/tmp_reuse_quiet.gd")
+	h.check((quiet.get("errors", []) as Array).is_empty(), "escaped mention analyzes clean")
+	var ana2 = Ana.new()
+	var policy: Dictionary = ana2.analyze(s.parse_text("extends Node\n## File '# \\@nullable_policy' tag value.\nfunc g() -> void:\n\tpass\n"), "res://tests/tmp_reuse_quiet2.gd")
+	h.check((policy.get("errors", []) as Array).is_empty(), "escaped policy mention analyzes clean")
 
 
 ## Errors come out in file position order (pipeline phases append

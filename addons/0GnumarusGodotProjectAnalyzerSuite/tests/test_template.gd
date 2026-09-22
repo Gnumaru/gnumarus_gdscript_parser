@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @template suite: file-local generic variables (order-free knownness,
+## \@template suite: file-local generic variables (order-free knownness,
 ## conflicts, bounds) plus the substitution/unification IR (infra only:
 ## nothing instantiates yet).
 

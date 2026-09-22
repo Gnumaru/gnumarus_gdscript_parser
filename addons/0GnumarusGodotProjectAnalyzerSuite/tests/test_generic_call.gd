@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## Generic call suite: instantiation of @template functions at call
+## Generic call suite: instantiation of \@template functions at call
 ## sites (bare and self calls) — unification, arity, bounds and
 ## substituted returns flowing into chains.
 

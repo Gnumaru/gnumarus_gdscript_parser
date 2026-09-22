@@ -21,7 +21,7 @@ extends RefCounted
 ##   <output_base>/builtin/<Name>.json   (String, Array, int, ...)
 ##   <output_base>/builtin/Variant.json  (synthesized root)
 ##   <output_base>/classes/<Name>.json   (Node3D, Object, ...)
-##   <output_base>/user/<Name>.json      (scripts and @tuple/@struct/@interface)
+##   <output_base>/user/<Name>.json      (scripts and \@tuple/@struct/@interface)
 ##   <output_base>/index.json                      (type lists and counts)
 ## Every per-type file holds at minimum the type name, the allowed
 ## operators with the expected type of each parameter, and the static and

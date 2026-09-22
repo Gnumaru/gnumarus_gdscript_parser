@@ -3,7 +3,7 @@ extends RefCounted
 
 ## Virtual-type suite: tuples, structs, aliases and interfaces are
 ## annotation-only types — they refine concrete declarations through
-## @var/@param/@return but can never appear as declared GDScript types
+## \@var/@param/@return but can never appear as declared GDScript types
 ## (vartypes, `->` arrows, base classes).
 
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")

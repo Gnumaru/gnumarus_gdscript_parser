@@ -19,7 +19,7 @@ extends RefCounted
 ## JSON output and no Editor dependency, so it stays headless-runnable
 ## and hermetic. .gd files are scanned at the token level (never
 ## parsed): trigger literals (preload("..."), bare load("..."),
-## ResourceLoader.load("..."), extends "...", @icon("...")) keep
+## ResourceLoader.load("..."), extends "...", \@icon("...")) keep
 ## their labeled checks, and every other static string — assignments,
 ## call args, any quoting (single, double, triple-double) — plus
 ## every comment is scanned for embedded references at in-token

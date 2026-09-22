@@ -127,7 +127,7 @@ func enter_tree() -> void:
 ## Registers the nullable-policy ProjectSetting once (keeps the user
 ## value on later enables): "trust" keeps Godot's own leniency,
 ## "distrust" warns on unguarded implicitly-nullable use. The file
-## `# @nullable_policy` tag overrides per file; changing the setting
+## `# \@nullable_policy` tag overrides per file; changing the setting
 ## applies on the next analysis pass.
 static func _ensure_policy_setting() -> void:
 	var key := "gnumarus_analyzer/nullable_policy"
@@ -139,7 +139,7 @@ static func _ensure_policy_setting() -> void:
 
 ## Registers the strict-untyped ProjectSetting once (keeps the user
 ## value on later enables): under distrust, member use on
-## declared-but-untyped slots warns. The file `# @strict_untyped`
+## declared-but-untyped slots warns. The file `# \@strict_untyped`
 ## tag overrides per file; changing the setting applies on the next
 ## analysis pass.
 static func _ensure_strict_setting() -> void:

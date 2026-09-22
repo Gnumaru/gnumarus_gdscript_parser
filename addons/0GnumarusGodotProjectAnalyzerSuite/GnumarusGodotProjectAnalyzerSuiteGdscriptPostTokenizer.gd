@@ -4,14 +4,16 @@ extends RefCounted
 ## Post-processor for the GnumarusGodotProjectAnalyzerSuiteGdscriptTokenizer output.
 ##
 ## Iterates the raw tokens and looks inside every COMMENT / DOC_COMMENT
-## token for type annotation markers such as @param. A marker counts as
+## token for type annotation markers such as \@param. A marker counts as
 ## a type annotation only when:
 ## - the `@` is glued to a `#` on its left, or separated from it by
 ##   1 or more whitespace chars (in practice: the char immediately to
 ##   the left of `@` must be `#`, space or tab), AND
 ## - the char immediately to the right of `@` is at least one letter
 ##   (A-Z, a-z or Unicode >= 128; digits and underscore do NOT count).
-## Any COMMENT / DOC_COMMENT token containing such a marker is converted
+## A backslash immediately before `@` escapes it (\@ is a mention, not
+## a use), so documenting annotations never analyzes them. Any COMMENT
+## / DOC_COMMENT token containing such a marker is converted
 ## into a TYPE_INFO token (same value, line and column are preserved).
 ## Every other token passes through untouched.
 ##
@@ -21,9 +23,10 @@ extends RefCounted
 ##   var tokens: Array = post.process_tokens(raw)
 ## Usage with a tokenizer instance (it is iterable, so it is drained here):
 ##   var tokens: Array = post.process_tokenizer(tok)
-## Usage with a file path or a source string:
+## Usage with a file path or a source string (the escaped mention
+## in the example keeps this very doc block a plain comment):
 ##   var tokens: Array = post.process("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
-##   var tokens: Array = post.process_text("var x := 1 # @param x\n")
+##   var tokens: Array = post.process_text("var x := 1 # \@param x\n")
 ## Direct iteration (every process_* method is just a collector over it):
 ##   var post := GnumarusGodotProjectAnalyzerSuiteGdscriptPostTokenizer.new()
 ##   post.pending_tokens = raw
@@ -114,7 +117,9 @@ func _transform(token: Variant) -> Dictionary:
 
 
 ## Checks whether a comment text contains a type annotation marker.
-## See the class docs for the exact left/right rules.
+## See the class docs for the exact left/right rules. A backslash
+## immediately before `@` escapes it (\@ is a mention, not a use),
+## so documenting annotations never analyzes them.
 static func has_type_annotation(value: String) -> bool:
 	var length := value.length()
 	for i in range(length):
@@ -123,6 +128,8 @@ static func has_type_annotation(value: String) -> bool:
 		if i == 0:
 			continue
 		var left := value.unicode_at(i - 1)
+		if left == 92:
+			continue
 		if left != 35 and left != 32 and left != 9:
 			continue
 		if i + 1 >= length:

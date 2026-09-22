@@ -63,7 +63,7 @@ const BINARY_ARITH_OPS := ["+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", 
 ## Engine singletons: `Name.anything` is always accepted without checks.
 const SINGLETONS := ["Performance", "Engine", "ProjectSettings", "OS", "Time", "ClassDB", "TextServerManager", "NavigationServer2DManager", "PhysicsServer2DManager", "NavigationServer3DManager", "PhysicsServer3DManager", "NavigationMeshGenerator", "IP", "Geometry2D", "Geometry3D", "ResourceLoader", "ResourceSaver", "Marshalls", "TranslationServer", "Input", "InputMap", "EngineDebugger", "GDExtensionManager", "ResourceUID", "WorkerThreadPool", "ThemeDB", "EditorInterface", "GDScriptLanguageProtocol", "JavaClassWrapper", "JavaScriptBridge", "AccessibilityServer", "AudioServer", "CameraServer", "DisplayServer", "NativeMenu", "RenderingServer", "NavigationServer2D", "NavigationServer3D", "PhysicsServer2D", "PhysicsServer3D", "XRServer"]
 
-## Global utility functions (@GDScript / @GlobalScope): calls are trusted.
+## Global utility functions (@GDScript / \@GlobalScope): calls are trusted.
 const GLOBAL_FUNCS := ["print", "prints", "printt", "printerr", "print_debug", "print_stack", "push_error", "push_warning", "len", "range", "load", "load_threaded_request", "str", "int", "float", "bool", "typeof", "type_exists", "convert", "char", "ord", "Color8", "is_instance_of", "is_instance_valid", "is_same", "is_equal_approx", "is_zero_approx", "is_nan", "is_inf", "move_toward", "rotate_toward", "lerp", "lerpf", "lerp_angle", "clamp", "clampi", "clampf", "min", "mini", "minf", "max", "maxi", "maxf", "abs", "absi", "absf", "floor", "floori", "ceil", "ceili", "round", "roundi", "sign", "signf", "snapped", "snappedf", "sqrt", "pow", "exp", "log", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "deg_to_rad", "rad_to_deg", "fmod", "fposmod", "posmod", "randf", "randi", "randf_range", "randi_range", "randfn", "seed", "srand", "str_to_var", "var_to_str", "bytes_to_var", "var_to_bytes", "weakref", "get_stack", "dict_to_inst", "inst_to_dict", "ease", "step_decimals", "is_equal_approx", "move_toward", "load_threaded_get", "load_threaded_get_status"]
 
 ## Language keywords: never identifiers.
@@ -82,13 +82,13 @@ var _script_resource_path: String = ""
 var _script_class: String = ""
 var _script_extends: String = ""
 var _script_types: Dictionary = {}
-## @tuple names collected pre-check (top-level only). Full definitions
+## \@tuple names collected pre-check (top-level only). Full definitions
 ## (counts, items) live analyzer-side; duplicates and conflicts are
 ## reported there too.
 var _tuple_names: Dictionary = {}
-## @struct names, same split as tuples.
+## \@struct names, same split as tuples.
 var _struct_names: Dictionary = {}
-## @interface names, same split (conformance arrives with @implements).
+## \@interface names, same split (conformance arrives with \@implements).
 var _interface_names: Dictionary = {}
 var _script_scope: Dictionary = {}
 var _script_infos: Dictionary = {}
@@ -322,7 +322,7 @@ func _collect_script(ast: Dictionary) -> void:
 	_build_script_infos(ast)
 
 
-## Collects @tuple names (top-level standalone comments and leading
+## Collects \@tuple names (top-level standalone comments and leading
 ## comments alike) so tuple annotations resolve. Shapes, duplicates
 ## and conflicts are validated analyzer-side.
 func _collect_tuple_names(ast: Dictionary) -> void:
@@ -337,7 +337,7 @@ func _collect_tuple_names(ast: Dictionary) -> void:
 				_register_tuple_node(c)
 
 
-## Registers every @tuple name in one comment value (one line each).
+## Registers every \@tuple name in one comment value (one line each).
 func _register_tuple_node(tok: Dictionary) -> void:
 	if str(tok.get("type", "")) != "TYPE_INFO":
 		return
@@ -345,7 +345,7 @@ func _register_tuple_node(tok: Dictionary) -> void:
 		_tuple_names[w] = true
 
 
-## Collects @struct names (same split as tuples).
+## Collects \@struct names (same split as tuples).
 func _collect_struct_names(ast: Dictionary) -> void:
 	for child in ast.get("children", []):
 		if not (child is Dictionary):
@@ -358,7 +358,7 @@ func _collect_struct_names(ast: Dictionary) -> void:
 				_register_struct_node(c)
 
 
-## Registers every @struct name in one comment value (one line each).
+## Registers every \@struct name in one comment value (one line each).
 func _register_struct_node(tok: Dictionary) -> void:
 	if str(tok.get("type", "")) != "TYPE_INFO":
 		return
@@ -366,7 +366,7 @@ func _register_struct_node(tok: Dictionary) -> void:
 		_struct_names[w] = true
 
 
-## Collects @interface names (same split as tuples/structs).
+## Collects \@interface names (same split as tuples/structs).
 func _collect_interface_names(ast: Dictionary) -> void:
 	for child in ast.get("children", []):
 		if not (child is Dictionary):
@@ -379,7 +379,7 @@ func _collect_interface_names(ast: Dictionary) -> void:
 				_register_interface_node(c)
 
 
-## Registers every @interface name in one comment value. Blocks span
+## Registers every \@interface name in one comment value. Blocks span
 ## lines, so only the header word counts (member parsing is
 ## analyzer-side).
 func _register_interface_node(tok: Dictionary) -> void:
@@ -400,9 +400,9 @@ func _register_interface_node(tok: Dictionary) -> void:
 			_interface_names[str(words[1])] = true
 
 
-## First words after each @tag in a comment value (one line each).
+## First words after each \@tag in a comment value (one line each).
 ## Mirrors the analyzer's tag rules (exact word, @ at start or after
-## #/space/tab). Shared by @tuple and @struct collection.
+## #/space/tab). Shared by \@tuple and \@struct collection.
 static func _tuple_tag_names(value: String, tag: String = "tuple") -> Array:
 	var out: Array = []
 	for line in value.split("\n"):

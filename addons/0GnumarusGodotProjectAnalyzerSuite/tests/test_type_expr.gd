@@ -3,8 +3,8 @@ extends RefCounted
 
 ## Nested type-expression suite: the _parse_type_expr mini-parser
 ## (names, unions, generics, `*`, whitespace tolerance, errors) plus
-## its analyzer plug (complex @var/@param/@return specs and generic
-## @tuple items resolve leaves and validate tuple applications).
+## its analyzer plug (complex \@var/@param/@return specs and generic
+## \@tuple items resolve leaves and validate tuple applications).
 
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 const Ana = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")

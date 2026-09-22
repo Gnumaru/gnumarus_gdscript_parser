@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## @implements suite: placement (script root vs nested class),
+## \@implements suite: placement (script root vs nested class),
 ## target resolution (script/engine/struct/interface/tuple) and
 ## conformance (methods/fields/signals/enums/consts).
 

@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## nullable suite: trailing `nullable` on @var/@param/@return (parse,
+## nullable suite: trailing `nullable` on \@var/@param/@return (parse,
 ## stamps, contradiction with `notnull` and never-nullable types),
 ## trust-mode opt-in warnings, `@return nullable` call-result taint,
 ## distrust policy via the analyzer `null_policy` property (default

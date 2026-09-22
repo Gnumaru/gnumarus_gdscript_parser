@@ -6,7 +6,7 @@ extends RefCounted
 ## Reads the AST produced by the semantic parser and interprets the
 ## comments carrying type annotations (the TYPE_INFO tokens the post
 ## tokenizer builds from COMMENT and DOC_COMMENT tokens). Annotations
-## follow the general shape "@name param1 param2 ... lastparam",
+## follow the general shape "\@name param1 param2 ... lastparam",
 ## usually on one line; multi-line struct/tuple definitions with
 ## dictionaries and arrays are future work, not handled here.
 ##
@@ -35,11 +35,11 @@ extends RefCounted
 ## The third rule is "@return":
 ## - It may precede a function declaration or a lambda (a statement
 ##   whose value is a lambda, e.g. `var f = func(): ...`) and declares
-##   the function return type: "void", one type name ("# @return Node")
-##   or a union ("# @return Object|String|int").
+##   the function return type: "void", one type name ("# \@return Node")
+##   or a union ("# \@return Object|String|int").
 ## - Every named member must be a known type (script classes/enums or
 ##   data-dir JSON files); "void" only works alone. When the function also
-##   has a "->" annotation, every @return member must equal it or
+##   has a "->" annotation, every \@return member must equal it or
 ##   inherit from it (Control is fine for "-> Node", Node is not fine
 ##   for "-> Control"). Value/bare returns are checked against voidness.
 ## - Violations generate ERRORS ("return_misplaced", "return_malformed",
@@ -47,7 +47,7 @@ extends RefCounted
 ##   Return VALUE compatibility is not inferred (flat token scan).
 ##
 ## The fourth rule is "@var":
-## - It takes a variable name and a type ("# @var myvar int|float"):
+## - It takes a variable name and a type ("# \@var myvar int|float"):
 ##   before a variable/constant declaration the name must equal the
 ##   declared one; anywhere inside a function body it redefines the
 ##   type of a visible variable (locals, params and members). Never
@@ -61,24 +61,24 @@ extends RefCounted
 ##   gain a `var_ann` stamp; free uses only check.
 ##
 ## The fifth rule is "@param":
-## - It takes a parameter name and a type ("# @param myparam int"):
+## - It takes a parameter name and a type ("# \@param myparam int"):
 ##   directly before a parameter (multiline parameter lists) or before
 ##   the function/lambda declaration using the parameters (alongside
-##   @return and friends, on other lines). Several pairs may share one
+##   \@return and friends, on other lines). Several pairs may share one
 ##   merged comment token; each must match a parameter by name.
-## - Same checks as @var: known members narrowing the declared vartype
+## - Same checks as \@var: known members narrowing the declared vartype
 ##   (untyped parameters accept anything). Violations generate ERRORS
 ##   ("param_misplaced", "param_malformed", "param_unknown",
 ##   "param_unknown_type", "param_mismatch"). Parameters gain a
 ##   `param_ann` stamp.
 ##
 ## Named type templates share user/ with classes (one global type
-## namespace) as kind-tagged JSONs: @tuple (fixed-shape arrays),
-## @struct (fixed-key dictionaries) and @interface (member blueprints
-## between @interface Name and @endinterface, single or multi-line).
+## namespace) as kind-tagged JSONs: \@tuple (fixed-shape arrays),
+## \@struct (fixed-key dictionaries) and \@interface (member blueprints
+## between \@interface Name and \@endinterface, single or multi-line).
 ## Definitions live top-level only; duplicates and clashes error.
 ## Tuples/structs verify literals, index/key access and members;
-## interfaces define blueprints and @implements checks conformance
+## interfaces define blueprints and \@implements checks conformance
 ## (methods, fields, signals, enums, consts) at the script root or on
 ## nested classes.
 ##
@@ -170,7 +170,7 @@ const ERR_POLICY_MISPLACED := "policy_misplaced"
 const ERR_POLICY_MALFORMED := "policy_malformed"
 ## ProjectSetting holding the default nullability policy ("trust" or
 ## "distrust"). Read at each analyze() call when neither the analyzer
-## `null_policy` property (explicit) nor a file `# @nullable_policy`
+## `null_policy` property (explicit) nor a file `# \@nullable_policy`
 ## tag decides.
 const SETTING_NULL_POLICY := "gnumarus_analyzer/nullable_policy"
 ## ProjectSetting for untyped strictness (bool, default false).
@@ -251,25 +251,25 @@ var _project_root = ""
 var _write_base = NativeDumper.DATA_DIR_NAME
 var _written: Array = []
 ## Type file lookups (builtin/classes/user JSON info or miss marker),
-## cached per analyze() call for @return name resolution.
+## cached per analyze() call for \@return name resolution.
 var _type_cache: Dictionary = {}
-## @tuple definitions: name -> {"resolved": bool, "raws": [...],
+## \@tuple definitions: name -> {"resolved": bool, "raws": [...],
 ## "spec": {...}}. Pre-scan collects raws (order-free known-checks),
 ## _resolve_tuples validates into specs before the walk.
 var _tuples: Dictionary = {}
-## @struct definitions, same two-pass split as tuples.
+## \@struct definitions, same two-pass split as tuples.
 var _structs: Dictionary = {}
-## @interface raw blocks: name -> [{words, line}]. Validated in
+## \@interface raw blocks: name -> [{words, line}]. Validated in
 ## _resolve_interfaces before the walk.
 var _interfaces: Dictionary = {}
-## @implements raw uses: owner -> [{names, line}]. Checked in
+## \@implements raw uses: owner -> [{names, line}]. Checked in
 ## _check_implements after the walk (tables complete by then).
 var _implements: Dictionary = {}
-## @template type variables: name -> {"resolved": bool, "raws": [...],
+## \@template type variables: name -> {"resolved": bool, "raws": [...],
 ## "spec": {...}}. File-local only: never written to JSON, never read
 ## from disk. Prescan collects raws, _resolve_templates validates.
 var _templates: Dictionary = {}
-## @alias definitions: name -> {"resolved": bool, "raws": [...],
+## \@alias definitions: name -> {"resolved": bool, "raws": [...],
 ## "spec": {...}}. Prescan collects raws, _resolve_aliases validates.
 var _aliases: Dictionary = {}
 ## Raw parameterized extends per class key: {head, inner, line, owner}.
@@ -301,7 +301,7 @@ var _pending_vartype_bounds: Array = []
 ## the default (current behavior). Configuration, so analyze() never
 ## resets it. Setting it explicitly (even to "trust") marks the
 ## instance base, which beats the ProjectSetting but still loses to a
-## file `# @nullable_policy` tag.
+## file `# \@nullable_policy` tag.
 var null_policy := "trust":
 	set(v):
 		var s := str(v)
@@ -314,7 +314,7 @@ var _policy_explicit := false
 ## property when set, else the ProjectSetting (or "trust" when the
 ## setting is missing/invalid). A file tag overrides per file.
 var _policy_base := "trust"
-## File `# @nullable_policy` tag value ("" when absent): wins over
+## File `# \@nullable_policy` tag value ("" when absent): wins over
 ## the base for the analyzed file only.
 var _file_policy := ""
 
@@ -349,7 +349,7 @@ static func _read_project_policy() -> String:
 ## warns instead of staying silent. Inert under trust (the master
 ## switch), off by default. Configuration, so analyze() never resets
 ## it. Explicit assignment marks the instance base, which beats the
-## ProjectSetting but still loses to a file `# @strict_untyped` tag.
+## ProjectSetting but still loses to a file `# \@strict_untyped` tag.
 var strict_untyped := false:
 	set(v):
 		strict_untyped = bool(v)
@@ -360,7 +360,7 @@ var _strict_explicit := false
 ## property when set, else the ProjectSetting. A file tag overrides
 ## per file.
 var _strict_base := false
-## File `# @strict_untyped` tag state ("on"/"off"/"" when absent):
+## File `# \@strict_untyped` tag state ("on"/"off"/"" when absent):
 ## wins over the base for the analyzed file only.
 var _file_strict := ""
 
@@ -943,7 +943,7 @@ func _compute_write_base(root: String) -> String:
 	return NativeDumper.DATA_DIR_NAME
 
 
-## Handles the file header comment: a @deprecated tag here marks
+## Handles the file header comment: a \@deprecated tag here marks
 ## the whole script deprecated (root-level annotation).
 func _scan_header(ast: Dictionary) -> void:
 	var header: Variant = ast.get("header_comment", null)
@@ -959,7 +959,7 @@ func _scan_header(ast: Dictionary) -> void:
 			_error(ERR_VAR_MISPLACED, "@var can only precede a variable or constant declaration, or redefine a variable inside a function body", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		if not _find_param(str((header as Dictionary).get("value", ""))).is_empty():
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
-		# NOTE: @tuple/@struct/@interface/@alias/@template definitions
+		# NOTE: \@tuple/@struct/@interface/@alias/@template definitions
 		# may live in the header (first in file); prescans collect them
 		# like any other top-level comment.
 		if not _find_generic(str((header as Dictionary).get("value", ""))).is_empty():
@@ -1106,7 +1106,7 @@ func _has_return_tag(tok: Dictionary) -> Dictionary:
 	return _find_return(str(tok.get("value", "")))
 
 
-## Looks for @return in a node's leading_comments (first hit wins).
+## Looks for \@return in a node's leading_comments (first hit wins).
 func _leading_return(node: Dictionary) -> Dictionary:
 	for c in node.get("leading_comments", []):
 		if c is Dictionary:
@@ -1141,7 +1141,7 @@ func _has_any_var_tag(node: Dictionary) -> bool:
 	return false
 
 
-# ------------------------------------------------------- @param helpers
+# ------------------------------------------------------- \@param helpers
 
 func _find_param(value: String) -> Dictionary:
 	return _find_tag(value, "param")
@@ -1160,7 +1160,7 @@ func _has_any_param_tag(node: Dictionary) -> bool:
 	return false
 
 
-# ------------------------------------------------------- @tuple helpers
+# ------------------------------------------------------- \@tuple helpers
 
 func _find_tuple(value: String) -> Dictionary:
 	return _find_tag(value, "tuple")
@@ -1196,7 +1196,7 @@ func _has_any_tuple_tag(node: Dictionary) -> bool:
 	return false
 
 
-## Parses an @tuple message ("Name COUNT item...") into {"ok","name",
+## Parses an \@tuple message ("Name COUNT item...") into {"ok","name",
 ## "size","items","raw"} or {"ok": false, "error"}. COUNT is mandatory
 ## and must equal the item count (checked by the caller against the
 ## parsed words). Items stay raw here (unions, `*`, `variant`, nested
@@ -1249,7 +1249,7 @@ static func _rejoin_bracket_words(words: Array) -> Array:
 	return out
 
 
-## Pre-scan (before _scan): collects @tuple raw definitions from
+## Pre-scan (before _scan): collects \@tuple raw definitions from
 ## top-level standalone comments and top-level leadings so name
 ## lookups stay order-free. Full validation happens in _resolve_tuples.
 ## The file header comment as a collectable token ({} when absent;
@@ -1274,7 +1274,7 @@ func _prescan_tuples(ast: Dictionary) -> void:
 	_collect_tuple_node(_header_tok(ast))
 
 
-## Records every @tuple tag in one comment value as raw material.
+## Records every \@tuple tag in one comment value as raw material.
 ## Malformed tags error immediately and are dropped; valid ones queue
 ## under their name (duplicates resolved in _resolve_tuples).
 func _collect_tuple_node(tok: Dictionary) -> void:
@@ -1716,9 +1716,9 @@ func _check_tuple_value(tname: String, value: Variant, line: int, owner: String)
 
 
 ## Literal value checks against every nominal tuple/struct type in
-## play: the declared vartype plus @var members naming tuples or
+## play: the declared vartype plus \@var members naming tuples or
 ## structs (deduped). Keeps literal validation working under the
-## @var + Array/Dictionary pattern; each checker no-ops on misses.
+## \@var + Array/Dictionary pattern; each checker no-ops on misses.
 func _check_nominal_values(d: Dictionary, value: Variant, line: int, owner: String) -> void:
 	var seen := {}
 	var vt := _vartype_name(d)
@@ -1784,7 +1784,7 @@ func _write_tuple_file(tname: String) -> void:
 	_written.append(_write_base + "/user/" + tname + ".json")
 
 
-# ------------------------------------------------------- @alias helpers
+# ------------------------------------------------------- \@alias helpers
 
 func _find_alias(value: String) -> Dictionary:
 	return _find_tag(value, "alias")
@@ -1803,7 +1803,7 @@ func _has_any_alias_tag(node: Dictionary) -> bool:
 	return false
 
 
-## Left-boundary rule for @alias/@endalias scanning: start of value,
+## Left-boundary rule for \@alias/@endalias scanning: start of value,
 ## or #/space/tab/newline before the @ (multi-line tokens included).
 func _at_alias_left(value: String, i: int) -> bool:
 	if i <= 0:
@@ -1828,7 +1828,7 @@ func _alias_line_of(value: String, pos: int) -> int:
 
 
 ## Finds "@endalias" at a tag boundary from pos: returns the @ position
-## or -1. Stray text (including nested @alias words) is skipped.
+## or -1. Stray text (including nested \@alias words) is skipped.
 func _find_endalias(value: String, from: int) -> int:
 	var n := value.length()
 	var i := from
@@ -1863,10 +1863,10 @@ static func _clean_alias_expr(raw: String) -> String:
 	return " ".join(parts)
 
 
-## Scans a whole comment value for "@alias NAME expr @endalias"
-## blocks. The expression runs to @endalias, so it may span lines and
+## Scans a whole comment value for "@alias NAME expr \@endalias"
+## blocks. The expression runs to \@endalias, so it may span lines and
 ## hold whitespace. Returns [{name, expr, line}] plus
-## [{error, line}] for unterminated blocks. Stray @endalias words and
+## [{error, line}] for unterminated blocks. Stray \@endalias words and
 ## text between blocks are ignored.
 func _extract_alias_blocks(value: String) -> Array:
 	var out: Array = []
@@ -1925,7 +1925,7 @@ func _extract_alias_blocks(value: String) -> Array:
 	return out
 
 
-## Pre-scan (before _scan): collects @alias raw definitions from
+## Pre-scan (before _scan): collects \@alias raw definitions from
 ## top-level standalone comments and top-level leadings so name
 ## lookups stay order-free. Full validation happens in _resolve_aliases.
 func _prescan_aliases(ast: Dictionary) -> void:
@@ -1941,7 +1941,7 @@ func _prescan_aliases(ast: Dictionary) -> void:
 	_collect_alias_node(_header_tok(ast))
 
 
-## Records every @alias block in one comment value as raw material.
+## Records every \@alias block in one comment value as raw material.
 ## Malformed blocks error immediately and are dropped; valid ones queue
 ## under their name (duplicates resolved in _resolve_aliases).
 func _collect_alias_node(tok: Dictionary) -> void:
@@ -2246,10 +2246,10 @@ func _check_pending_alias_narrows() -> void:
 				_error(ERR_VAR_MISMATCH, "cannot use @var type '" + hs + "' (from alias '" + member + "') for variable '" + str(pd.get("label", "")) + "' declared as '" + ref + "' ('" + hs + "' is neither '" + ref + "' nor a subclass of it)", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
 
 
-# ----------------------------------------------------- @template helpers
+# ----------------------------------------------------- \@template helpers
 #
-# File-local generic type variables ("# @template T",
-# "# @template T of Bound"). Names work file-wide regardless of order
+# File-local generic type variables ("# \@template T",
+# "# \@template T of Bound"). Names work file-wide regardless of order
 # but never leave the file: no JSON is written or read. Uses resolve
 # as known names today; instantiation (substitution/unification below)
 # lands with generics. Bounds must be concrete (no template vars).
@@ -2271,7 +2271,7 @@ func _has_any_template_tag(node: Dictionary) -> bool:
 	return false
 
 
-## Parses an @template message ("Name" or "Name of Bound") into
+## Parses an \@template message ("Name" or "Name of Bound") into
 ## {"ok","name","bound","raw"} or {"ok": false, "error"}. The bound is
 ## raw text here (single line, like every tag message); it is parsed
 ## at resolve time.
@@ -2296,7 +2296,7 @@ static func _parse_template_spec(raw_msg: String) -> Dictionary:
 	return {"ok": false, "error": "@template needs 'of' before the bound: '# @template T of Bound'"}
 
 
-## Pre-scan (before _scan): collects @template raw definitions from
+## Pre-scan (before _scan): collects \@template raw definitions from
 ## top-level standalone comments and top-level leadings so name
 ## lookups stay order-free. Full validation happens in
 ## _resolve_templates.
@@ -2313,7 +2313,7 @@ func _prescan_templates(ast: Dictionary) -> void:
 	_collect_template_node(_header_tok(ast))
 
 
-## Records every @template tag in one comment value as raw material.
+## Records every \@template tag in one comment value as raw material.
 ## Malformed tags error immediately and are dropped; valid ones queue
 ## under their name (duplicates resolved in _resolve_templates).
 func _collect_template_node(tok: Dictionary) -> void:
@@ -2610,10 +2610,10 @@ static func _check_bound(bound: Dictionary, actual: Dictionary) -> bool:
 	return bool(r.get("ok", false))
 
 
-# ------------------------------------------------------- @generic helpers
+# ------------------------------------------------------- \@generic helpers
 #
-# Class-level generic parameters ("# @generic T1 T2" immediately
-# before a class declaration). Every name must be a file @template
+# Class-level generic parameters ("# \@generic T1 T2" immediately
+# before a class declaration). Every name must be a file \@template
 # (never a concrete type): the count is the class arity, tied to the
 # instance. Stored on the class rec ("generic") and the class JSON.
 
@@ -2634,7 +2634,7 @@ func _has_any_generic_tag(node: Dictionary) -> bool:
 	return false
 
 
-## Marks one CLASS_DECL node generic from its leading @generic tags.
+## Marks one CLASS_DECL node generic from its leading \@generic tags.
 ## Merges every tag in every leading token; names must be file
 ## template types, duplicates and repeats error out.
 func _mark_generic_class(node: Dictionary, owner: String) -> void:
@@ -2790,7 +2790,7 @@ static func _split_top_commas(text: String) -> Array:
 
 
 ## Post-resolve pass: validates parameterized extends (arity against
-## @generic classes, template bounds on arguments). Anything else
+## \@generic classes, template bounds on arguments). Anything else
 ## (plain bases, engine heads, unknown heads, unbalanced brackets)
 ## stays silent exactly like today.
 func _check_pending_extends() -> void:
@@ -2855,9 +2855,9 @@ func _check_pending_extends() -> void:
 		_extends_args[full] = {"key": key, "args": args}
 
 
-# ------------------------------------------------------- @struct helpers
+# ------------------------------------------------------- \@struct helpers
 
-## Parses an @struct message ("Name COUNT field...") into {"ok",
+## Parses an \@struct message ("Name COUNT field...") into {"ok",
 ## "name", "size", "fields", "raw"} or {"ok": false, "error"}. COUNT
 ## is mandatory and must equal the field count (checked by the
 ## caller). Fields stay raw words here.
@@ -2910,7 +2910,7 @@ func _parse_struct_field(word: String, line: int) -> Dictionary:
 	return {"name": fname, "types": types, "any": false}
 
 
-## Pre-scan (before _scan): collects @struct raw definitions from
+## Pre-scan (before _scan): collects \@struct raw definitions from
 ## top-level standalone comments and top-level leadings.
 func _prescan_structs(ast: Dictionary) -> void:
 	for child in ast.get("children", []):
@@ -2925,7 +2925,7 @@ func _prescan_structs(ast: Dictionary) -> void:
 	_collect_struct_node(_header_tok(ast))
 
 
-## Records every @struct tag in one comment value as raw material.
+## Records every \@struct tag in one comment value as raw material.
 ## Malformed tags error immediately and are dropped.
 func _collect_struct_node(tok: Dictionary) -> void:
 	if str(tok.get("type", "")) != "TYPE_INFO":
@@ -3064,10 +3064,10 @@ func _write_struct_file(tname: String) -> void:
 	_written.append(_write_base + "/user/" + tname + ".json")
 
 
-## Extracts every @tagname pair from one TYPE_INFO token into
+## Extracts every \@tagname pair from one TYPE_INFO token into
 ## [{name,types,raw,line}] (consecutive lines merge into one token, so
 ## each line is scanned independently). Malformed pairs error out and
-## are skipped. Shared by @var and @param.
+## are skipped. Shared by \@var and \@param.
 func _extract_tok_tags(tok: Dictionary, owner: String, tagname: String, what: String, malformed_kind: String) -> Array:
 	var out: Array = []
 	if str(tok.get("type", "")) != "TYPE_INFO":
@@ -3093,7 +3093,7 @@ func _extract_tok_tags(tok: Dictionary, owner: String, tagname: String, what: St
 	return out
 
 
-## Extracts every @var pair from a node's leading_comments.
+## Extracts every \@var pair from a node's leading_comments.
 func _extract_var_tags(node: Dictionary, owner: String) -> Array:
 	var out: Array = []
 	for c in node.get("leading_comments", []):
@@ -3103,7 +3103,7 @@ func _extract_var_tags(node: Dictionary, owner: String) -> Array:
 	return out
 
 
-## Extracts every @param pair from a node's leading_comments into
+## Extracts every \@param pair from a node's leading_comments into
 ## [{name,types,raw,line}].
 func _extract_param_tags(node: Dictionary, owner: String) -> Array:
 	var out: Array = []
@@ -3237,7 +3237,7 @@ func _check_pending_notnull() -> void:
 		_error(str((pen as Dictionary).get("mkind", "")), str((pen as Dictionary).get("what", "")) + " notnull contradicts nullable type '" + str((pen as Dictionary).get("raw", "")) + "'", int((pen as Dictionary).get("line", 0)), int((pen as Dictionary).get("col", 0)), str((pen as Dictionary).get("owner", "")))
 
 
-## Narrows one @param pair against a PARAM node: known members
+## Narrows one \@param pair against a PARAM node: known members
 ## narrowing the declared vartype (untyped params accept anything).
 ## Stamps pnode["param_ann"].
 func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> void:
@@ -3272,7 +3272,7 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 	_queue_notnull_aliases(pair, members, "@param", ERR_PARAM_MALFORMED, line, 0, owner, pnode.get("param_ann", {}), clash)
 
 
-## Applies @param pairs to a whole parameter list (before-func/lambda
+## Applies \@param pairs to a whole parameter list (before-func/lambda
 ## use). Each pair must name one of the params.
 func _apply_param_pairs(pairs: Array, params: Variant, fn_display: String, owner: String) -> void:
 	for pair in pairs:
@@ -3285,7 +3285,7 @@ func _apply_param_pairs(pairs: Array, params: Variant, fn_display: String, owner
 		_check_param_pair(pair, pnode, owner)
 
 
-## Applies @param pairs to a single PARAM node (multiline-list use).
+## Applies \@param pairs to a single PARAM node (multiline-list use).
 ## Each pair must name this parameter.
 func _apply_param_single(pairs: Array, pnode: Dictionary, owner: String) -> void:
 	for pair in pairs:
@@ -3297,7 +3297,7 @@ func _apply_param_single(pairs: Array, pnode: Dictionary, owner: String) -> void
 		_check_param_pair(pair, pnode, owner)
 
 
-## @param on a function/lambda carrier: FUNC_DECL, LAMBDA node, or a
+## \@param on a function/lambda carrier: FUNC_DECL, LAMBDA node, or a
 ## statement whose value is a lambda (VAR/CONST/EXPR_STMT).
 func _mark_param_carrier(stmt_node: Dictionary, fn_node: Dictionary, owner: String) -> void:
 	var pairs := _extract_param_tags(stmt_node, owner)
@@ -3306,7 +3306,7 @@ func _mark_param_carrier(stmt_node: Dictionary, fn_node: Dictionary, owner: Stri
 	_apply_param_pairs(pairs, fn_node.get("params", []), _fn_display(fn_node), owner)
 
 
-# ------------------------------------------------------- @interface helpers
+# ------------------------------------------------------- \@interface helpers
 
 func _find_interface(value: String) -> Dictionary:
 	return _find_tag(value, "interface")
@@ -3341,9 +3341,9 @@ static func _iface_words(value: String) -> Array:
 	return out
 
 
-## Pre-scan (before _scan): collects @interface raw blocks from
+## Pre-scan (before _scan): collects \@interface raw blocks from
 ## top-level standalone comments and top-level leadings. Each block is
-## {name, words, line}; missing @endinterface errors here.
+## {name, words, line}; missing \@endinterface errors here.
 func _prescan_interfaces(ast: Dictionary) -> void:
 	for child in ast.get("children", []):
 		if not (child is Dictionary):
@@ -3357,8 +3357,8 @@ func _prescan_interfaces(ast: Dictionary) -> void:
 	_collect_interface_tok(_header_tok(ast))
 
 
-## Collects @interface blocks from one comment token. Several blocks
-## may share a token; stray @endinterface words are ignored.
+## Collects \@interface blocks from one comment token. Several blocks
+## may share a token; stray \@endinterface words are ignored.
 func _collect_interface_tok(tok: Dictionary) -> void:
 	if str(tok.get("type", "")) != "TYPE_INFO":
 		return
@@ -3756,7 +3756,7 @@ func _write_interface_file(tname: String) -> void:
 	_written.append(_write_base + "/user/" + tname + ".json")
 
 
-# ------------------------------------------------------- @implements
+# ------------------------------------------------------- \@implements
 
 func _find_implements(value: String) -> Dictionary:
 	return _find_tag(value, "implements")
@@ -3800,7 +3800,7 @@ static func _canon_dotted(text: String) -> String:
 	return ".".join(fixed)
 
 
-## Records one raw @implements use (words validated for shape only;
+## Records one raw \@implements use (words validated for shape only;
 ## resolution needs complete tables, so it happens in _check_implements).
 func _record_implements(owner: String, node: Dictionary, line: int) -> void:
 	for c in node.get("leading_comments", []):
@@ -3812,7 +3812,7 @@ func _record_implements(owner: String, node: Dictionary, line: int) -> void:
 		_record_implements_words(owner, _split_words(str(tag.get("message", ""))), line)
 
 
-## Records validated @implements words under an owner.
+## Records validated \@implements words under an owner.
 func _record_implements_words(owner: String, words: Array, line: int) -> void:
 	var names: Array = []
 	for w in words:
@@ -3829,7 +3829,7 @@ func _record_implements_words(owner: String, words: Array, line: int) -> void:
 	(_implements[owner] as Array).append({"names": names, "line": line})
 
 
-## Records one standalone @implements comment token (top level only).
+## Records one standalone \@implements comment token (top level only).
 func _record_implements_tok(owner: String, tok: Dictionary) -> void:
 	var tag := _has_implements_tag(tok)
 	if tag.is_empty():
@@ -4014,7 +4014,7 @@ func _impl_find(owner: String, mname: String, want: String) -> Dictionary:
 	return {"found": false}
 
 
-## Main @implements pass: for every owner with recorded uses, resolve
+## Main \@implements pass: for every owner with recorded uses, resolve
 ## each name (deduped) and check all directly-declared members of the
 ## target against the class (own or inherited). Tuples resolve but are
 ## rejected (only classes, structs and interfaces can be implemented).
@@ -4316,7 +4316,7 @@ static func _ret_list(req: Dictionary) -> Array:
 	return _returns_list(req.get("returns", "any"))
 
 
-## Resolves an @implements name to a target (no errors here; the
+## Resolves an \@implements name to a target (no errors here; the
 ## caller reports). Kinds: script (owner key), engine (type name),
 ## struct, interface. Tuples resolve but are rejected by callers.
 func _implement_target(name: String, owner: String) -> Dictionary:
@@ -4541,7 +4541,7 @@ func _impl_method_sig(node: Dictionary) -> Dictionary:
 	return {"name": str(node.get("name", "")), "static": bool(node.get("is_static", false)), "params": params, "returns": returns}
 
 
-# ------------------------------------------------------- @var helpers
+# ------------------------------------------------------- \@var helpers
 
 ## Single type name behind a vartype TYPE_REF, or "" when absent or
 ## complex (Array[int], dotted, ...): only simple names are compared.
@@ -4582,7 +4582,7 @@ static func _vartype_text(decl: Dictionary, key := "vartype") -> String:
 	return text.strip_edges()
 
 
-## Validates one generic arm of a vartype tree against a @generic
+## Validates one generic arm of a vartype tree against a \@generic
 ## class (arity + template bounds on arguments). Unknown names are
 ## left to the semantic pass on purpose (no double reports).
 ## Returns the class key or "" (skip: non-generic, unknown, engine).
@@ -4626,7 +4626,7 @@ func _check_pending_vartype_bounds() -> void:
 
 ## Validates a vartype (or `->` return type) holding brackets and
 ## stamps node["vartype_ann"] = {head, key, args, raw, line} for the
-## first generic arm over a @generic class. Anything else (simple
+## first generic arm over a \@generic class. Anything else (simple
 ## names, engine generics like Array[int], unknown heads) is skipped
 ## silently, exactly like today.
 func _mark_vartype_on(vt: Variant, node: Dictionary, owner: String) -> void:
@@ -4718,7 +4718,7 @@ func _infer_var_value(value: Variant) -> String:
 	return ""
 
 
-## Reference type of a VAR/CONST declaration node for @var narrowing:
+## Reference type of a VAR/CONST declaration node for \@var narrowing:
 ## explicit vartype first; then `:=`/const inference from the value;
 ## plain `=` (or missing value) means "dynamic" (no promises: checks
 ## that need a type skip it, unlike explicit "Variant" which is strict).
@@ -4788,7 +4788,7 @@ static func _enum_value_names(entry: Dictionary) -> Array:
 	return out
 
 
-# ------------------------------------------------------- @return helpers
+# ------------------------------------------------------- \@return helpers
 
 static func _is_type_start(c: int) -> bool:
 	if c >= 65 and c <= 90:
@@ -4807,7 +4807,7 @@ static func _is_type_part(c: int) -> bool:
 
 
 ## True for plain type identifiers ("Node", "int", "_Helper").
-## Dotted/complex spellings are NOT @return members.
+## Dotted/complex spellings are NOT \@return members.
 static func _is_type_name(name: String) -> bool:
 	if name == "":
 		return false
@@ -4869,7 +4869,7 @@ static func _parse_return_spec(raw_msg: String, what := "@return") -> Dictionary
 
 ## Splits a trailing `notnull`/`nullable` marker off a type expression
 ## (whitespace-boundary match, case-sensitive): {"text", "notnull",
-## "nullable"}. `# @var x Node notnull` flags the declaration;
+## "nullable"}. `# \@var x Node notnull` flags the declaration;
 ## `Node|notnull` does NOT (that parses as an unknown union arm,
 ## guiding to the spelling). Both markers may co-occur in the text;
 ## the contradiction errors at the attach sites, not here.
@@ -5062,7 +5062,7 @@ func _tree_arg_fits(arg: Dictionary, item: Dictionary) -> bool:
 	return false
 
 
-## Phase 2: generic applications of known @tuple types match the
+## Phase 2: generic applications of known \@tuple types match the
 ## definition (arity + per-argument compatibility, recursing into
 ## nested applications). {"ok": true} or {"ok": false, "mismatch": msg}.
 func _check_tree_tuples(node: Dictionary) -> Dictionary:
@@ -5262,7 +5262,7 @@ static func _parse_type_primary(s: String, pos: int, depth: int, what: String) -
 	return {"ok": true, "node": {"kind": "generic", "name": name, "args": args}, "pos": p + 1}
 
 
-## Parses an @var/@param message ("name Type|Union") into
+## Parses an \@var/@param message ("name Type|Union") into
 ## {"ok","name","types","raw"} or {"ok": false, "error"}.
 ## "void" is rejected: neither variables nor parameters can be void.
 static func _parse_var_spec(raw_msg: String, what := "@var") -> Dictionary:
@@ -5313,7 +5313,7 @@ func _engine_chain(tname: String) -> Array:
 	return chain
 
 
-## A @return member is known when it is the script class, a script class
+## A \@return member is known when it is the script class, a script class
 ## or enum member, a roster-known global script class, or a data-dir
 ## JSON file exists for it.
 func _type_known(tname: String) -> bool:
@@ -5374,7 +5374,7 @@ func _derives_from(member: String, declared: String) -> bool:
 	return _script_derives(member, declared)
 
 
-## True for a @tuple name (declared or on disk). Presence-based, so it
+## True for a \@tuple name (declared or on disk). Presence-based, so it
 ## works before _resolve_tuples (attach-time narrowing needs it).
 func _is_tuple_name(nm: String) -> bool:
 	if nm != "" and _tuples.has(nm):
@@ -5383,7 +5383,7 @@ func _is_tuple_name(nm: String) -> bool:
 	return not info.is_empty() and str(info.get("kind", "")) == "tuple"
 
 
-## True for a @struct name (declared or on disk). Same order-free deal.
+## True for a \@struct name (declared or on disk). Same order-free deal.
 func _is_struct_name(nm: String) -> bool:
 	if nm != "" and _structs.has(nm):
 		return true
@@ -5391,7 +5391,7 @@ func _is_struct_name(nm: String) -> bool:
 	return not info.is_empty() and str(info.get("kind", "")) == "struct"
 
 
-## True for an @alias name (declared or on disk). Aliases never work
+## True for an \@alias name (declared or on disk). Aliases never work
 ## as vartypes either (semantic resolves their JSON, so without this
 ## the misuse would pass silently).
 func _is_alias_name(nm: String) -> bool:
@@ -5401,7 +5401,7 @@ func _is_alias_name(nm: String) -> bool:
 	return not info.is_empty() and str(info.get("kind", "")) == "alias"
 
 
-## True for an @interface name (resolved in-memory or same-kind
+## True for an \@interface name (resolved in-memory or same-kind
 ## JSON on disk). Order-free like the tuple/struct twins.
 func _is_interface_name(nm: String) -> bool:
 	if nm == "":
@@ -5440,7 +5440,7 @@ static func _vartype_head(node: Dictionary, key := "vartype") -> String:
 
 ## Flags virtual types used as declared types (vartypes and `->`
 ## arrows): tuples, structs and aliases only refine Array/Dictionary/
-## Variant through @var/@param/@return. Interfaces stay lenient
+## Variant through \@var/@param/@return. Interfaces stay lenient
 ## (documented asymmetry: their README section blesses vartype use).
 func _mark_virtual_vartype(node: Dictionary, owner: String) -> void:
 	var head := _vartype_head(node)
@@ -5546,7 +5546,7 @@ func _script_derives_json(child: String, ancestor: String, seen: Dictionary) -> 
 
 ## Single type name behind a "->" TYPE_REF ("void" included), or "" when
 ## absent or complex (Array[int], dotted, ...): only simple arrows are
-## compared against @return.
+## compared against \@return.
 static func _arrow_name(ref: Variant) -> String:
 	if not (ref is Dictionary):
 		return ""
@@ -5562,7 +5562,7 @@ static func _arrow_name(ref: Variant) -> String:
 	return ""
 
 
-## Validates one @return tag and stamps fn_node["return_ann"].
+## Validates one \@return tag and stamps fn_node["return_ann"].
 ## Malformed or unknown specs error out and record nothing.
 func _attach_return(fn_node: Dictionary, tag: Dictionary, owner: String) -> void:
 	var spec := _parse_return_spec(str(tag.get("message", "")))
@@ -5603,7 +5603,7 @@ func _mark_return_func(fn_node: Dictionary, owner: String) -> void:
 	_attach_return(fn_node, tag, owner)
 
 
-## Marks @return on a value statement (VAR_DECL/CONST_DECL): attaches
+## Marks \@return on a value statement (VAR_DECL/CONST_DECL): attaches
 ## to a LAMBDA value, errors otherwise.
 func _mark_return_stmt(stmt_node: Dictionary, value: Variant, owner: String) -> void:
 	if value is Dictionary and str((value as Dictionary).get("type", "")) == "LAMBDA":
@@ -5612,7 +5612,7 @@ func _mark_return_stmt(stmt_node: Dictionary, value: Variant, owner: String) -> 
 		_error(ERR_RETURN_MISPLACED, "@return can only precede a function or lambda declaration", int(stmt_node.get("line", 0)), int(stmt_node.get("column", 0)), owner)
 
 
-## Validates one @var tag against a VAR/CONST declaration node and
+## Validates one \@var tag against a VAR/CONST declaration node and
 ## stamps decl_node["var_ann"]. Name must equal the declared one; every
 ## type member must be known and narrow the declared/inferred type.
 func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is_const: bool) -> void:
@@ -5877,7 +5877,7 @@ func _fn_display(fn_node: Dictionary) -> String:
 	return "'" + fname + "'"
 
 
-## Runs the @return checks for one function/lambda node: "->"
+## Runs the \@return checks for one function/lambda node: "->"
 ## compatibility first, then value/bare/null return presence. No-op
 ## without a recorded return_ann. Takes Variant: statement values may
 ## be null.
@@ -5942,7 +5942,7 @@ func _record(owner: String, name: String, kind: String, tag: Dictionary, node: D
 	(_members[owner] as Dictionary)[name] = rec
 
 
-## Looks for @deprecated in a node's leading_comments. Returns the tag
+## Looks for \@deprecated in a node's leading_comments. Returns the tag
 ## ({} when absent) for the FIRST TYPE_INFO token carrying it.
 func _leading_tag(node: Dictionary) -> Dictionary:
 	for c in node.get("leading_comments", []):
@@ -6273,7 +6273,7 @@ func _record_private(owner: String, name: String, kind: String, tag: Dictionary,
 	(_private[owner] as Dictionary)[name] = rec
 
 
-## Looks for @private in a node's leading_comments (first hit wins).
+## Looks for \@private in a node's leading_comments (first hit wins).
 func _leading_priv(node: Dictionary) -> Dictionary:
 	for c in node.get("leading_comments", []):
 		if c is Dictionary:
@@ -7072,7 +7072,7 @@ func _resolve_private_owner(base_text: String, from_owner: String) -> String:
 	return ""
 
 
-## Nested-family relation for @private: the same class, an ancestor,
+## Nested-family relation for \@private: the same class, an ancestor,
 ## or a descendant (transitively). The script root ("") is family with
 ## everything in the file, so inner classes freely use outer privates
 ## and vice versa. Siblings and inheritance lines are NOT family.
@@ -7231,7 +7231,7 @@ func _error(kind: String, message: String, line: int, column: int, owner: String
 # Flow-sensitive member verification (Phase 1) with typeof type guards
 # (Phase 2). A dedicated pass walks function bodies in order carrying
 # env {name: [types]}: declared types outside guards, narrowed types
-# inside `if typeof(x) == T` branches, @var/@param facts in order.
+# inside `if typeof(x) == T` branches, \@var/@param facts in order.
 # Anything else (dynamic plain-`=` variables, uninferrable values,
 # super, call results without known returns) skips verification.
 # Objects are assumed to hold ONLY declared and inherited members (no
@@ -7845,7 +7845,7 @@ func _script_seg(owner_key: String, seg: String, is_call: bool, link_args := [])
 
 
 ## Declared types of a VAR/CONST/PARAM node as a list ([] = dynamic).
-## Before-decl @var / @param facts win, then explicit vartype, then
+## Before-decl \@var / \@param facts win, then explicit vartype, then
 ## `:=`/const inference. Plain `=` stays dynamic on purpose.
 func _flow_decl_types(node: Dictionary, is_const: bool, is_param: bool) -> Array:
 	if node.has("var_ann"):
@@ -7983,7 +7983,7 @@ func _base_decl_node(base: String, fn: Variant, scope: Dictionary, owner: String
 
 
 ## Generic arguments behind a chain base for one resolved link key:
-## the declaration vartype first, then @var/@param stamped trees whose
+## the declaration vartype first, then \@var/@param stamped trees whose
 ## head resolves to the key. [] when absent or mismatched. Pure.
 func _link_vartype_args(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, key: String) -> Array:
 	if key == "":
@@ -9932,7 +9932,7 @@ const ENV_TREE_PREFIX := "@tree:"
 
 
 ## Flow notnull marks ride under "@notnull:"<name> keys: set by
-## notnull @var facts and by the non-null side of `==`/`!=` null
+## notnull \@var facts and by the non-null side of `==`/`!=` null
 ## guards, read by the `= null` assignment check.
 const ENV_NOTNULL_PREFIX := "@notnull:"
 ## Flow watch marks ride under "@watch:"<name> keys: set when a name
@@ -9975,7 +9975,7 @@ func _decl_has_type(node: Dictionary) -> bool:
 
 
 ## True when a chain base is a declared-but-untyped slot (param,
-## local, const or member without any type: no @var/@param stamp, no
+## local, const or member without any type: no \@var/@param stamp, no
 ## vartype, no `:=`/const inference) or a loop/pattern binding (no
 ## declaration exists by construction). env-held names read as flow
 ## state (never untyped here); totally unknown names are not slots.
@@ -10213,7 +10213,7 @@ func _taint_rhs_node(vtoks: Array, scope: Dictionary, fn: Variant, env: Dictiona
 ## explicit user checks, i.e. guard marks, establish intent there);
 ## anything else fully resets (heads, tree, watch and flow marks go —
 ## a stale guard mark must not survive an unknown write).
-## Declaration stamps (`notnull` @var/@param) are permanent and never
+## Declaration stamps (`notnull` \@var/@param) are permanent and never
 ## reset: only flow marks clear. `notnull` targets still error on
 ## `= null` first (via _check_null_assign); the env update follows
 ## regardless, so follow-on uses report runtime truth too. Member
@@ -10358,7 +10358,7 @@ static func _is_typetest_guard(g: Dictionary) -> bool:
 
 
 ## notnull state of a variable in flow: an explicit env mark (notnull
-## @var facts, non-null guard sides) or a notnull @var/@param stamp on
+## \@var facts, non-null guard sides) or a notnull \@var/@param stamp on
 ## its declaration (locals, params, consts, members). Anything else
 ## (including lambda-param shadowing, which this path cannot see)
 ## reads as nullable.
@@ -10377,7 +10377,7 @@ func _flow_notnull(vname: String, fn: Variant, scope: Dictionary, owner: String,
 	return false
 
 
-## Declaration-stamp notnull behind a name (the @var/@param marker,
+## Declaration-stamp notnull behind a name (the \@var/@param marker,
 ## never a flow mark): _base_decl_node with an empty env, so
 ## narrowing heads can never shadow the permanent stamp. Used by the
 ## `= null` write check, where stamps (contracts) error in every
@@ -10396,7 +10396,7 @@ func _decl_notnull(vname: String, fn: Variant, scope: Dictionary, owner: String)
 
 
 ## Watch cause for unguarded member use of a chain base: "declared"
-## for explicit `nullable` marks (stamps, mid-function @var facts via
+## for explicit `nullable` marks (stamps, mid-function \@var facts via
 ## the env taint flag, call-result taint), "policy" for
 ## implicitly-nullable heads under distrust, "" when silent. notnull
 ## state (mark, stamp, guard) always wins; exact-null belongs to the
@@ -10856,7 +10856,7 @@ func _collect_inner_names(node: Dictionary, file_prefix: String, owner_prefix: S
 
 ## Generic parameter names for the class described by a member-table
 ## owner key ("" = root script class, never generic in v1). Updates on
-## every analyze (classes may gain or lose @generic).
+## every analyze (classes may gain or lose \@generic).
 func _generic_for_file(owner: String) -> Array:
 	if owner == "":
 		return []
