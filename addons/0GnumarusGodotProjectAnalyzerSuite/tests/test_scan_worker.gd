@@ -126,7 +126,7 @@ func _r_impl_glue(h) -> void:
 	h.check(true, "process without worker safe")
 	impl._worker = Worker.new()
 	impl._on_filesystem_changed()
-	h.check(impl._warm_restart, "fs change during worker flags restart")
+	h.check(not impl._warm_restart, "fs change during worker starts no warm")
 	h.check(impl._fs_dirty, "fs change during worker dirties live pass")
 	h.check(impl._warm_pending.is_empty(), "fs change during worker starts nothing")
 	impl._worker = null

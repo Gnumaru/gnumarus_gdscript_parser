@@ -1545,8 +1545,8 @@ suites still print, so the marker alone could look green).
   `test_editor_bar.gd` (editor status-bar logic: formatting, counts,
   navigation, hotkey, null-safe resolvers, mock-tree placement and
   real highlight/caret on a `TextEdit`; warm collect/order/step,
-  incremental re-warm on filesystem scans, deferred begin/pump loop
-  and dep-change gating;
+  no auto warm on enable or filesystem scans (dirty flag only),
+  deferred begin/pump loop and dep-change gating;
   origin marker paint; snapshot/restore of foreign highlights and
   exit-time clearing),
   `test_scene.gd` (scene/resource/config parsing: value nodes,
@@ -1666,7 +1666,7 @@ first-painted-line scan).
   also schedules one forced deferred pass: Godot's own validator
   runs after our immediate paint and resets every line background,
   so without it highlights would vanish until the next manual run.
-  On enable, a background warm pass analyzes stale project files in
+  On request, a background scan analyzes project files in
   one WorkerThreadPool task (leaves first via the roster extends
   map, so parents land before children cascade, so cross-file data
   is ready before it is needed): no frame slicing, no main-thread
@@ -1678,11 +1678,11 @@ first-painted-line scan).
   file switches clear a stale bar), because Analyzer statics
   (roster, resolve stack) and user JSON writes belong to the worker
   alone. Teardown cancels between files and joins the task; a scan
-  requested mid-scan queues behind it (warm restarts, manual full
-  scans preempt it). Web builds keep the legacy budgeted frame pump
+  requested mid-scan either queues behind the running one or reports
+  busy. Web builds keep the legacy budgeted frame pump
   (pool tasks run inline there). Enabling never blocks the editor.
-  Editor filesystem rescans re-warm incrementally (a restart when idle, one flagged
-  extra pass otherwise; mtime skips keep both cheap). Repeat triggers
+  Editor filesystem rescans only flag the live analysis dirty, so the
+  next run refreshes even an unchanged buffer. Repeat triggers
   on an unchanged buffer re-analyze only when a referenced script
   JSON changed (new/missing data converges without edits); those
   runs mark the position readout with ` (deps)`.

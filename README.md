@@ -29,10 +29,11 @@ Install from Project → Plugins and open any script:
 - Realtime with debounce, plus a deferred repaint that survives
   Godot's own validator pass. Repeat runs on unchanged buffers
   refresh only when a dependency changed (marked `(deps)`).
-- On enable, a background warm pass pre-analyzes the project in
-  a single WorkerThreadPool task (one scan at a time; realtime
-  analysis pauses while it runs), so cross-file results are ready
-  immediately and the editor never freezes.
+- No scan starts by itself: enabling the plugin warms nothing up,
+  and filesystem rescans only flag the live analysis dirty. Scans
+  run only on request, in a single WorkerThreadPool task (one scan
+  at a time; realtime analysis pauses while it runs), so the editor
+  never freezes.
 - Project → Tools → Gnumaru's Full Scan (or File → Run on the
   `GnumarusGodotProjectAnalyzerSuiteFullScan` script) runs every
   analysis pass over the whole project and merges all errors and

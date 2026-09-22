@@ -416,12 +416,15 @@ func _bar_origin(h) -> void:
 
 func _warm_fs(h) -> void:
 	var impl = Impl.new(null)
+	_check(h, not impl._fs_dirty, "live pass starts clean")
 	impl._on_filesystem_changed()
-	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "idle fs change stays quiet headless")
+	_check(h, impl._fs_dirty, "fs change dirties the live pass")
+	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "idle fs change starts no warm")
+	_check(h, impl._worker == null and impl._warm_gen == 0, "idle fs change schedules nothing")
 	impl._warm_pending = ["res://x.gd"]
 	impl._warm_idx = 1
 	impl._on_filesystem_changed()
-	_check(h, impl._warm_restart, "active fs change flags restart")
+	_check(h, not impl._warm_restart, "active fs change starts no warm either")
 	_check(h, impl._warm_pending == ["res://x.gd"] and impl._warm_idx == 1, "flagged pass untouched")
 	impl.exit_tree()
 	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "exit clears warm state")

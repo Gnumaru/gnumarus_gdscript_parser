@@ -131,7 +131,8 @@ func enter_tree() -> void:
 	ensure_dock()
 	_rewatch_code_edit()
 	analyze_current(false)
-	_start_warm()
+	# No auto warmup: scans start only via the Tools menu item or the
+	# dock button.
 
 
 ## Registers the nullable-policy ProjectSetting once (keeps the user
@@ -345,9 +346,9 @@ static func _worker_available() -> bool:
 
 ## Starts the background warm pass (editor only — headless instances
 ## never pump, so unit tests stay hermetic). Only schedules: the
-## collection itself runs deferred in _warm_begin, so enabling the
-## plugin (checkbox toggle) returns immediately and the editor stays
-## responsive while files stream in one frame at a time.
+## collection itself runs deferred in _warm_begin. Not called
+## automatically (no warmup on enable or on filesystem rescans);
+## kept as the programmatic entry behind manual triggers.
 func _start_warm() -> void:
 	_warm_pending = []
 	_warm_idx = 0
@@ -599,21 +600,13 @@ func _hook_filesystem(connect_now: bool) -> void:
 		(fs as Object).disconnect("filesystem_changed", _on_filesystem_changed)
 
 
-## Filesystem rescan (save/create/delete): restart the warm pass when
-## idle so it picks up new files, else flag one restart at pass end
-## (mtime skips keep both cheap; at most one extra pass). Also flags
-## the live analysis dirty: the next analyze_current re-runs (cheap
-## token scan included) even on an unchanged buffer, so a save
-## elsewhere that breaks or fixes a ref shows up immediately.
+## Filesystem rescan (save/create/delete): marks the live analysis
+## dirty so the next analyze_current re-runs even on an unchanged
+## buffer (a save elsewhere that breaks or fixes a ref shows up
+## immediately). Never starts a scan: warmup runs only via the Tools
+## menu item or the dock button.
 func _on_filesystem_changed() -> void:
 	_fs_dirty = true
-	if _worker != null:
-		_warm_restart = true
-		return
-	if _warm_pending.is_empty():
-		_start_warm()
-	else:
-		_warm_restart = true
 
 
 ## Project > Tools entry for the aggregated full scan (every analysis
