@@ -5673,29 +5673,101 @@ func _scope_kind(scope: Variant, name: String) -> String:
 
 
 ## First VAR/CONST declaration named `name` under body, never crossing
-## a nested function/class/accessor boundary. {} when absent.
-func _find_body_decl(body: Variant, name: String) -> Dictionary:
+## a nested function/class/accessor boundary. {} when absent. When
+## use_line >= 1, prefers the declaration visible at that line
+## instead (see _find_visible_decl): a block-nested shadowing
+## declaration stops hiding the outer one after its block, so a later
+## function-level redeclaration wins for later uses. Falls back to
+## the first match when nothing qualifies, keeping order-only
+## lookups on legacy behavior.
+func _find_body_decl(body: Variant, name: String, use_line := 0) -> Dictionary:
+	if use_line >= 1:
+		var vis := _find_visible_decl(body, name, use_line)
+		if not vis.is_empty():
+			return vis
+	var all: Array = []
+	_collect_body_decls(body, name, all)
+	if all.is_empty():
+		return {}
+	return all[0]
+
+
+## Every VAR/CONST declaration named `name` under body in source
+## order, never crossing a nested function/class/accessor boundary.
+## Shared traversal behind _find_body_decl (first match) and
+## _find_visible_decl (use-site match).
+static func _collect_body_decls(body: Variant, name: String, out: Array) -> void:
 	if body is Array:
 		for e in body:
-			var hit := _find_body_decl(e, name)
-			if not hit.is_empty():
-				return hit
-		return {}
+			_collect_body_decls(e, name, out)
+		return
 	if not (body is Dictionary):
-		return {}
+		return
 	var d: Dictionary = body
 	var t := str(d.get("type", ""))
 	if t == "FUNC_DECL" or t == "LAMBDA" or t == "CLASS_DECL" or t == "ACCESSOR":
-		return {}
+		return
 	if (t == "VAR_DECL" or t == "CONST_DECL") and str(d.get("name", "")) == name:
-		return d
+		out.append(d)
 	for k in d.keys():
 		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
 			continue
-		var hit2 := _find_body_decl(d[k], name)
-		if not hit2.is_empty():
-			return hit2
-	return {}
+		_collect_body_decls(d[k], name, out)
+
+
+## Declaration of `name` visible at use_line, replaying the body in
+## source order with real block frames: entering a nested block pushes
+## its declarations, leaving restores the outer map — so a name
+## redeclared at function level after a shadowing block resolves to
+## the outer declaration for later uses (and the inner one for uses
+## inside the block), like execution would see it. Pure.
+## A block-nested declaration still resolves for out-of-scope uses
+## (already a Godot error) via line order alone: lenient, matching
+## legacy behavior, and never hiding a later function-level
+## redeclaration (the reported false positive). {} when nothing was
+## declared on/before use_line (callers fall back to first match).
+static func _find_visible_decl(body: Variant, name: String, use_line: int) -> Dictionary:
+	var frame := {}
+	if body is Array:
+		_replay_visible_into(body, name, use_line, frame)
+	elif body is Dictionary and str((body as Dictionary).get("type", "")) == "BLOCK":
+		_replay_visible_into((body as Dictionary).get("children", []), name, use_line, frame)
+	else:
+		_replay_visible_into(body, name, use_line, frame)
+	return frame.get(name, {})
+
+
+## One replay step: records VAR/CONST declarations of `name` starting
+## on/before use_line into frame; nested BLOCKs run in a pushed copy
+## that is discarded on exit (their bindings die with the block).
+## Never crosses a nested function/class/accessor boundary, mirroring
+## _collect_body_decls.
+static func _replay_visible_into(node: Variant, name: String, use_line: int, frame: Dictionary) -> void:
+	if node is Array:
+		for e in node:
+			_replay_visible_into(e, name, use_line, frame)
+		return
+	if not (node is Dictionary):
+		return
+	var d: Dictionary = node
+	var t := str(d.get("type", ""))
+	if t == "FUNC_DECL" or t == "LAMBDA" or t == "CLASS_DECL" or t == "ACCESSOR":
+		return
+	if t == "BLOCK":
+		var saved := frame.duplicate()
+		_replay_visible_into(d.get("children", []), name, use_line, frame)
+		frame.clear()
+		for k in saved.keys():
+			frame[k] = saved[k]
+		return
+	if (t == "VAR_DECL" or t == "CONST_DECL") and str(d.get("name", "")) == name:
+		var dl := int(d.get("line", 0))
+		if dl >= 1 and dl <= use_line:
+			frame[name] = d
+	for k in d.keys():
+		if k in ["tokens", "args", "annotations", "leading_comments", "header_comment", "deprecated", "private", "return_ann", "var_ann", "param_ann", "analyzer_errors", "analyzer_warnings", "semantic_errors", "user_types_written"]:
+			continue
+		_replay_visible_into(d[k], name, use_line, frame)
 
 
 ## Member VAR/CONST declaration node under owner_key, {} when absent
@@ -5718,7 +5790,7 @@ func _member_var_node(owner_key: String, name: String) -> Dictionary:
 ## Resolves a free-@var name to {"node","is_const","is_param"} for
 ## narrowing, {"bad": kind} for existing non-variables, {} when nothing
 ## matches. Scope-first (locals and params shadow members).
-func _free_var_target(vname: String, fn_node: Dictionary, scope: Dictionary, owner: String) -> Dictionary:
+func _free_var_target(vname: String, fn_node: Dictionary, scope: Dictionary, owner: String, use_line := 0) -> Dictionary:
 	var kind := _scope_kind(scope, vname)
 	if kind != "":
 		if kind in ["func", "class", "signal"]:
@@ -5728,7 +5800,7 @@ func _free_var_target(vname: String, fn_node: Dictionary, scope: Dictionary, own
 				if p is Dictionary and str((p as Dictionary).get("name", "")) == vname:
 					return {"node": p, "is_const": false, "is_param": true}
 			return {"node": {}, "is_const": false, "is_param": true}
-		var decl := _find_body_decl(fn_node.get("body", null), vname)
+		var decl := _find_body_decl(fn_node.get("body", null), vname, use_line)
 		if not decl.is_empty():
 			return {"node": decl, "is_const": str(decl.get("type", "")) == "CONST_DECL", "is_param": false}
 		return {"node": {}, "is_const": false, "is_param": false}
@@ -5752,7 +5824,7 @@ func _free_var_target(vname: String, fn_node: Dictionary, scope: Dictionary, own
 func _check_free_var(spec: Dictionary, scope: Dictionary, owner: String, fn_node: Dictionary) -> void:
 	var line := int(spec.get("line", 0))
 	var vname := str(spec.get("name", ""))
-	var target := _free_var_target(vname, fn_node, scope, owner)
+	var target := _free_var_target(vname, fn_node, scope, owner, line)
 	if target.is_empty():
 		_error(ERR_VAR_UNKNOWN, "no variable '" + vname + "' in function " + _fn_display(fn_node), line, 0, owner)
 		return
@@ -6554,35 +6626,36 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 		_walk_lambda(d, scope, owner)
 		return
 	if t == "BLOCK":
-		_walk(d.get("children", []), scope, owner)
+		_walk(d.get("children", []), _new_scope(scope), owner)
 		return
 	if t == "IF_STMT":
 		_check_expr_tokens(_as_tokens(d.get("condition", null)), scope, owner)
-		_walk(d.get("then", null), scope, owner)
+		_walk_branch(d.get("then", null), scope, owner)
 		for e in d.get("elifs", []):
 			if e is Dictionary:
 				_check_expr_tokens(_as_tokens((e as Dictionary).get("condition", null)), scope, owner)
-				_walk((e as Dictionary).get("body", null), scope, owner)
+				_walk_branch((e as Dictionary).get("body", null), scope, owner)
 		if d.get("else_body", null) is Dictionary:
-			_walk(d.get("else_body", null), scope, owner)
+			_walk_branch(d.get("else_body", null), scope, owner)
 		return
 	if t == "FOR_STMT":
 		_check_expr_tokens(_as_tokens(d.get("iter", null)), scope, owner)
+		var fscope = _new_scope(scope)
 		var target: Variant = d.get("target", null)
 		if target is Dictionary and str((target as Dictionary).get("type", "")) == "IDENTIFIER":
-			_scope_add(scope, str((target as Dictionary).get("value", "")), "loop")
-		_walk(d.get("body", null), scope, owner)
+			_scope_add(fscope, str((target as Dictionary).get("value", "")), "loop")
+		_walk(d.get("body", null), fscope, owner)
 		return
 	if t == "WHILE_STMT":
 		_check_expr_tokens(_as_tokens(d.get("condition", null)), scope, owner)
-		_walk(d.get("body", null), scope, owner)
+		_walk_branch(d.get("body", null), scope, owner)
 		return
 	if t == "MATCH_STMT":
 		_check_expr_tokens(_as_tokens(d.get("subject", null)), scope, owner)
 		for b in d.get("branches", []):
 			if b is Dictionary and str((b as Dictionary).get("type", "")) == "MATCH_BRANCH":
 				_walk_pattern((b as Dictionary).get("pattern", null), scope, owner)
-				_walk((b as Dictionary).get("body", null), scope, owner)
+				_walk_branch((b as Dictionary).get("body", null), scope, owner)
 		return
 	if t == "RETURN_STMT":
 		_check_expr_tokens(_as_tokens(d.get("value", null)), scope, owner)
@@ -6604,15 +6677,33 @@ func _walk(node: Variant, scope: Dictionary, owner: String) -> void:
 				for pair in detail.get("alias_pair", []):
 					if pair is Dictionary and (pair as Dictionary).has("expr"):
 						_check_expr_tokens(_as_tokens((pair as Dictionary).get("expr", null)), scope, owner)
+		var ascope = _new_scope(scope)
 		for p in d.get("params", []):
 			if p is Dictionary:
-				_scope_add(scope, str((p as Dictionary).get("name", "")), "param")
-		_walk(d.get("body", null), scope, owner)
-		_process_free_vars(d.get("body", null), scope, owner, null)
+				_scope_add(ascope, str((p as Dictionary).get("name", "")), "param")
+		_walk_root_body(d.get("body", null), ascope, owner)
+		_process_free_vars(d.get("body", null), ascope, owner, null)
 		return
 	if t == "COMMENT" or t == "DOC_COMMENT" or t == "TYPE_INFO" or t == "ANNOTATION_DECL" or t == "SYNTAX_ERROR":
 		return
 	_walk_generic(d, scope, owner)
+
+
+## Walks a branch body (if/for/while/match parts) in a child scope:
+## GDScript block bindings die with their block, so names declared
+## inside never leak into the enclosing scope after it ends.
+func _walk_branch(body: Variant, scope: Dictionary, owner: String) -> void:
+	_walk(body, _new_scope(scope), owner)
+
+
+## Walks a function/lambda/accessor root body in its own scope: a
+## BLOCK wrapper here IS the function scope (not a nested block), so
+## its children walk directly instead of through the BLOCK rule.
+func _walk_root_body(body: Variant, scope: Dictionary, owner: String) -> void:
+	if body is Dictionary and str((body as Dictionary).get("type", "")) == "BLOCK":
+		_walk((body as Dictionary).get("children", []), scope, owner)
+		return
+	_walk(body, scope, owner)
 
 
 func _walk_generic(d: Dictionary, scope: Dictionary, owner: String) -> void:
@@ -6670,7 +6761,7 @@ func _walk_func(node: Dictionary, scope: Dictionary, owner: String) -> void:
 	var rt: Variant = node.get("return_type", null)
 	if rt is Dictionary:
 		_check_type_ref(rt, fscope, owner)
-	_walk(node.get("body", null), fscope, owner)
+	_walk_root_body(node.get("body", null), fscope, owner)
 	_check_return_ann(node, owner)
 	_process_free_vars(node.get("body", null), fscope, owner, node)
 
@@ -6692,7 +6783,7 @@ func _walk_lambda(node: Dictionary, scope: Dictionary, owner: String) -> void:
 		if p is Dictionary:
 			_scope_add(lscope, str((p as Dictionary).get("name", "")), "param")
 	_collect_func_bindings(node.get("body", null), lscope)
-	_walk(node.get("body", null), lscope, owner)
+	_walk_root_body(node.get("body", null), lscope, owner)
 	_check_return_ann(node, owner)
 	_process_free_vars(node.get("body", null), lscope, owner, node)
 
@@ -7907,7 +7998,9 @@ func _engine_info(tname: String) -> Dictionary:
 ## - {"kind": "script", "key"}: script class or self (owner key).
 ## - {"kind": "instance", "types": [...]}: known value types (engine
 ##   or script names; resolved per segment).
-func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, overlay: Dictionary) -> Dictionary:
+## use_line (a base-token line, 0 = off) makes local resolution
+## block-scope aware (later redeclarations win for later uses).
+func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, overlay: Dictionary, use_line := 0) -> Dictionary:
 	if vname == "" or vname == "_":
 		return {"kind": "skip"}
 	if (overlay as Dictionary).has(vname):
@@ -7930,7 +8023,7 @@ func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, en
 				return {"kind": "skip"}
 			return {"kind": "instance", "types": _flow_decl_types(pnode, false, true)}
 		if kind == "local" or kind == "const":
-			var decl := _find_body_decl(fnd.get("body", null), vname)
+			var decl := _find_body_decl(fnd.get("body", null), vname, use_line)
 			if decl.is_empty():
 				return {"kind": "skip"}
 			return {"kind": "instance", "types": _flow_decl_types(decl, str(decl.get("type", "")) == "CONST_DECL", false)}
@@ -7962,7 +8055,8 @@ func _flow_base(vname: String, fn: Variant, scope: Dictionary, owner: String, en
 ## Declaration node behind a chain base name (param/local/const
 ## scopes, then member vars), {} when shadowed by env/overlay values
 ## or unresolvable. Mirrors _flow_base precedence (nodes only).
-func _base_decl_node(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> Dictionary:
+## use_line (0 = off) makes local resolution block-scope aware.
+func _base_decl_node(base: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, use_line := 0) -> Dictionary:
 	if base == "" or base == "_" or base == "self" or base == "super":
 		return {}
 	if (env as Dictionary).has(base):
@@ -7972,7 +8066,7 @@ func _base_decl_node(base: String, fn: Variant, scope: Dictionary, owner: String
 	if kind == "param":
 		return _find_param_node(fnd.get("params", []), base)
 	if kind == "local" or kind == "const":
-		return _find_body_decl(fnd.get("body", null), base)
+		return _find_body_decl(fnd.get("body", null), base, use_line)
 	if kind != "":
 		return {}
 	for o in [owner, ""]:
@@ -8942,7 +9036,7 @@ func _check_cross_static(base: String, tokens: Array, j: int, scope: Dictionary,
 ## the chain.
 func _verify_chain(tokens: Array, i: int, scope: Dictionary, owner: String, fn: Variant, env: Dictionary, overlay: Dictionary) -> int:
 	var base := str((tokens[i] as Dictionary).get("value", ""))
-	var fb := _flow_base(base, fn, scope, owner, env, overlay)
+	var fb := _flow_base(base, fn, scope, owner, env, overlay, int((tokens[i] as Dictionary).get("line", 0)))
 	var j := i + 1
 	var kind := str(fb.get("kind", ""))
 	if kind == "skip":
@@ -9502,6 +9596,27 @@ static func _guard_bounds(tokens: Array) -> Array:
 
 ## Recognizes `typeof(x) == TYPE_Y` / `!=` (outer parens and a leading
 ## not/! flip polarity). Returns {name, types, eq} or {}.
+## Line of tokens[i] (0 when missing/out of range). Bounds-safe line
+## reader so guard dicts can stamp their subject line for
+## block-scope-aware target resolution downstream.
+static func _guard_tok_line(tokens: Array, i: int) -> int:
+	if i < 0 or i >= tokens.size():
+		return 0
+	if not (tokens[i] is Dictionary):
+		return 0
+	return int((tokens[i] as Dictionary).get("line", 0))
+
+
+## Line of the first token dict in a condition array (0 when absent).
+## Use-site line for guard application (any token of the condition is
+## safe: no declaration can start inside a condition).
+static func _cond_use_line(cond: Array) -> int:
+	for t in cond:
+		if t is Dictionary:
+			return int((t as Dictionary).get("line", 0))
+	return 0
+
+
 func _guard_typeof(tokens: Array) -> Dictionary:
 	var be := _guard_bounds(tokens)
 	var s := int(be[0])
@@ -9537,7 +9652,7 @@ func _guard_typeof(tokens: Array) -> Dictionary:
 	var eq := op == "=="
 	if neg:
 		eq = not eq
-	return {"name": _vt_val(tokens, s + 2), "types": [tname], "eq": eq}
+	return {"name": _vt_val(tokens, s + 2), "types": [tname], "eq": eq, "line": _guard_tok_line(tokens, s + 2)}
 
 
 ## Dotted (or bare) value tokens shaped like a type reference: single
@@ -9561,7 +9676,7 @@ static func _dotted_parts(tokens: Array, s: int, e: int) -> Array:
 ## Recognizes `x is Y` / `x is not Y` (leading not/! flips). Y is a
 ## single known type name or a dotted path (`Outer.Inner`); dotted
 ## paths resolve through the roster like names. Returns {name, types,
-## eq} or {}.
+## eq, line} or {}.
 func _guard_is(tokens: Array) -> Dictionary:
 	var be := _guard_bounds(tokens)
 	var s := int(be[0])
@@ -9596,7 +9711,7 @@ func _guard_is(tokens: Array) -> Dictionary:
 	var eq := positive
 	if neg:
 		eq = not eq
-	return {"name": _vt_val(tokens, s), "types": [yname], "eq": eq}
+	return {"name": _vt_val(tokens, s), "types": [yname], "eq": eq, "line": _guard_tok_line(tokens, s)}
 
 
 ## Recognizes `x == null` / `x != null` (either order, leading not/!
@@ -9630,12 +9745,12 @@ func _guard_null(tokens: Array) -> Dictionary:
 	var eq := op == "=="
 	if neg:
 		eq = not eq
-	return {"name": vname, "types": ["null"], "eq": eq}
+	return {"name": vname, "types": ["null"], "eq": eq, "line": _guard_tok_line(tokens, s)}
 
 
 ## Recognizes bare `x` / `not x` / `!x` truthiness checks. Shapes only:
 ## object validation happens at application (env visible there), where
-## non-objects are ignored. Returns {name, bare_null, eq} with
+## non-objects are ignored. Returns {name, bare_null, eq, line} with
 ## null-guard polarity (`not x` behaves like `x == null`, `x` like
 ## `x != null` for the flag; `==`-style heads for the null side).
 static func _guard_bare_null(tokens: Array) -> Dictionary:
@@ -9653,7 +9768,7 @@ static func _guard_bare_null(tokens: Array) -> Dictionary:
 	var vname := _vt_val(tokens, s)
 	if vname == "" or vname == "_":
 		return {}
-	return {"name": vname, "bare_null": true, "eq": neg}
+	return {"name": vname, "bare_null": true, "eq": neg, "line": _guard_tok_line(tokens, s)}
 
 
 ## Applies one guard's holds/fails narrowing to a then/else env pair
@@ -9668,12 +9783,12 @@ func _narrow_guard_envs(g: Dictionary, fn: Variant, scope: Dictionary, owner: St
 	if g.is_empty():
 		return
 	var fnd: Dictionary = fn if fn is Dictionary else {}
-	var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
+	var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner, int(g.get("line", 0)))
 	if target.is_empty() or target.has("bad"):
 		return
 	if bool(g.get("bare_null", false)):
 		var bn := str(g.get("name", ""))
-		if bn != "" and _guard_notnull_object(bn, fn, scope, owner, env):
+		if bn != "" and _guard_notnull_object(bn, fn, scope, owner, env, int(g.get("line", 0))):
 			if bool(g.get("eq", true)):
 				_env_set(then_env, bn, ["null"], {})
 				(else_env as Dictionary)[ENV_NOTNULL_PREFIX + bn] = true
@@ -9723,12 +9838,13 @@ func _apply_null_family_guard(cond: Array, fn: Variant, scope: Dictionary, owner
 	var g := _guard_null(cond)
 	if g.is_empty():
 		g = _guard_bare_null(cond)
+	var cline := _cond_use_line(cond)
 	if not g.is_empty():
 		var fnd: Dictionary = fn if fn is Dictionary else {}
-		var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner)
+		var target := _free_var_target(str(g.get("name", "")), fnd, scope, owner, cline)
 		if target.is_empty() or target.has("bad"):
 			return
-		if bool(g.get("bare_null", false)) and not _guard_notnull_object(str(g.get("name", "")), fn, scope, owner, env):
+		if bool(g.get("bare_null", false)) and not _guard_notnull_object(str(g.get("name", "")), fn, scope, owner, env, cline):
 			return
 		if bool(g.get("eq", true)):
 			_env_set(env, str(g.get("name", "")), ["null"], {})
@@ -9742,7 +9858,7 @@ func _apply_null_family_guard(cond: Array, fn: Variant, scope: Dictionary, owner
 	var tname := str(t.get("name", ""))
 	if tname == "":
 		return
-	var ttarget := _free_var_target(tname, tfnd, scope, owner)
+	var ttarget := _free_var_target(tname, tfnd, scope, owner, int(t.get("line", 0)))
 	if ttarget.is_empty() or ttarget.has("bad"):
 		return
 	(env as Dictionary)[ENV_NOTNULL_PREFIX + tname] = true
@@ -9762,7 +9878,7 @@ func _match_null_env(node: Dictionary, branch: Dictionary, fn: Variant, scope: D
 	if ptoks.size() != 1 or not (ptoks[0] is Dictionary) or str((ptoks[0] as Dictionary).get("type", "")) != "NULL":
 		return benv
 	var fnd: Dictionary = fn if fn is Dictionary else {}
-	var target := _free_var_target(vname, fnd, scope, owner)
+	var target := _free_var_target(vname, fnd, scope, owner, int((stoks[0] as Dictionary).get("line", 0)))
 	if target.is_empty() or target.has("bad"):
 		return benv
 	_env_set(benv, vname, ["null"], {})
@@ -9772,7 +9888,7 @@ func _match_null_env(node: Dictionary, branch: Dictionary, fn: Variant, scope: D
 ## True when vname is provably an Object in flow (env heads or
 ## declaration types, every head object-like): unknown, dynamic and
 ## value-typed names stay out, so truthiness never misreads them.
-func _guard_notnull_object(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> bool:
+func _guard_notnull_object(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, use_line := 0) -> bool:
 	if vname == "" or vname == "_":
 		return false
 	if (env as Dictionary).has(vname):
@@ -9783,7 +9899,7 @@ func _guard_notnull_object(vname: String, fn: Variant, scope: Dictionary, owner:
 			if not _is_object_like(str(h)):
 				return false
 		return true
-	var node := _base_decl_node(vname, fn, scope, owner, env)
+	var node := _base_decl_node(vname, fn, scope, owner, env, use_line)
 	if node.is_empty():
 		return false
 	var ntype := str(node.get("type", ""))
@@ -9820,13 +9936,13 @@ func _const_type_tokens(tokens: Array) -> String:
 ## initialized with one, a member, or a parameter default) to the
 ## narrowed type name, or "". Reassignments are not tracked: the
 ## initializer shape alone decides.
-func _guard_const_type(vname: String, fn: Variant, scope: Dictionary, owner: String) -> String:
+func _guard_const_type(vname: String, fn: Variant, scope: Dictionary, owner: String, use_line := 0) -> String:
 	var fnd: Dictionary = fn if fn is Dictionary else {}
 	if _scope_kind(scope, vname) == "param":
 		var pnode := _find_param_node(fnd.get("params", []), vname)
 		if not pnode.is_empty():
 			return _const_type_tokens(_as_tokens((pnode as Dictionary).get("default", null)))
-	var decl := _find_body_decl(fnd.get("body", null), vname)
+	var decl := _find_body_decl(fnd.get("body", null), vname, use_line)
 	if not decl.is_empty():
 		return _const_type_tokens(_as_tokens(decl.get("value", null)))
 	for o in [owner, ""]:
@@ -9875,7 +9991,7 @@ func _guard_instanceof(tokens: Array, fn: Variant, scope: Dictionary, owner: Str
 				if mapped != "" and _type_known(mapped):
 					resolved = mapped
 			else:
-				resolved = _guard_const_type(tname, fn, scope, owner)
+				resolved = _guard_const_type(tname, fn, scope, owner, _guard_tok_line(tokens, s + 2))
 		else:
 			var parts := _dotted_parts(tokens, tstart, tend)
 			if not parts.is_empty():
@@ -9891,7 +10007,7 @@ func _guard_instanceof(tokens: Array, fn: Variant, scope: Dictionary, owner: Str
 	if resolved == "":
 		return {}
 	var eq := not neg
-	return {"name": _vt_val(tokens, s + 2), "types": [resolved], "eq": eq}
+	return {"name": _vt_val(tokens, s + 2), "types": [resolved], "eq": eq, "line": _guard_tok_line(tokens, s + 2)}
 
 
 ## Any recognized guard: typeof first, then `is`, then `== null`,
@@ -10021,7 +10137,7 @@ func _apply_return_taint(vname: String, vtoks: Array, scope: Dictionary, fn: Var
 	if not node.is_empty():
 		if _func_returns_nullable(node):
 			(env as Dictionary)[ENV_WATCH_PREFIX + vname] = true
-		if (_func_returns_nullable(node) or _return_ann_has_null(node)) and not _decl_has_type(_assign_target(vname, fn, scope, owner, env)):
+		if (_func_returns_nullable(node) or _return_ann_has_null(node)) and not _decl_has_type(_assign_target(vname, fn, scope, owner, env, _cond_use_line(vtoks))):
 			var rtypes := _return_ann_types(node)
 			if not rtypes.is_empty():
 				_env_set(env, vname, rtypes, {})
@@ -10032,7 +10148,7 @@ func _apply_return_taint(vname: String, vtoks: Array, scope: Dictionary, fn: Var
 	if bool(jsig.get("nullable", false)):
 		(env as Dictionary)[ENV_WATCH_PREFIX + vname] = true
 	var jtypes: Array = jsig.get("types", [])
-	if not jtypes.is_empty() and not _decl_has_type(_assign_target(vname, fn, scope, owner, env)):
+	if not jtypes.is_empty() and not _decl_has_type(_assign_target(vname, fn, scope, owner, env, _cond_use_line(vtoks))):
 		_env_set(env, vname, jtypes, {})
 
 
@@ -10489,7 +10605,7 @@ func _flow_assign_stmt(node: Dictionary, scope: Dictionary, fn: Variant, env: Di
 	if not (toks[1] is Dictionary) or str((toks[1] as Dictionary).get("type", "")) != "OPERATOR" or str((toks[1] as Dictionary).get("value", "")) != "=":
 		return
 	var vname := str((toks[0] as Dictionary).get("value", ""))
-	_flow_assign_call(vname, toks.slice(2), _assign_target(vname, fn, scope, owner, env), scope, fn, env, owner)
+	_flow_assign_call(vname, toks.slice(2), _assign_target(vname, fn, scope, owner, env, int((toks[0] as Dictionary).get("line", 0))), scope, fn, env, owner)
 
 
 ## Errors `vname = null` (bare null literal, trailing notes ignored)
@@ -10530,7 +10646,9 @@ func _check_null_assign(toks: Array, node: Dictionary, scope: Dictionary, fn: Va
 
 ## Resolves an `x = ...` reassignment target to its declaration node
 ## ({} when dynamic/unknown: the call result is fresh information).
-func _assign_target(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary) -> Dictionary:
+## use_line (0 = off) makes local resolution block-scope aware, like
+## every other declaration lookup.
+func _assign_target(vname: String, fn: Variant, scope: Dictionary, owner: String, env: Dictionary, use_line := 0) -> Dictionary:
 	if vname == "" or (env as Dictionary).has(vname):
 		return {}
 	var fnd: Dictionary = fn if fn is Dictionary else {}
@@ -10538,7 +10656,7 @@ func _assign_target(vname: String, fn: Variant, scope: Dictionary, owner: String
 	if kind == "param":
 		return _find_param_node(fnd.get("params", []), vname)
 	if kind == "local" or kind == "const":
-		return _find_body_decl(fnd.get("body", null), vname)
+		return _find_body_decl(fnd.get("body", null), vname, use_line)
 	if kind != "":
 		return {}
 	for o in [owner, ""]:
@@ -10561,7 +10679,7 @@ func _flow_facts(node: Dictionary, scope: Dictionary, owner: String, fn: Variant
 		if not (spec is Dictionary):
 			continue
 		var vname := str((spec as Dictionary).get("name", ""))
-		var target := _free_var_target(vname, fnd, scope, owner)
+		var target := _free_var_target(vname, fnd, scope, owner, int((spec as Dictionary).get("line", 0)))
 		if target.is_empty() or target.has("bad"):
 			continue
 		_env_set(env, vname, (spec as Dictionary).get("types", []), (spec as Dictionary).get("tree", {}))
@@ -10600,10 +10718,10 @@ func _apply_guard_clause(node: Dictionary, g: Dictionary, scope: Dictionary, own
 	if nname == "":
 		return
 	var fnd: Dictionary = fn if fn is Dictionary else {}
-	var target := _free_var_target(nname, fnd, scope, owner)
+	var target := _free_var_target(nname, fnd, scope, owner, int(node.get("line", 0)))
 	if target.is_empty() or target.has("bad"):
 		return
-	if bare and not _guard_notnull_object(nname, fn, scope, owner, env):
+	if bare and not _guard_notnull_object(nname, fn, scope, owner, env, int(node.get("line", 0))):
 		return
 	var eq := bool(g.get("eq", true))
 	var holding: Variant = null

@@ -442,9 +442,24 @@ static func editor_interface() -> Object:
 	return ei
 
 
+## Switches the editor main screen ("2D", "3D", "Script", "Game",
+## "AssetLib"). False headless or without editor support; harmless
+## when already there.
+static func show_main_screen(screen_name: String) -> bool:
+	if screen_name.strip_edges() == "":
+		return false
+	var ei := editor_interface()
+	if ei == null or not (ei as Object).has_method("set_main_screen_editor"):
+		return false
+	(ei as Object).call("set_main_screen_editor", screen_name)
+	return true
+
+
 ## Opens a .gd path in the script editor and moves to a 1-based line
 ## (line jump via the ScriptEditor fallback, since edit_script takes
-## the script only here). False headless or when anything is missing.
+## the script only here), revealing the Script workspace: edit_script
+## alone leaves 2D/3D/Game/AssetLib on screen. False headless or when
+## anything is missing.
 static func open_script_at(path: String, line: int) -> bool:
 	var ei := editor_interface()
 	if ei == null or not (ei as Object).has_method("edit_script"):
@@ -455,6 +470,7 @@ static func open_script_at(path: String, line: int) -> bool:
 	if not (res is Script):
 		return false
 	(ei as Object).call("edit_script", res)
+	show_main_screen("Script")
 	var se := script_editor()
 	if se != null and line >= 1:
 		goto_line(null, se, line)

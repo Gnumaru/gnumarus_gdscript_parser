@@ -19,6 +19,7 @@ func run() -> Dictionary:
 	_f_instanceof(h)
 	_f_facts(h)
 	_f_script(h)
+	_f_block_scope(h)
 	return h.result()
 
 
@@ -118,3 +119,21 @@ func _f_script(h) -> void:
 	h.check(_has_missing(h.analyze_text("extends Node\nvar health := 10\nfunc f():\n\tvar n: Node\n\tprint(n.health)\n", "res://tests/tmp_flow_a5.gd"), "missing_member", "has no member 'health'"), "script member via engine base errors")
 	h.check(_clean(h.analyze_text("extends Node\nclass Item:\n\tvar id := 0\nfunc f():\n\tvar n: Node\n\tif n is Item:\n\t\tprint(n.id)\n", "res://tests/tmp_flow_a6.gd")), "is guard suppresses script member")
 	h.check(_clean(h.analyze_text("extends Node\nclass Base:\n\tfunc b():\n\t\tpass\nclass Child extends Base\nfunc f():\n\tvar c := Child.new()\n\tc.b()\n", "res://tests/tmp_flow_a7.gd")), "inherited script member clean")
+
+
+## Block scope: a block-nested declaration stops hiding the outer one
+## after its block (if/for/while), so later uses resolve to the
+## visible declaration; inner uses still see the shadower.
+func _f_block_scope(h) -> void:
+	h.check(_clean(h.analyze_text("extends RefCounted\nstatic func g(v: Variant) -> bool:\n\tif v != null:\n\t\tvar heads: Variant = v\n\t\tif not (heads is Array):\n\t\t\treturn false\n\tvar heads: Array = []\n\tif heads.is_empty():\n\t\treturn false\n\treturn true\n", "res://tests/tmp_flow_b1.gd")), "if shadow then outer redecl clean")
+	h.check(_clean(h.analyze_text("extends RefCounted\nstatic func g() -> bool:\n\tvar i := 0\n\twhile i < 1:\n\t\tvar heads: Variant = i\n\t\ti += 1\n\tvar heads: Array = []\n\tif heads.is_empty():\n\t\treturn false\n\treturn true\n", "res://tests/tmp_flow_b2.gd")), "while shadow then outer redecl clean")
+	h.check(_clean(h.analyze_text("extends RefCounted\nstatic func g() -> bool:\n\tfor i in [1]:\n\t\tvar heads: Variant = i\n\t\tprint(heads)\n\tvar heads: Array = []\n\tif heads.is_empty():\n\t\treturn false\n\treturn true\n", "res://tests/tmp_flow_b3.gd")), "for shadow then outer redecl clean")
+	h.check(_clean(h.analyze_text("extends RefCounted\nstatic func g() -> bool:\n\tvar heads: Array = []\n\tif true:\n\t\tvar heads: Variant = 1\n\t\tprint(heads)\n\tif heads.is_empty():\n\t\treturn false\n\treturn true\n", "res://tests/tmp_flow_b4.gd")), "outer first use after block clean")
+	h.check(_has_missing(h.analyze_text("extends RefCounted\nstatic func g() -> bool:\n\tif true:\n\t\tvar heads: Variant = 1\n\t\tif heads.is_empty():\n\t\t\treturn false\n\treturn true\n", "res://tests/tmp_flow_b5.gd"), "missing_method", "has no method 'is_empty()'"), "inner shadow use still errors")
+	h.check(_clean(h.analyze_text("extends Node\nfunc f(c: bool) -> void:\n\tif c:\n\t\tvar x: int = 1\n\t\tprint(x)\n\tvar x: String = \"a\"\n\t# @var x String\n\tprint(x)\n", "res://tests/tmp_flow_b6.gd")), "free @var binds the visible declaration")
+	h.check(_has_missing(h.analyze_text("extends Node\nfunc f(c: bool) -> void:\n\tif c:\n\t\tvar x: int = 1\n\t\tprint(x)\n\tvar x: String = \"a\"\n\t# @var x Node\n\tprint(x)\n", "res://tests/tmp_flow_b7.gd"), "var_mismatch", "declared as 'String'"), "free @var mismatch names the visible declaration")
+	h.check(_clean(h.analyze_text("extends Node\nfunc f(c: bool, v: Variant) -> void:\n\tif c:\n\t\tvar tc := TYPE_INT\n\t\tprint(tc)\n\tvar tc: Variant.Type = Variant.Type.TYPE_OBJECT\n\tif is_instance_of(v, tc):\n\t\tv.get_class()\n", "res://tests/tmp_flow_b8.gd")), "is_instance_of folds the visible constant holder")
+	h.check(_has_missing(h.analyze_text("extends Node\nfunc f(v: Variant) -> void:\n\tvar tc := TYPE_INT\n\tif is_instance_of(v, tc):\n\t\tv.queue_free()\n", "res://tests/tmp_flow_b9.gd"), "missing_method", "type 'int' has no method"), "inner constant holder still narrows")
+	h.check(_has_missing(h.analyze_text("extends Node\n# @template GcT\n# @param x GcT\n# @return GcT\nfunc gcid(x):\n\treturn x\nfunc f(c: bool) -> void:\n\tif c:\n\t\tvar r: int = 1\n\t\tprint(r)\n\tvar r = gcid(\"a\")\n\tr.bogus_xyz()\n", "res://tests/tmp_flow_b10.gd"), "missing_method", "type 'String' has no method 'bogus_xyz()'"), "reassignment result flows into the visible untyped target")
+	h.check(_has_missing(h.analyze_text("extends Node\n# @template GcT\n# @param x GcT\n# @return GcT\nfunc gcid(x):\n\treturn x\nfunc f() -> void:\n\tvar r = gcid(\"a\")\n\tr.bogus_xyz()\n", "res://tests/tmp_flow_b11.gd"), "missing_method", "type 'String' has no method 'bogus_xyz()'"), "reassignment result flows without shadowing")
+	h.check(_has_missing(h.analyze_text("extends Node\n# @template GcT\n# @param x GcT\n# @return GcT\nfunc gcid(x):\n\treturn x\nfunc f(c: bool) -> void:\n\tif c:\n\t\tvar r: int = 1\n\t\tprint(r)\n\tvar r: String = \"s\"\n\tr = gcid(\"b\")\n\tr.bogus_xyz()\n", "res://tests/tmp_flow_b12.gd"), "missing_method", "type 'String' has no method 'bogus_xyz()'"), "reassignment on visible typed target names it")

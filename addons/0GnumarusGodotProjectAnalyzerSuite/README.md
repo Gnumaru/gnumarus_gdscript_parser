@@ -359,6 +359,16 @@ func myfunc():
   Assignment state is fully tracked instead: `= null` sets exact
   heads, provably-non-null writes mark (distrust) or revert, unknown
   writes reset; call results taint and flow through generics.
+- Block scope: names declared in `if`/`for`/`while`/`match` blocks
+  (and `for` targets) die with their block in the usage walk, and
+  declaration lookups resolve to what is visible at the use line
+  (source-order replay with real block frames) — member-call bases,
+  free-`@var` targets, guard targets (`== null`, bare truthiness,
+  `is`, `typeof`, `is_instance_of`), `Variant.Type` constant holders
+  and `x = ...` reassignment targets all see the same visible
+  declaration, so a block-nested shadower never hides a later
+  function-level redeclaration while inner uses still see the
+  shadower.
 
 ## 7. GnumarusGodotProjectAnalyzerSuiteTextResourceParser
 
@@ -556,7 +566,9 @@ path, so script issues and resource-integrity issues toggle
 independently). A status label counts visible issues and how many
 the filters hide; picking a row navigates to it (same-file `.gd`
 reuses the status-bar path, other scripts open in the script editor,
-scenes open on the main screen). Rescan re-runs the full scan and
+scenes open on the main screen — script jumps also reveal the Script
+workspace, since opening alone leaves 2D/3D/Game/AssetLib on
+screen). Rescan re-runs the full scan and
 reveals the dock; Clear drops the list. Toggle state persists in
 both `EditorSettings` (`gnumarus_analyzer/dock_filters`, which wins
 on load) and the `ScanResults.json` `filters` copy, so it survives
@@ -1518,7 +1530,8 @@ suites still print, so the marker alone could look green).
   `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
   `test_implements.gd` (`@implements` rule),
-  `test_flow.gd` (flow member checks + guards),
+  `test_flow.gd` (flow member checks + guards + block-scope
+  shadowing),
   `test_reuse.gd` (same instance parsing twice must give independent
   results),
   `test_editor_bar.gd` (editor status-bar logic: formatting, counts,

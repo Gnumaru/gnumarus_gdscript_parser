@@ -37,7 +37,8 @@ Install from Project → Plugins and open any script:
   warnings into `.godot/0GnumarusGodotProjectAnalyzerSuiteData/ScanResults.json`.
 - A bottom-panel dock lists every known issue with severity toggles
   (errors / warnings / future notes) and per-type toggles (`gd`,
-  `tscn`, `tres`, `godot`, other); picking a row jumps to it.
+  `tscn`, `tres`, `godot`, other); picking a row jumps to it and
+  reveals the right workspace (Script for scripts).
 - Broken resource refs (`preload`/`load`/`extends`/`@icon`) are
   rechecked live on open, edit and save — no full scan needed.
 

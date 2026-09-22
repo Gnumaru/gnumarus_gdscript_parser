@@ -802,14 +802,17 @@ func _goto_issue(issue: Dictionary) -> void:
 
 
 ## Dock-row navigation: same-file issues reuse the bar path (paint +
-## caret); any other .gd opens in the script editor first, scenes
-## open on the main screen, anything else falls back to the bar path
-## (harmless no-op when the file is not the current one).
+## caret) and reveal the Script workspace; any other .gd opens in the
+## script editor first (also revealing Script), scenes open on the
+## main screen (open_scene_from_path switches to 2D/3D natively),
+## anything else falls back to the bar path (harmless no-op when the
+## file is not the current one).
 func _goto_dock_issue(issue: Dictionary) -> void:
 	var path := str(issue.get("path", ""))
 	var line := int(issue.get("line", 0))
 	var se := EdTree.script_editor()
 	if se != null and (path == "" or path == EdTree.current_path(se)):
+		EdTree.show_main_screen("Script")
 		_goto_issue(issue)
 		return
 	if path.ends_with(".gd"):

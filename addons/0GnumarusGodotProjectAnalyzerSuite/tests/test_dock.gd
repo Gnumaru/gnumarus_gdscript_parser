@@ -229,6 +229,9 @@ func _r_openers(h) -> void:
 	h.check(not EdTree.open_script_at("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd", 1), "open script false headless")
 	h.check(not EdTree.open_scene("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/Node3D.tscn"), "open scene false headless")
 	h.check(not EdTree.open_scene(""), "open empty scene false")
+	h.check(not EdTree.show_main_screen("Script"), "screen switch false headless")
+	h.check(not EdTree.show_main_screen(""), "screen switch empty false")
+	h.check(not EdTree.show_main_screen("   "), "screen switch blank false")
 
 
 func _r_persist(h) -> void:
