@@ -39,10 +39,12 @@ Install from Project → Plugins and open any script:
   warnings into `.godot/0GnumarusGodotProjectAnalyzerSuiteData/ScanResults.json`.
   From the Tools menu it runs in the background pool (same
   exclusive mode as the warm pass); File → Run stays synchronous.
-- A bottom-panel dock lists every known issue with severity toggles
-  (errors / warnings / future notes) and per-type toggles (`gd`,
-  `tscn`, `tres`, `godot`, other); picking a row jumps to it and
-  reveals the right workspace (Script for scripts).
+- A bottom-panel dock with Issues and Files tabs: every known
+  issue with severity toggles (errors / warnings / future notes)
+  and per-type toggles (`gd`, `tscn`, `tres`, `godot`, other);
+  picking a row jumps to it and reveals the right workspace
+  (Script for scripts). The Files tab groups the project file
+  census by extension, with an `addons` include toggle.
 - Broken resource refs (`preload`/`load`/`extends`/`@icon`) are
   rechecked live on open, edit and save — no full scan needed.
 

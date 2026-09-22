@@ -24,6 +24,10 @@ func _exists(_p: String) -> bool:
 	return true
 
 
+func _stat_stub(p: String) -> Dictionary:
+	return {"size": p.length() * 100, "mtime": 1700000000 + p.length()}
+
+
 func run() -> Dictionary:
 	var h = H.new()
 	h.suite = "full_scan"
@@ -144,6 +148,24 @@ func _r_census(h) -> void:
 	h.check(int((dotted_dirs.get("extensions", {}) as Dictionary).get("txt", 0)) == 1, "census reads file name extension")
 	h.check(int((dotted_dirs.get("extensions", {}) as Dictionary).get("gz", 0)) == 1, "census uses last name dot")
 	h.check(Impl.census_of([]) == {"extensions": {}, "total": 0}, "census empty")
+	h.check(Impl.census_ext("res://a.GD") == "gd", "census_ext lowercases")
+	h.check(Impl.census_ext("res://my.dir/LICENSE") == "(no ext)", "census_ext ignores dir dots")
+	h.check(Impl.human_size(0) == "0 B", "human zero bytes")
+	h.check(Impl.human_size(512) == "512 B", "human bytes")
+	h.check(Impl.human_size(1024) == "1.0 KB", "human kilobytes")
+	h.check(Impl.human_size(1536) == "1.5 KB", "human fractional kilobytes")
+	h.check(Impl.human_size(5 * 1024 * 1024) == "5.0 MB", "human megabytes")
+	var real_stat := Impl.file_stat("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
+	h.check(int(real_stat.get("size", 0)) > 0, "file_stat reads size")
+	h.check(int(real_stat.get("mtime", 0)) > 0, "file_stat reads mtime")
+	h.check(Impl.file_stat("res://nope_missing_zz/Nope.gd") == {"size": 0, "mtime": 0}, "file_stat missing zeros")
+	var grp := Impl.census_group(["res://a.gd", "res://b.GD", "res://c.tscn"], Callable(self, "_stat_stub"))
+	h.check(int(grp.get("total", 0)) == 3, "group counts")
+	h.check(int((grp.get("extensions", {}) as Dictionary).get("gd", 0)) == 2, "group buckets")
+	h.check(int(grp.get("bytes", 0)) == ("res://a.gd".length() + "res://b.GD".length() + "res://c.tscn".length()) * 100, "group sums bytes")
+	h.check(str(grp.get("size", "")) == Impl.human_size(int(grp.get("bytes", 0))), "group stores human size")
+	h.check(int(grp.get("newest", 0)) >= int(grp.get("oldest", 0)) and int(grp.get("oldest", 0)) > 0, "group orders mtimes")
+	h.check(Impl.census_group([], Callable(self, "_stat_stub")) == {"extensions": {}, "total": 0, "bytes": 0, "size": "0 B", "newest": 0, "oldest": 0}, "group empty")
 	var root := Impl.project_root()
 	var files := Impl.collect_project_files(root)
 	h.check(not files.is_empty(), "collect finds project files")
@@ -169,6 +191,10 @@ func _r_census(h) -> void:
 	h.check(manual_addons > 0, "repo has addons files")
 	var split_sum := int((census.get("project", {}) as Dictionary).get("total", -1)) + int((census.get("addons", {}) as Dictionary).get("total", -1))
 	h.check(split_sum == int(census.get("total", -2)), "partitions sum to merged")
+	h.check(int(census.get("bytes", 0)) == int((census.get("project", {}) as Dictionary).get("bytes", -1)) + int((census.get("addons", {}) as Dictionary).get("bytes", -1)), "bytes sum across partitions")
+	h.check(int(census.get("bytes", 0)) > 0, "real census weighs bytes")
+	h.check(int(census.get("newest", 0)) >= int(census.get("oldest", 0)) and int(census.get("oldest", 0)) > 0, "real census orders mtimes")
+	h.check(str(census.get("size", "")) == Impl.human_size(int(census.get("bytes", 0))), "real census human size")
 	DirAccess.remove_absolute(Impl.results_path())
 	h.check((Impl.empty_doc().get("census", {}) as Dictionary).get("total", -1) == 0, "empty doc censused zero")
 	Impl.store_stage("zz_keep", [_mk_issue("res://a.gd", 1, 0, "k")], [], 1)
@@ -177,6 +203,16 @@ func _r_census(h) -> void:
 	h.check(((doc.get("stages", {}) as Dictionary) as Dictionary).has("zz_keep"), "store_census keeps stages")
 	h.check(((doc.get("filters", {}) as Dictionary).get("show", {}) as Dictionary).has("error"), "store_census keeps filters")
 	h.check(int((doc.get("census", {}) as Dictionary).get("total", 0)) == 2, "store_census stores")
+	h.check((doc.get("census", {}) as Dictionary).get("project", {}) is Dictionary, "store_census normalizes partitions")
+	var reloaded := Impl.store_census(census)
+	h.check(int(((reloaded.get("census", {}) as Dictionary).get("addons", {}) as Dictionary).get("total", -1)) == manual_addons, "store_census persists addons partition")
+	var disk: Variant = JSON.parse_string(FileAccess.get_file_as_string(Impl.results_path()))
+	var disk_census: Dictionary = (disk as Dictionary).get("census", {})
+	h.check(int((disk_census.get("project", {}) as Dictionary).get("total", -1)) == int(census.get("total", 0)) - manual_addons, "roundtrip project partition survives disk")
+	h.check(int(disk_census.get("total", -1)) > int((disk_census.get("project", {}) as Dictionary).get("total", -2)), "roundtrip toggle-off view differs")
+	h.check(int(disk_census.get("bytes", -1)) == int(census.get("bytes", -2)), "roundtrip bytes survive disk")
+	h.check(int((disk_census.get("addons", {}) as Dictionary).get("newest", -1)) == int((census.get("addons", {}) as Dictionary).get("newest", -2)), "roundtrip mtimes survive disk")
+	h.check(str(disk_census.get("size", "")) == str(census.get("size", "")), "roundtrip human size survives disk")
 	DirAccess.remove_absolute(Impl.results_path())
 
 

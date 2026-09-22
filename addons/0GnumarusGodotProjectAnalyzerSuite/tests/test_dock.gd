@@ -36,6 +36,7 @@ func run() -> Dictionary:
 	_r_widgets(h)
 	_r_persist(h)
 	_r_census(h)
+	_r_tabs(h)
 	_r_openers(h)
 	_r_impl(h)
 	_restore_results()
@@ -220,6 +221,49 @@ func _r_census(h) -> void:
 	h.check(not (d as Object).get("_include_addons"), "apply syncs addons state")
 	h.check(not (((d as Object).get("_addons_btn") as Button).button_pressed), "apply syncs addons button")
 	h.check(d.call("census_count") == 2, "apply narrows census")
+	d.free()
+
+
+func _r_tabs(h) -> void:
+	h.check(Dock.census_rows({}, true).is_empty(), "rows empty blank")
+	h.check(Dock.census_rows({"extensions": {}, "total": 0}, true).is_empty(), "rows zero blank")
+	h.check(Dock.census_date(0) == "", "date unknown blank")
+	h.check(Dock.census_date(1700000000) == "2023-11-14", "date renders UTC day")
+	h.check(Dock.census_summary_rows({}, true).is_empty(), "summary empty blank")
+	h.check(Dock.census_summary_rows("junk", true).is_empty(), "summary non-dict blank")
+	h.check(Dock.census_summary_rows({"extensions": {"gd": 9}, "total": 9}, true) == ["All files: 9 files"], "summary legacy counts alone")
+	var mixed := {"extensions": {"tscn": 2, "gd": 5, "tres": 2}, "total": 9}
+	h.check(Dock.census_rows(mixed, true) == ["gd: 5", "tres: 2", "tscn: 2"], "rows unsplit ordered")
+	var split := {"extensions": {"gd": 6, "tscn": 3}, "total": 9, "project": {"extensions": {"gd": 2, "tscn": 3}, "total": 5}, "addons": {"extensions": {"gd": 4}, "total": 4}}
+	h.check(Dock.census_rows(split, true) == ["gd: 6 (2 project + 4 addons)", "tscn: 3 (3 project + 0 addons)"], "rows split breakdown")
+	h.check(Dock.census_rows(split, false) == ["tscn: 3", "gd: 2"], "rows toggle hides addons")
+	h.check(Dock.census_rows(mixed, false) == ["gd: 5", "tres: 2", "tscn: 2"], "rows unsplit falls back merged")
+	var rich := {
+		"extensions": {"gd": 6}, "total": 6, "bytes": 2048, "size": "2.0 KB", "newest": 1700000000, "oldest": 1699000000,
+		"project": {"extensions": {"gd": 2}, "total": 2, "bytes": 2048, "size": "2.0 KB", "newest": 1700000000, "oldest": 1699000000},
+		"addons": {"extensions": {"gd": 4}, "total": 4, "bytes": 0, "size": "", "newest": 0, "oldest": 0},
+	}
+	h.check(Dock.census_summary_rows(rich, true) == ["All files: 6 files, 2.0 KB (2023-11-03 → 2023-11-14)", "project: 2 files, 2.0 KB (2023-11-03 → 2023-11-14)", "addons: 4 files"], "summary groups with extras")
+	h.check(Dock.census_summary_rows(rich, false) == ["project: 2 files, 2.0 KB (2023-11-03 → 2023-11-14)"], "summary toggle narrows groups")
+	var d := _new_dock()
+	d.call("set_file_results", "res://a.gd", [])
+	var tabs: TabContainer = (d as Object).get("_tabs")
+	h.check(tabs.get_tab_count() == 2, "two tabs")
+	h.check(tabs.get_tab_title(0) == "Issues", "issues tab first")
+	h.check(tabs.get_tab_title(1) == "Files", "files tab second")
+	var rows: ItemList = (d as Object).get("_census_list")
+	h.check(rows.item_count == 1 and rows.get_item_text(0) == Dock.CENSUS_HINT, "hint row when uncensused")
+	d.call("set_census", mixed)
+	h.check(rows.item_count == 4, "summary plus extension rows")
+	h.check(rows.get_item_text(0) == "All files: 9 files", "summary row first")
+	h.check(rows.get_item_text(1) == "gd: 5", "first extension row follows")
+	d.call("set_census", split)
+	h.check(rows.item_count == 5, "rows rebuilt with breakdown")
+	h.check(rows.get_item_text(0) == "All files: 9 files", "split summary leads")
+	h.check(rows.get_item_text(3) == "gd: 6 (2 project + 4 addons)", "extension rows follow summaries")
+	((d as Object).get("_addons_btn") as Button).button_pressed = false
+	((d as Object).get("_addons_btn") as Button).pressed.emit()
+	h.check(rows.item_count == 3 and rows.get_item_text(0) == "project: 5 files", "toggle repaints rows")
 	d.free()
 
 

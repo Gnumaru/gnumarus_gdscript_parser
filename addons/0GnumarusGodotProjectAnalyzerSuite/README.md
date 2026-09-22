@@ -543,9 +543,11 @@ by path, line, column, severity), a `summary` (sorted stage
 names, total files/errors/warnings) and the dock `filters` toggle
 state (`show` / `types`, written by `store_filters()` without
 touching any stage). `census` holds the project file count by file
-name extension: the merged view (`extensions` / `total`) plus the
-`project` (res://addons/ excluded) and `addons` partitions, so the
-dock addons toggle switches views without rescanning; dots in
+name extension: the merged view plus the `project`
+(res://addons/ excluded) and `addons` partitions, so the dock
+addons toggle switches views without rescanning; each group carries
+`extensions` / `total` plus `bytes` (byte sum), `size` (human
+1024-based string), `newest` / `oldest` (unix mtimes); dots in
 directory names never count, so extensionless names group under
 `(no ext)`; the walk skips `.godot/` and `.git/`).
 
@@ -555,8 +557,9 @@ var res: Dictionary = GnumarusGodotProjectAnalyzerSuiteFullScanImpl.new().run()
 
 ## 11. GnumarusGodotProjectAnalyzerSuiteDock
 
-Bottom-panel dock (next to Output, Debugger, …) listing every known
-issue: live per-file results from each analysis overlaid on the last
+Bottom-panel dock (next to Output, Debugger, …) with two tabs
+sharing one toolbar. The Issues tab lists every known issue: live
+per-file results from each analysis overlaid on the last
 full-scan report (`ScanResults.json` is loaded when the dock builds,
 so it starts populated). Two toggle groups filter the rows, like the
 Output panel buttons: severities (Errors / Warnings / Notes —
@@ -572,11 +575,13 @@ screen). Rescan re-runs the full scan and
 reveals the dock; Clear drops the list. Toggle state persists in
 both `EditorSettings` (`gnumarus_analyzer/dock_filters`, which wins
 on load) and the `ScanResults.json` `filters` copy, so it survives
-editor restarts with or without editor settings. A census label
-shows the project file count by extension from the report's
-`census` key (`12 files (8 gd, 3 tscn, 1 tres)`), with an `addons`
-toggle that includes or drops `res://addons/` (and nested dirs)
-from the count — persisted like the other toggles, no rescan
+editor restarts with or without editor settings. The Files tab shows
+the project file census from the report's `census` key grouped by
+extension (`gd: 120 (90 project + 30 addons)`, count order), led by
+per-group summary rows (`All files: 147 files, 45.2 MB
+(2024-03-01 → 2026-09-22)`), with an
+`addons` toggle that includes or drops `res://addons/` (and nested
+dirs) from the count — persisted like the other toggles, no rescan
 needed.
 
 ```gdscript
@@ -1589,7 +1594,8 @@ suites still print, so the marker alone could look green).
   `test_dock.gd` (bottom-panel dock: severity/type filter logic,
   row format and status text, per-file overlay plus scan-report
   replacement, toggle wiring, row navigation, rescan/clear, editor
-  openers headless-safe, dock lifecycle null-safety).
+  openers headless-safe, dock lifecycle null-safety, Issues/Files
+  tabs with grouped census rows).
   `test_scan_worker.gd` (background scans: pool dispatch/done/
   cancel/wait mechanics, FullScan policy-snapshot and cancel plumbs,
   plugin dispatch null-safety headless).

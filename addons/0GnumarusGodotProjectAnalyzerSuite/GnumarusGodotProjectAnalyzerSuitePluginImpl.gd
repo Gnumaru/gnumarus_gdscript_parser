@@ -40,7 +40,7 @@ const DOCK_TITLE := "GNMR Analysis"
 ## (add_child, get_viewport): everything else goes through singletons.
 var plugin: EditorPlugin = null
 
-var _bar: Control = null
+var _bar: Bar = null
 var _warned_fallback := false
 var _debounce: Timer = null
 var _watched_ce: Object = null

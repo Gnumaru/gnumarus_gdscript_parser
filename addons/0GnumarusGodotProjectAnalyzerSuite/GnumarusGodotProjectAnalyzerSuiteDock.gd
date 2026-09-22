@@ -4,27 +4,32 @@ extends VBoxContainer
 ## the project: live per-file results from analyze_current overlaid on
 ## the last full-scan report (ScanResults.json, loaded on build).
 ##
-## Two toggle groups filter the list (same idea as the Output panel
-## filter buttons): severities (Errors / Warnings / Notes — nothing
-## emits notes yet, the toggle is ready for them) and resource types
-## (gd / tscn / tres / godot / other, derived from the issue path, so
-## script issues and resource-integrity issues toggle independently).
-## Picking a row calls the injected `_goto` Callable with the issue
-## dict (the plugin wires it to editor navigation); Rescan calls the
-## injected `_rescan` Callable (the full scan). All filter logic is
-## static and headless-testable; only live editor navigation needs
-## the editor.
+## Two tabs share one toolbar: "Issues" (the filtered error/warning
+## list) and "Files" (the project file census grouped by extension).
+## Two toggle groups filter the issue list (same idea as the Output
+## panel filter buttons): severities (Errors / Warnings / Notes —
+## nothing emits notes yet, the toggle is ready for them) and
+## resource types (gd / tscn / tres / godot / other, derived from the
+## issue path, so script issues and resource-integrity issues toggle
+## independently). Picking a row calls the injected `_goto` Callable
+## with the issue dict (the plugin wires it to editor navigation);
+## Rescan calls the injected `_rescan` Callable (the full scan). All
+## filter/census logic is static and headless-testable; only live
+## editor navigation needs the editor.
 
 const EdTree = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteEditorTree.gd")
 const FullScan = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
 
-const DOCK_HINT := "Gnumarus: no issues. Run Project > Tools > Gnumaru's Full Scan for a project-wide report."
+const DOCK_HINT := "GNMR Analyzer: no issues. Run Project > Tools > Gnumaru's Full Scan for a project-wide report."
 ## EditorSettings key holding the filter state. It wins over the
 ## ScanResults.json copy on load; both are written on every change.
 const FILTERS_SETTING := "gnumarus_analyzer/dock_filters"
 const SEVERITIES := ["error", "warning", "note"]
 const SEV_LABELS := {"error": "Errors", "warning": "Warnings", "note": "Notes"}
 const TYPES := ["gd", "tscn", "tres", "godot", "other"]
+const TAB_ISSUES := "Issues"
+const TAB_FILES := "Files"
+const CENSUS_HINT := "No file census yet. Run Project > Tools > Gnumaru's Full Scan."
 
 var _by_path: Dictionary = {}
 var _shown: Array = []
@@ -39,6 +44,8 @@ var _list: ItemList = null
 var _status: Label = null
 var _files: Label = null
 var _addons_btn: Button = null
+var _tabs: TabContainer = null
+var _census_list: ItemList = null
 var _sev_btns := {}
 var _type_btns := {}
 var _built := false
@@ -145,6 +152,92 @@ static func census_view(census: Variant, include_addons: bool) -> Dictionary:
 	if not include_addons and (census as Dictionary).get("project") is Dictionary:
 		return (census as Dictionary).get("project")
 	return {"extensions": (census as Dictionary).get("extensions", {}), "total": (census as Dictionary).get("total", 0)}
+
+
+## Unix mtime as a UTC calendar date ("2026-09-22"), "" when unknown.
+## Pure (Time only), unit-tested headless.
+static func census_date(mtime: int) -> String:
+	if mtime <= 0:
+		return ""
+	return Time.get_datetime_string_from_unix_time(mtime, true).substr(0, 10)
+
+
+## One Files-tab summary row per shown group ("All files: 147 files,
+## 45.2 MB (2024-03-01 → 2026-09-22)"): merged plus partitions with
+## the split, project-only with the toggle off, merged-only without
+## it. Size/dates render only when known (legacy reports show counts
+## alone). Pure, unit-tested headless.
+static func census_summary_rows(census: Variant, include_addons: bool) -> Array:
+	if not (census is Dictionary):
+		return []
+	var groups: Array = []
+	var split := (census as Dictionary).get("project") is Dictionary and (census as Dictionary).get("addons") is Dictionary
+	if split and include_addons:
+		groups = [["All files", (census as Dictionary)], ["project", (census as Dictionary).get("project")], ["addons", (census as Dictionary).get("addons")]]
+	elif split:
+		groups = [["project", (census as Dictionary).get("project")]]
+	else:
+		groups = [["All files", (census as Dictionary)]]
+	var rows: Array = []
+	for g in groups:
+		var r := _census_group_row(str((g as Array)[0]), (g as Array)[1])
+		if r != "":
+			rows.append(r)
+	return rows
+
+
+## Single group summary row ("" when the group counts nothing).
+## Prefers the stored human size, computing it from bytes as
+## fallback. Pure.
+static func _census_group_row(label: String, group: Variant) -> String:
+	if not (group is Dictionary):
+		return ""
+	var total := maxi(int((group as Dictionary).get("total", 0)), 0)
+	if total <= 0:
+		return ""
+	var head := "%s: %d file%s" % [label, total, "" if total == 1 else "s"]
+	var detail := ""
+	var bytes := maxi(int((group as Dictionary).get("bytes", 0)), 0)
+	if bytes > 0:
+		var size := str((group as Dictionary).get("size", ""))
+		detail = size if size != "" else FullScan.human_size(bytes)
+	var newest := maxi(int((group as Dictionary).get("newest", 0)), 0)
+	if newest > 0:
+		var oldest := maxi(int((group as Dictionary).get("oldest", 0)), 0)
+		var span := "(%s → %s)" % [census_date(oldest) if oldest > 0 else "?", census_date(newest)]
+		detail = (detail + " " + span).strip_edges()
+	if detail == "":
+		return head
+	return head + ", " + detail
+
+
+## One Files-tab row per extension ("gd: 120 (90 project + 30
+## addons)" with the project/addons split, "gd: 120" without it),
+## ordered by count (ties alphabetical), [] when uncensused. Pure,
+## unit-tested headless.
+static func census_rows(census: Variant, include_addons: bool) -> Array:
+	var view := census_view(census, include_addons)
+	var total := maxi(int(view.get("total", 0)), 0)
+	if total <= 0:
+		return []
+	var exts: Dictionary = view.get("extensions", {})
+	var keys: Array = exts.keys()
+	keys.sort_custom(func(a: Variant, b: Variant) -> bool:
+		var ca := int(exts.get(a, 0))
+		var cb := int(exts.get(b, 0))
+		if ca != cb:
+			return ca > cb
+		return str(a) < str(b))
+	var split := include_addons and (census is Dictionary) and ((census as Dictionary).get("project") is Dictionary) and ((census as Dictionary).get("addons") is Dictionary)
+	var proj: Dictionary = ((census as Dictionary).get("project", {}) as Dictionary).get("extensions", {}) if split else {}
+	var adns: Dictionary = ((census as Dictionary).get("addons", {}) as Dictionary).get("extensions", {}) if split else {}
+	var rows: Array = []
+	for k in keys:
+		if split:
+			rows.append("%s: %d (%d project + %d addons)" % [str(k), int(exts.get(k, 0)), int(proj.get(k, 0)), int(adns.get(k, 0))])
+		else:
+			rows.append("%s: %d" % [str(k), int(exts.get(k, 0))])
+	return rows
 
 
 ## Merges a stored filter payload over the defaults: unknown keys
@@ -277,11 +370,19 @@ func census_count() -> int:
 	return maxi(int(census_view(_census, _include_addons).get("total", 0)), 0)
 
 
-## Paints the census label (hidden when uncensused). Never fails.
+## Paints the census label (hidden when uncensused) and rebuilds
+## the Files-tab rows. Never fails.
 func _paint_census() -> void:
 	_ensure_built()
 	_files.text = census_text(_census, _include_addons)
 	_files.visible = _files.text != ""
+	_census_list.clear()
+	var rows := census_summary_rows(_census, _include_addons) + census_rows(_census, _include_addons)
+	if rows.is_empty():
+		_census_list.add_item(CENSUS_HINT, null, false)
+	else:
+		for r in rows:
+			_census_list.add_item(str(r), null, false)
 
 
 ## Drops every known issue.
@@ -336,16 +437,6 @@ func _ensure_built() -> void:
 	_status.clip_text = true
 	_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	toolbar.add_child(_status)
-	_files = Label.new()
-	_files.text = ""
-	_files.visible = false
-	_files.clip_text = true
-	_files.tooltip_text = "Project files by extension (last full scan)"
-	toolbar.add_child(_files)
-	_addons_btn = _make_toggle("addons", "Include res://addons/ files in the census")
-	_addons_btn.button_pressed = true
-	_addons_btn.pressed.connect(_on_addons_toggled)
-	toolbar.add_child(_addons_btn)
 	var rescan := Button.new()
 	rescan.text = "Rescan"
 	rescan.focus_mode = Control.FOCUS_NONE
@@ -358,15 +449,40 @@ func _ensure_built() -> void:
 	clear.tooltip_text = "Clear the issue list"
 	clear.pressed.connect(_on_clear)
 	toolbar.add_child(clear)
+	_tabs = TabContainer.new()
+	_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(_tabs)
 	_list = ItemList.new()
+	_list.name = TAB_ISSUES
 	_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_list.allow_reselect = true
 	_list.item_selected.connect(_on_item_selected)
-	add_child(_list)
+	_tabs.add_child(_list)
+	var files_page := VBoxContainer.new()
+	files_page.name = TAB_FILES
+	files_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_tabs.add_child(files_page)
+	var files_bar := HBoxContainer.new()
+	files_bar.name = "FilesBar"
+	files_page.add_child(files_bar)
+	_files = Label.new()
+	_files.text = ""
+	_files.visible = false
+	_files.clip_text = true
+	_files.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_files.tooltip_text = "Project files by extension (last full scan)"
+	files_bar.add_child(_files)
+	_addons_btn = _make_toggle("Include Addons", "Include res://addons/ files in the census")
+	_addons_btn.button_pressed = true
+	_addons_btn.pressed.connect(_on_addons_toggled)
+	files_bar.add_child(_addons_btn)
+	_census_list = ItemList.new()
+	_census_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	files_page.add_child(_census_list)
 	if Engine.is_editor_hint():
 		_apply_filters(load_filters())
 		_census = FullScan.load_results().get("census", {})
-		_paint_census()
+	_paint_census()
 	refresh()
 
 
@@ -470,7 +586,7 @@ func refresh() -> void:
 	if _shown.is_empty() and total_count() == 0:
 		_status.text = DOCK_HINT
 	else:
-		_status.text = "Gnumarus: " + status_text(n_err, n_warn, n_note, total_count() - _shown.size())
+		_status.text = "GNMR Analyzer: " + status_text(n_err, n_warn, n_note, total_count() - _shown.size())
 
 
 ## Console glyph for a row severity (null headless/unknown: the row

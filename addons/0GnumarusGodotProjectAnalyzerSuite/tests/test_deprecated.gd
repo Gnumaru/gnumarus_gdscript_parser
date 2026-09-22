@@ -111,7 +111,8 @@ func _t11(h) -> void:
 	h.check((res.get("warnings", []) as Array).is_empty(), "t11 no internal warnings")
 	h.check((res.get("errors", []) as Array).is_empty(), "t11 no errors")
 	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/OldLib.json")
-	h.check(str(info.get("deprecated", {}).get("message", "")) == "Whole script is old.", "t11 json marks script")
+	var dep: Dictionary = info.get("deprecated", {})
+	h.check(str(dep.get("message", "")) == "Whole script is old.", "t11 json marks script")
 
 
 func _t12(h) -> void:

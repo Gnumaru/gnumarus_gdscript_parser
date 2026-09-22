@@ -96,7 +96,7 @@ static func policy_snapshot() -> Dictionary:
 
 ## Empty report (also the fallback for missing/corrupt files).
 static func empty_doc() -> Dictionary:
-	return {"version": 1, "generated_unix": 0.0, "stages": {}, "errors": [], "warnings": [], "summary": {"stages": [], "files": 0, "errors": 0, "warnings": 0}, "filters": default_filters(), "census": {"extensions": {}, "total": 0, "project": {"extensions": {}, "total": 0}, "addons": {"extensions": {}, "total": 0}}}
+	return {"version": 1, "generated_unix": 0.0, "stages": {}, "errors": [], "warnings": [], "summary": {"stages": [], "files": 0, "errors": 0, "warnings": 0}, "filters": default_filters(), "census": _norm_census_group({}, true)}
 
 
 ## Default dock filter state (everything visible, addons counted).
@@ -226,23 +226,108 @@ static func store_filters(show: Dictionary, types: Dictionary, include_addons :=
 	return _write_doc(doc)
 
 
+## Extension bucket of one path: lowercased extension of the file
+## name only (dots in directory names never count; extensionless
+## names group under "(no ext)"). Pure, unit-tested headless.
+static func census_ext(path: String) -> String:
+	var s := str(path)
+	var file_name := s.substr(s.rfind("/") + 1)
+	var dot := file_name.rfind(".")
+	var ext := file_name.substr(dot + 1).to_lower() if dot >= 0 else ""
+	return ext if ext != "" else "(no ext)"
+
+
 ## Groups file paths by lowercased extension of the file name only
-## (dots in directory names never count; extensionless names group
-## under "(no ext)"). Pure, unit-tested headless.
+## (see census_ext). Shape {"extensions", "total"} exactly (no sizes:
+## use census_group for the enriched form). Pure, unit-tested
+## headless.
 static func census_of(paths: Array) -> Dictionary:
 	var exts := {}
 	for p in paths:
-		var s := str(p)
-		var file_name := s.substr(s.rfind("/") + 1)
-		var dot := file_name.rfind(".")
-		var ext := file_name.substr(dot + 1).to_lower() if dot >= 0 else ""
-		if ext == "":
-			ext = "(no ext)"
+		var ext := census_ext(p)
 		exts[ext] = int(exts.get(ext, 0)) + 1
 	var total := 0
 	for k in exts.keys():
 		total += int(exts[k])
 	return {"extensions": exts, "total": total}
+
+
+## Human size in multiples of 1024 ("512 B", "1.5 KB", "12.0 MB").
+## Pure, unit-tested headless.
+static func human_size(bytes: int) -> String:
+	var b := maxi(bytes, 0)
+	if b < 1024:
+		return "%d B" % b
+	var units := ["KB", "MB", "GB", "TB"]
+	var v := float(b) / 1024.0
+	var u := 0
+	while v >= 1024.0 and u < units.size() - 1:
+		v /= 1024.0
+		u += 1
+	return "%.1f %s" % [v, units[u]]
+
+
+## Size (bytes) and mtime (unix seconds) of one file, zeros when
+## missing/unreadable. Static, pure IO, headless-safe.
+static func file_stat(path: String) -> Dictionary:
+	var size := 0
+	var mtime := 0
+	if str(path) != "" and FileAccess.file_exists(path):
+		mtime = int(FileAccess.get_modified_time(path))
+		var f := FileAccess.open(path, FileAccess.READ)
+		if f != null:
+			size = maxi(int((f as FileAccess).get_length()), 0)
+			(f as FileAccess).close()
+	return {"size": size, "mtime": mtime}
+
+
+## Enriched census group for paths: counts plus byte sum, human size,
+## and oldest/newest mtimes. `read_stat` optionally stubs per-file
+## stats (Callable(path) -> {"size","mtime"}; real FileAccess
+## otherwise, so hermetic tests stay file-free). Pure modulo stats.
+static func census_group(paths: Array, read_stat := Callable()) -> Dictionary:
+	var exts := {}
+	var total := 0
+	var bytes := 0
+	var newest := 0
+	var oldest := 0
+	var seen := false
+	for p in paths:
+		var ext := census_ext(p)
+		exts[ext] = int(exts.get(ext, 0)) + 1
+		total += 1
+		var st: Dictionary = (read_stat.call(str(p)) as Dictionary) if read_stat.is_valid() else file_stat(str(p))
+		bytes += maxi(int(st.get("size", 0)), 0)
+		var mt := maxi(int(st.get("mtime", 0)), 0)
+		if not seen or mt < oldest:
+			oldest = mt
+		if not seen or mt > newest:
+			newest = mt
+		seen = true
+	return {"extensions": exts, "total": total, "bytes": bytes, "size": human_size(bytes), "newest": newest, "oldest": oldest}
+
+
+## Merges two census groups (counts/bytes/totals summed, oldest/newest
+## across both; empty sides contribute nothing). Pure.
+static func _merge_groups(a: Dictionary, b: Dictionary) -> Dictionary:
+	var exts: Dictionary = ((a as Dictionary).get("extensions", {}) as Dictionary).duplicate()
+	for k in ((b as Dictionary).get("extensions", {}) as Dictionary).keys():
+		exts[k] = int(exts.get(k, 0)) + int(((b as Dictionary).get("extensions", {}) as Dictionary).get(k, 0))
+	var at := maxi(int((a as Dictionary).get("total", 0)), 0)
+	var bt := maxi(int((b as Dictionary).get("total", 0)), 0)
+	var bytes := maxi(int((a as Dictionary).get("bytes", 0)), 0) + maxi(int((b as Dictionary).get("bytes", 0)), 0)
+	var oldest := 0
+	var newest := 0
+	if at > 0 and bt > 0:
+		oldest = mini(maxi(int((a as Dictionary).get("oldest", 0)), 0), maxi(int((b as Dictionary).get("oldest", 0)), 0))
+		newest = maxi(maxi(int((a as Dictionary).get("newest", 0)), 0), maxi(int((b as Dictionary).get("newest", 0)), 0))
+	elif at > 0:
+		oldest = maxi(int((a as Dictionary).get("oldest", 0)), 0)
+		newest = maxi(int((a as Dictionary).get("newest", 0)), 0)
+	elif bt > 0:
+		oldest = maxi(int((b as Dictionary).get("oldest", 0)), 0)
+		newest = maxi(int((b as Dictionary).get("newest", 0)), 0)
+	return {"extensions": exts, "total": at + bt, "bytes": bytes, "size": human_size(bytes), "newest": newest, "oldest": oldest}
 
 
 ## Every project file under root as res:// paths, skipping generated
@@ -282,9 +367,11 @@ static func is_addons_path(path: String) -> bool:
 
 ## Counts every project file by extension, split into the plain
 ## project tree ("project", res://addons/ excluded) and the addons
-## subtree ("addons"), plus the merged view ("extensions"/"total",
-## kept for backward compatibility). Static, pure IO.
-static func collect_file_census(root: String) -> Dictionary:
+## subtree ("addons"), plus the merged view (same group shape).
+## Every group carries counts, byte sum, human size and oldest/newest
+## mtimes. `read_stat` stubs per-file stats (see census_group).
+## Static, pure IO.
+static func collect_file_census(root: String, read_stat := Callable()) -> Dictionary:
 	var project: Array = []
 	var addons: Array = []
 	for p in collect_project_files(root):
@@ -292,17 +379,42 @@ static func collect_file_census(root: String) -> Dictionary:
 			addons.append(p)
 		else:
 			project.append(p)
-	var merged := census_of(project + addons)
-	return {"extensions": merged.get("extensions", {}), "total": int(merged.get("total", 0)), "project": census_of(project), "addons": census_of(addons)}
+	var pg := census_group(project, read_stat)
+	var ag := census_group(addons, read_stat)
+	var merged := _merge_groups(pg, ag)
+	return {"extensions": merged.get("extensions", {}), "total": int(merged.get("total", 0)), "bytes": int(merged.get("bytes", 0)), "size": str(merged.get("size", "")), "newest": int(merged.get("newest", 0)), "oldest": int(merged.get("oldest", 0)), "project": pg, "addons": ag}
 
 
 ## Stores the file census in the report without touching any stage
-## entry or aggregate. Returns the full doc.
+## entry or aggregate. Persists the merged view plus the project and
+## addons partitions, each with counts, byte sum, human size and
+## oldest/newest mtimes (the dock toggle and Files tab read them);
+## missing keys normalize to zero. Returns the full doc.
 static func store_census(census: Dictionary) -> Dictionary:
 	var doc := load_results()
-	doc["census"] = {"extensions": ((census.get("extensions", {}) as Dictionary).duplicate()), "total": maxi(int(census.get("total", 0)), 0)}
+	doc["census"] = _norm_census_group(census, true)
 	doc["generated_unix"] = Time.get_unix_time_from_system()
 	return _write_doc(doc)
+
+
+## Normalized census group (counts, bytes, size, mtimes; zeros when
+## absent), optionally with normalized project/addons partitions.
+## Shared by store_census and empty_doc. Pure.
+static func _norm_census_group(census: Dictionary, with_parts: bool) -> Dictionary:
+	var out := {
+		"extensions": ((census.get("extensions", {}) as Dictionary).duplicate()),
+		"total": maxi(int(census.get("total", 0)), 0),
+		"bytes": maxi(int(census.get("bytes", 0)), 0),
+		"size": str(census.get("size", "")),
+		"newest": maxi(int(census.get("newest", 0)), 0),
+		"oldest": maxi(int(census.get("oldest", 0)), 0),
+	}
+	if out.get("size", "") == "" and int(out.get("bytes", 0)) > 0:
+		out["size"] = human_size(int(out.get("bytes", 0)))
+	if with_parts:
+		out["project"] = _norm_census_group((census.get("project", {}) as Dictionary), false)
+		out["addons"] = _norm_census_group((census.get("addons", {}) as Dictionary), false)
+	return out
 
 
 ## GDScript stage: analyzes every project .gd (or `targets` when
