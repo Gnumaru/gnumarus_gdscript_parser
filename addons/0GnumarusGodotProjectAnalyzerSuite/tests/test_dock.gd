@@ -37,6 +37,7 @@ func run() -> Dictionary:
 	_r_persist(h)
 	_r_census(h)
 	_r_tabs(h)
+	_r_file_tree(h)
 	_r_openers(h)
 	_r_impl(h)
 	_restore_results()
@@ -227,8 +228,8 @@ func _r_census(h) -> void:
 func _r_tabs(h) -> void:
 	h.check(Dock.census_rows({}, true).is_empty(), "rows empty blank")
 	h.check(Dock.census_rows({"extensions": {}, "total": 0}, true).is_empty(), "rows zero blank")
-	h.check(Dock.census_date(0) == "", "date unknown blank")
-	h.check(Dock.census_date(1700000000) == "2023-11-14", "date renders UTC day")
+	h.check(Dock.census_datetime(0) == "", "datetime unknown blank")
+	h.check(Dock.census_datetime(1700000000) == "2023-11-14 22:13:20", "datetime renders UTC stamp")
 	h.check(Dock.census_summary_rows({}, true).is_empty(), "summary empty blank")
 	h.check(Dock.census_summary_rows("junk", true).is_empty(), "summary non-dict blank")
 	h.check(Dock.census_summary_rows({"extensions": {"gd": 9}, "total": 9}, true) == ["All files: 9 files"], "summary legacy counts alone")
@@ -243,27 +244,104 @@ func _r_tabs(h) -> void:
 		"project": {"extensions": {"gd": 2}, "total": 2, "bytes": 2048, "size": "2.0 KB", "newest": 1700000000, "oldest": 1699000000},
 		"addons": {"extensions": {"gd": 4}, "total": 4, "bytes": 0, "size": "", "newest": 0, "oldest": 0},
 	}
-	h.check(Dock.census_summary_rows(rich, true) == ["All files: 6 files, 2.0 KB (2023-11-03 → 2023-11-14)", "project: 2 files, 2.0 KB (2023-11-03 → 2023-11-14)", "addons: 4 files"], "summary groups with extras")
-	h.check(Dock.census_summary_rows(rich, false) == ["project: 2 files, 2.0 KB (2023-11-03 → 2023-11-14)"], "summary toggle narrows groups")
+	h.check(Dock.census_summary_rows(rich, true) == ["All files: 6 files, 2.0 KB (2023-11-03 08:26:40 → 2023-11-14 22:13:20)", "project: 2 files, 2.0 KB (2023-11-03 08:26:40 → 2023-11-14 22:13:20)", "addons: 4 files"], "summary groups with extras")
+	h.check(Dock.census_summary_rows(rich, false) == ["project: 2 files, 2.0 KB (2023-11-03 08:26:40 → 2023-11-14 22:13:20)"], "summary toggle narrows groups")
 	var d := _new_dock()
 	d.call("set_file_results", "res://a.gd", [])
 	var tabs: TabContainer = (d as Object).get("_tabs")
 	h.check(tabs.get_tab_count() == 2, "two tabs")
 	h.check(tabs.get_tab_title(0) == "Issues", "issues tab first")
 	h.check(tabs.get_tab_title(1) == "Files", "files tab second")
-	var rows: ItemList = (d as Object).get("_census_list")
-	h.check(rows.item_count == 1 and rows.get_item_text(0) == Dock.CENSUS_HINT, "hint row when uncensused")
+	var tree: Tree = (d as Object).get("_tree")
+	h.check(tree.columns == 9, "tree columns")
+	h.check(tree.get_root().get_child_count() == 1, "hint row when uncensused")
+	h.check(tree.get_root().get_child(0).get_text(0) == Dock.CENSUS_HINT, "hint text")
 	d.call("set_census", mixed)
-	h.check(rows.item_count == 4, "summary plus extension rows")
-	h.check(rows.get_item_text(0) == "All files: 9 files", "summary row first")
-	h.check(rows.get_item_text(1) == "gd: 5", "first extension row follows")
+	h.check(tree.get_root().get_child_count() == 1, "legacy single group")
+	h.check(tree.get_root().get_child(0).get_text(0) == "project: 9 files", "legacy project group")
+	h.check(tree.get_root().get_child(0).get_child_count() == 3, "legacy extension rows")
 	d.call("set_census", split)
-	h.check(rows.item_count == 5, "rows rebuilt with breakdown")
-	h.check(rows.get_item_text(0) == "All files: 9 files", "split summary leads")
-	h.check(rows.get_item_text(3) == "gd: 6 (2 project + 4 addons)", "extension rows follow summaries")
+	h.check(tree.get_root().get_child_count() == 2, "partition groups built")
+	h.check(tree.get_root().get_child(0).get_text(0) == "project: 5 files", "partition summary leads")
+	h.check(tree.get_root().get_child(0).get_child_count() == 2, "partition extension rows")
 	((d as Object).get("_addons_btn") as Button).button_pressed = false
 	((d as Object).get("_addons_btn") as Button).pressed.emit()
-	h.check(rows.item_count == 3 and rows.get_item_text(0) == "project: 5 files", "toggle repaints rows")
+	h.check(tree.get_root().get_child_count() == 1, "toggle drops addons group")
+	h.check(tree.get_root().get_child(0).get_text(0) == "project: 5 files", "toggle keeps project group")
+	d.free()
+
+
+func _paths(rows: Array) -> Array:
+	var out: Array = []
+	for r in rows:
+		out.append(str((r as Dictionary).get("path", "")))
+	return out
+
+
+func _r_file_tree(h) -> void:
+	var files := [
+		{"path": "res://b.gd", "size": 100, "created": 0, "modified": 2000},
+		{"path": "res://a.gd", "size": 300, "created": 0, "modified": 1000},
+		{"path": "res://addons/c.gd", "size": 200, "created": 0, "modified": 3000},
+	]
+	h.check(_paths(Dock.sort_file_entries(files, "path", false)) == ["res://a.gd", "res://addons/c.gd", "res://b.gd"], "sort path")
+	h.check(_paths(Dock.sort_file_entries(files, "size", false)) == ["res://b.gd", "res://addons/c.gd", "res://a.gd"], "sort size")
+	h.check(_paths(Dock.sort_file_entries(files, "modified", true)) == ["res://addons/c.gd", "res://b.gd", "res://a.gd"], "sort modified desc")
+	h.check(_paths(Dock.sort_file_entries(files, "created", false)) == ["res://a.gd", "res://addons/c.gd", "res://b.gd"], "sort zeros fall back to path")
+	h.check(_paths(Dock.sort_file_entries(files, "bogus", false)) == ["res://a.gd", "res://addons/c.gd", "res://b.gd"], "sort unknown falls back to path")
+	h.check(Dock.sort_file_entries(["junk"], "path", false).is_empty(), "sort drops non-dicts")
+	h.check(Dock.sanitize_sort_key("size") == "size", "sort key kept")
+	h.check(Dock.sanitize_sort_key("nope") == "path", "sort key guarded")
+	var census := {
+		"extensions": {"gd": 3}, "total": 3, "bytes": 600, "size": "600 B", "newest": 3000, "oldest": 1000,
+		"project": {"extensions": {"gd": 2}, "total": 2, "bytes": 400, "size": "400 B", "newest": 2000, "oldest": 1000},
+		"addons": {"extensions": {"gd": 1}, "total": 1, "bytes": 200, "size": "200 B", "newest": 3000, "oldest": 3000},
+		"files": files,
+		"dirs": [{"path": "res://", "created": 0, "modified": 0, "files": 0, "subdirs": 1, "files_recursive": 3, "subdirs_recursive": 2, "size": 0, "size_recursive": 600}],
+	}
+	var d := _new_dock()
+	d.call("set_file_results", "res://a.gd", [{"severity": "error", "kind": "k", "message": "m", "line": 4, "column": 1, "path": "res://a.gd"}])
+	d.call("set_census", census)
+	var tree: Tree = (d as Object).get("_tree")
+	h.check(tree.get_root().get_child_count() == 3, "file groups plus dirs")
+	var proj := tree.get_root().get_child(0)
+	h.check(proj.get_text(0) == "project: 2 files, 400 B (1970-01-01 00:16:40 → 1970-01-01 00:33:20)", "group summary with extras")
+	h.check(proj.collapsed, "groups start collapsed")
+	h.check(proj.get_child_count() == 2, "project file rows")
+	h.check(proj.get_child(0).get_text(0) == "res://a.gd", "default sort path")
+	h.check(proj.get_child(0).get_text(5) == "300 B", "file size human")
+	h.check(proj.get_child(0).get_text(7) == "", "file unknown creation blank")
+	h.check(proj.get_child(0).get_text(8) == "1970-01-01 00:16:40", "file modified stamp")
+	var md: Dictionary = proj.get_child(0).get_metadata(0)
+	h.check(str(md.get("path", "")) == "res://a.gd" and int(md.get("line", 0)) == 4, "file row targets first issue")
+	var bmd: Dictionary = proj.get_child(1).get_metadata(0)
+	h.check(int(bmd.get("line", 0)) == 1, "clean file targets line one")
+	var dirs := tree.get_root().get_child(2)
+	h.check(dirs.get_text(0) == "directories: 1", "dirs group last")
+	h.check(dirs.get_child(0).get_text(0) == "res://", "dir row path")
+	h.check(dirs.get_child(0).get_text(1) == "0", "dir direct files")
+	h.check(dirs.get_child(0).get_text(2) == "1", "dir direct subdirs")
+	h.check(dirs.get_child(0).get_text(3) == "3", "dir recursive files")
+	h.check(dirs.get_child(0).get_text(4) == "2", "dir recursive subdirs")
+	h.check(dirs.get_child(0).get_text(5) == "0 B", "dir direct size")
+	h.check(dirs.get_child(0).get_text(6) == "600 B", "dir recursive size")
+	_goto_seen.clear()
+	proj.collapsed = false
+	proj.get_child(0).select(0)
+	h.check(_goto_seen.size() == 1 and str((_goto_seen[0] as Dictionary).get("path", "")) == "res://a.gd", "file row navigates")
+	dirs.get_child(0).select(0)
+	h.check(_goto_seen.size() == 1, "dir row inert")
+	((d as Object).get("_sort_opt") as OptionButton).select(1)
+	((d as Object).get("_sort_opt") as OptionButton).emit_signal("item_selected", 1)
+	proj = tree.get_root().get_child(0)
+	h.check(proj.get_child(0).get_text(0) == "res://b.gd", "sort dropdown re-sorts")
+	((d as Object).get("_sort_desc_btn") as CheckButton).button_pressed = true
+	((d as Object).get("_sort_desc_btn") as CheckButton).emit_signal("toggled", true)
+	proj = tree.get_root().get_child(0)
+	h.check(proj.get_child(0).get_text(0) == "res://a.gd", "desc toggle inverts")
+	d.call("_apply_filters", {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "include_addons": true, "sort": "bogus", "descending": "yes"})
+	h.check(str((d as Object).get("_sort_key")) == "path", "apply guards sort key")
+	h.check(not bool((d as Object).get("_sort_desc")), "apply guards descending")
 	d.free()
 
 

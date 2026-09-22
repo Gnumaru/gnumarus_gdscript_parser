@@ -25,7 +25,7 @@ func _exists(_p: String) -> bool:
 
 
 func _stat_stub(p: String) -> Dictionary:
-	return {"size": p.length() * 100, "mtime": 1700000000 + p.length()}
+	return {"size": p.length() * 100, "created": 0, "modified": 1700000000 + p.length()}
 
 
 func run() -> Dictionary:
@@ -38,6 +38,7 @@ func run() -> Dictionary:
 	_r_sort(h)
 	_r_filters(h)
 	_r_census(h)
+	_r_inventory(h)
 	_r_corrupt(h)
 	_r_gdscript_stage(h)
 	_r_integrity_stage(h)
@@ -157,8 +158,10 @@ func _r_census(h) -> void:
 	h.check(Impl.human_size(5 * 1024 * 1024) == "5.0 MB", "human megabytes")
 	var real_stat := Impl.file_stat("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/ValidScript0.gd")
 	h.check(int(real_stat.get("size", 0)) > 0, "file_stat reads size")
-	h.check(int(real_stat.get("mtime", 0)) > 0, "file_stat reads mtime")
-	h.check(Impl.file_stat("res://nope_missing_zz/Nope.gd") == {"size": 0, "mtime": 0}, "file_stat missing zeros")
+	h.check(int(real_stat.get("mtime", 0)) == 0, "file_stat has no mtime key")
+	h.check(int(real_stat.get("modified", 0)) > 0, "file_stat reads modified")
+	h.check(int(real_stat.get("created", -1)) == 0, "file_stat creation unavailable")
+	h.check(Impl.file_stat("res://nope_missing_zz/Nope.gd") == {"size": 0, "created": 0, "modified": 0}, "file_stat missing zeros")
 	var grp := Impl.census_group(["res://a.gd", "res://b.GD", "res://c.tscn"], Callable(self, "_stat_stub"))
 	h.check(int(grp.get("total", 0)) == 3, "group counts")
 	h.check(int((grp.get("extensions", {}) as Dictionary).get("gd", 0)) == 2, "group buckets")
@@ -214,6 +217,52 @@ func _r_census(h) -> void:
 	h.check(int((disk_census.get("addons", {}) as Dictionary).get("newest", -1)) == int((census.get("addons", {}) as Dictionary).get("newest", -2)), "roundtrip mtimes survive disk")
 	h.check(str(disk_census.get("size", "")) == str(census.get("size", "")), "roundtrip human size survives disk")
 	DirAccess.remove_absolute(Impl.results_path())
+
+
+func _r_inventory(h) -> void:
+	h.check(Impl._parent_dir("res://a/b/c.gd") == "res://a/b", "parent strips file")
+	h.check(Impl._parent_dir("res://x.gd") == "res://", "parent of root file is root")
+	h.check(Impl._parent_dir("res://addons") == "res://", "parent of top dir is root")
+	h.check(Impl._parent_dir("res://") == "", "root has no parent")
+	h.check(Impl._parent_dir("") == "", "empty has no parent")
+	var fentries := [
+		{"path": "res://a/f1.gd", "size": 100, "created": 0, "modified": 1000},
+		{"path": "res://a/f2.gd", "size": 300, "created": 0, "modified": 3000},
+		{"path": "res://a/b/f3.gd", "size": 600, "created": 0, "modified": 2000},
+	]
+	var dentries := Impl.census_dir_entries(["res://", "res://a", "res://a/b", "res://empty"], fentries)
+	h.check(dentries.size() == 4, "dir entries cover all dirs")
+	h.check(str(dentries[0].get("path", "")) == "res://", "dir entries sorted by path")
+	var by_path := {}
+	for d in dentries:
+		by_path[str((d as Dictionary).get("path", ""))] = d
+	var ra: Dictionary = by_path.get("res://a", {})
+	h.check(int(ra.get("files", -1)) == 2, "direct file count")
+	h.check(int(ra.get("subdirs", -1)) == 1, "direct subdir count")
+	h.check(int(ra.get("files_recursive", -1)) == 3, "recursive file count")
+	h.check(int(ra.get("subdirs_recursive", -1)) == 1, "recursive subdir count")
+	h.check(int(ra.get("size", -1)) == 400, "direct size sums direct files")
+	h.check(int(ra.get("size_recursive", -1)) == 1000, "recursive size sums subtree")
+	h.check(int((by_path.get("res://a/b", {}) as Dictionary).get("files_recursive", -1)) == 1, "leaf recursive equals direct")
+	h.check(int((by_path.get("res://empty", {}) as Dictionary).get("size_recursive", -1)) == 0, "empty dir zeros")
+	h.check(int((by_path.get("res://", {}) as Dictionary).get("files_recursive", -1)) == 3, "root rolls up everything")
+	var root := Impl.project_root()
+	var dirs := Impl.collect_project_dirs(root)
+	h.check(dirs.has("res://"), "collect includes root")
+	h.check(dirs.has("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests"), "collect includes nested dir")
+	h.check(not dirs.has("res://.godot"), "collect skips data dir")
+	h.check(Impl.collect_project_dirs("/nope_xyz_missing").is_empty(), "collect dirs missing root empty")
+	var inv := Impl.collect_file_census(root)
+	h.check((inv.get("files", []) as Array).size() == int(inv.get("total", -1)), "inventory files match total")
+	h.check(not (inv.get("dirs", []) as Array).is_empty(), "inventory lists dirs")
+	var bad_shape := false
+	for f in inv.get("files", []):
+		if not ((f as Dictionary).has("path") and (f as Dictionary).has("size") and (f as Dictionary).has("created") and (f as Dictionary).has("modified")):
+			bad_shape = true
+	h.check(not bad_shape, "inventory file shape")
+	var rdoc := Impl.store_census(inv)
+	h.check(((rdoc.get("census", {}) as Dictionary).get("files", []) as Array).size() == (inv.get("files", []) as Array).size(), "roundtrip keeps files")
+	h.check(((rdoc.get("census", {}) as Dictionary).get("dirs", []) as Array).size() == (inv.get("dirs", []) as Array).size(), "roundtrip keeps dirs")
 
 
 func _r_corrupt(h) -> void:

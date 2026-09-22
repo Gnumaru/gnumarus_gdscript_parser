@@ -43,8 +43,9 @@ Install from Project → Plugins and open any script:
   issue with severity toggles (errors / warnings / future notes)
   and per-type toggles (`gd`, `tscn`, `tres`, `godot`, other);
   picking a row jumps to it and reveals the right workspace
-  (Script for scripts). The Files tab groups the project file
-  census by extension, with an `addons` include toggle.
+  (Script for scripts). The Files tab shows the project inventory
+  as a Tree (files with size/dates, sortable; directories with
+  direct/recursive counts and sizes), with an `addons` include toggle.
 - Broken resource refs (`preload`/`load`/`extends`/`@icon`) are
   rechecked live on open, edit and save — no full scan needed.
 

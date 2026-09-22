@@ -576,13 +576,16 @@ reveals the dock; Clear drops the list. Toggle state persists in
 both `EditorSettings` (`gnumarus_analyzer/dock_filters`, which wins
 on load) and the `ScanResults.json` `filters` copy, so it survives
 editor restarts with or without editor settings. The Files tab shows
-the project file census from the report's `census` key grouped by
-extension (`gd: 120 (90 project + 30 addons)`, count order), led by
-per-group summary rows (`All files: 147 files, 45.2 MB
-(2024-03-01 → 2026-09-22)`), with an
-`addons` toggle that includes or drops `res://addons/` (and nested
-dirs) from the count — persisted like the other toggles, no rescan
-needed.
+the inventory as a Tree: one collapsed group row per file partition
+plus a trailing directories group. File rows carry human size,
+creation and modification stamps and sort by path, size or either
+date (dropdown, ascending/descending toggle, path tiebreak);
+directory rows carry direct/recursive file and subdir counts plus
+both byte sums. All stamps render UTC `YYYY-MM-DD hh:mm:ss`. File
+rows navigate to the file's first issue; group/dir rows are inert.
+The sort choice persists with the other toggles. Reports without an
+inventory (older scans) fall back to extension-count rows; rescan to
+upgrade.
 
 ```gdscript
 dock.set_file_results("res://x.gd", issues) # live overlay, one file
@@ -1595,7 +1598,7 @@ suites still print, so the marker alone could look green).
   row format and status text, per-file overlay plus scan-report
   replacement, toggle wiring, row navigation, rescan/clear, editor
   openers headless-safe, dock lifecycle null-safety, Issues/Files
-  tabs with grouped census rows).
+  tabs with Tree inventory, sortable file rows and directory rows).
   `test_scan_worker.gd` (background scans: pool dispatch/done/
   cancel/wait mechanics, FullScan policy-snapshot and cancel plumbs,
   plugin dispatch null-safety headless).

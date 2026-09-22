@@ -30,6 +30,9 @@ const TYPES := ["gd", "tscn", "tres", "godot", "other"]
 const TAB_ISSUES := "Issues"
 const TAB_FILES := "Files"
 const CENSUS_HINT := "No file census yet. Run Project > Tools > Gnumaru's Full Scan."
+const SORT_KEYS := ["path", "size", "created", "modified"]
+const SORT_LABELS := {"path": "Path", "size": "Size", "created": "Created", "modified": "Modified"}
+const TREE_COLUMNS := 9
 
 var _by_path: Dictionary = {}
 var _shown: Array = []
@@ -45,7 +48,11 @@ var _status: Label = null
 var _files: Label = null
 var _addons_btn: Button = null
 var _tabs: TabContainer = null
-var _census_list: ItemList = null
+var _tree: Tree = null
+var _sort_opt: OptionButton = null
+var _sort_desc_btn: CheckButton = null
+var _sort_key := "path"
+var _sort_desc := false
 var _sev_btns := {}
 var _type_btns := {}
 var _built := false
@@ -154,12 +161,12 @@ static func census_view(census: Variant, include_addons: bool) -> Dictionary:
 	return {"extensions": (census as Dictionary).get("extensions", {}), "total": (census as Dictionary).get("total", 0)}
 
 
-## Unix mtime as a UTC calendar date ("2026-09-22"), "" when unknown.
+## Unix mtime as UTC "YYYY-MM-DD hh:mm:ss", "" when unknown.
 ## Pure (Time only), unit-tested headless.
-static func census_date(mtime: int) -> String:
+static func census_datetime(mtime: int) -> String:
 	if mtime <= 0:
 		return ""
-	return Time.get_datetime_string_from_unix_time(mtime, true).substr(0, 10)
+	return Time.get_datetime_string_from_unix_time(mtime, true).replace("T", " ")
 
 
 ## One Files-tab summary row per shown group ("All files: 147 files,
@@ -204,7 +211,7 @@ static func _census_group_row(label: String, group: Variant) -> String:
 	var newest := maxi(int((group as Dictionary).get("newest", 0)), 0)
 	if newest > 0:
 		var oldest := maxi(int((group as Dictionary).get("oldest", 0)), 0)
-		var span := "(%s → %s)" % [census_date(oldest) if oldest > 0 else "?", census_date(newest)]
+		var span := "(%s → %s)" % [census_datetime(oldest) if oldest > 0 else "?", census_datetime(newest)]
 		detail = (detail + " " + span).strip_edges()
 	if detail == "":
 		return head
@@ -240,25 +247,37 @@ static func census_rows(census: Variant, include_addons: bool) -> Array:
 	return rows
 
 
-## Merges a stored filter payload over the defaults: unknown keys
-## dropped, missing keys kept on, non-dicts ignored. Pure.
-static func sanitize_filters(raw: Variant) -> Dictionary:
-	var clean := FullScan.default_filters()
-	if not (raw is Dictionary):
-		return clean
-	var stored_show: Variant = (raw as Dictionary).get("show", {})
-	var stored_types: Variant = (raw as Dictionary).get("types", {})
-	if stored_show is Dictionary:
-		for k in (clean.get("show", {}) as Dictionary).keys():
-			if (stored_show as Dictionary).has(k):
-				(clean.get("show", {}) as Dictionary)[k] = bool((stored_show as Dictionary).get(k, true))
-	if stored_types is Dictionary:
-		for k in (clean.get("types", {}) as Dictionary).keys():
-			if (stored_types as Dictionary).has(k):
-				(clean.get("types", {}) as Dictionary)[k] = bool((stored_types as Dictionary).get(k, true))
-	var stored_addons: Variant = (raw as Dictionary).get("include_addons", true)
-	clean["include_addons"] = stored_addons if stored_addons is bool else true
-	return clean
+## Sort key guard ("path" fallback). Pure.
+static func sanitize_sort_key(raw: Variant) -> String:
+	return str(raw) if str(raw) in SORT_KEYS else "path"
+
+
+## File entries sorted by key ("path"/"size"/"created"/"modified",
+## anything else falls back to path), path-tied always, ascending
+## unless descending. Returns a sorted copy; non-dicts dropped. Pure,
+## unit-tested headless.
+static func sort_file_entries(files: Array, sort_key: String, descending := false) -> Array:
+	var rows: Array = []
+	for f in files:
+		if f is Dictionary:
+			rows.append(f)
+	var key := sanitize_sort_key(sort_key)
+	rows.sort_custom(func(a: Variant, b: Variant) -> bool:
+		var cmp := 0
+		if key == "path":
+			var pa := str((a as Dictionary).get("path", ""))
+			var pb := str((b as Dictionary).get("path", ""))
+			cmp = -1 if pa < pb else (1 if pa > pb else 0)
+		else:
+			var va := int((a as Dictionary).get(key, 0))
+			var vb := int((b as Dictionary).get(key, 0))
+			cmp = -1 if va < vb else (1 if va > vb else 0)
+		if cmp == 0:
+			var qa := str((a as Dictionary).get("path", ""))
+			var qb := str((b as Dictionary).get("path", ""))
+			cmp = -1 if qa < qb else (1 if qa > qb else 0)
+		return cmp > 0 if descending else cmp < 0)
+	return rows
 
 
 ## Loads the persisted filter state: the EditorSettings copy wins
@@ -275,10 +294,10 @@ static func load_filters() -> Dictionary:
 ## then the report file). Headless it still writes the file copy so
 ## the logic stays testable; callers gate on editor hint when they
 ## only want editor-UX persistence.
-static func save_filters(show: Dictionary, types: Dictionary, include_addons := true) -> void:
-	var payload := {"show": show.duplicate(), "types": types.duplicate(), "include_addons": bool(include_addons)}
+static func save_filters(show: Dictionary, types: Dictionary, include_addons := true, sort_key := "path", descending := false) -> void:
+	var payload := {"show": show.duplicate(), "types": types.duplicate(), "include_addons": bool(include_addons), "sort": sanitize_sort_key(sort_key), "descending": bool(descending)}
 	_write_editor_filters(payload)
-	FullScan.store_filters(show, types, include_addons)
+	FullScan.store_filters(show, types, include_addons, sanitize_sort_key(sort_key), bool(descending))
 
 
 ## EditorSettings filter payload, or {} when unavailable (headless).
@@ -371,18 +390,220 @@ func census_count() -> int:
 
 
 ## Paints the census label (hidden when uncensused) and rebuilds
-## the Files-tab rows. Never fails.
+## the Files-tab tree. Never fails.
 func _paint_census() -> void:
 	_ensure_built()
 	_files.text = census_text(_census, _include_addons)
 	_files.visible = _files.text != ""
-	_census_list.clear()
-	var rows := census_summary_rows(_census, _include_addons) + census_rows(_census, _include_addons)
-	if rows.is_empty():
-		_census_list.add_item(CENSUS_HINT, null, false)
-	else:
-		for r in rows:
-			_census_list.add_item(str(r), null, false)
+	_rebuild_file_tree()
+
+
+## First issue line per path (min), for file-row navigation targets.
+## Pure over the issues map.
+static func _first_issue_lines(by_path: Dictionary) -> Dictionary:
+	var out := {}
+	for p in by_path.keys():
+		var best := -1
+		for e in (by_path[p] as Array):
+			if e is Dictionary:
+				var ln := maxi(int((e as Dictionary).get("line", 1)), 1)
+				if best < 0 or ln < best:
+					best = ln
+		if best > 0:
+			out[str(p)] = best
+	return out
+
+
+## Rebuilds the Files-tab tree from the census: one collapsed group
+## row per file partition (project, addons unless toggled off) with
+## sorted file children, plus a trailing directories group. File rows
+## carry size/creation/modification and navigate to the file's first
+## issue (line 1 when clean); group/dir rows are inert. Without a
+## file inventory, legacy extension-count rows fill the groups; with
+## no census at all, a single hint row. Never fails.
+func _rebuild_file_tree() -> void:
+	_ensure_built()
+	_tree.clear()
+	var root := _tree.create_item()
+	var min_line := _first_issue_lines(_by_path)
+	var census := _census if _census is Dictionary else {}
+	var files: Array = (census.get("files", []) as Array).duplicate()
+	var dirs: Array = (census.get("dirs", []) as Array).duplicate()
+	if files.is_empty() and dirs.is_empty():
+		_rebuild_legacy_rows(root, census)
+		return
+	var groups: Array = []
+	if (census.get("project") is Dictionary) or not files.is_empty():
+		groups.append(["project", (census.get("project", {}) as Dictionary), false])
+	if _include_addons and ((census.get("addons") is Dictionary) or not files.is_empty()):
+		groups.append(["addons", (census.get("addons", {}) as Dictionary), false])
+	for g in groups:
+		_add_file_group(root, str((g as Array)[0]), (g as Array)[1], files, min_line)
+	_add_dirs_group(root, dirs)
+	if root.get_child_count() == 0:
+		var hint := _tree.create_item(root)
+		hint.set_text(0, CENSUS_HINT)
+		_set_row_selectable(hint, false)
+
+
+## One collapsed file-group row with its sorted file children.
+## Falls back to the live file count when the group dict carries no
+## summary (hand-made censuses), so files never vanish silently.
+func _add_file_group(root: TreeItem, label: String, group: Variant, files: Array, min_line: Dictionary) -> void:
+	var own: Array = []
+	for f in files:
+		if not (f is Dictionary):
+			continue
+		var p := str((f as Dictionary).get("path", ""))
+		if p == "":
+			continue
+		if label == "addons" and not FullScan.is_addons_path(p):
+			continue
+		if label == "project" and FullScan.is_addons_path(p):
+			continue
+		own.append(f)
+	var summary := _census_group_row(label, group)
+	if summary == "" and not own.is_empty():
+		summary = "%s: %d file%s" % [label, own.size(), "" if own.size() == 1 else "s"]
+	if summary == "":
+		return
+	var node := _tree.create_item(root)
+	node.set_text(0, summary)
+	node.collapsed = true
+	_set_row_selectable(node, false)
+	for f in sort_file_entries(own, _sort_key, _sort_desc):
+		var fd := f as Dictionary
+		var p := str(fd.get("path", ""))
+		var row := _tree.create_item(node)
+		row.set_text(0, p)
+		row.set_text(5, FullScan.human_size(maxi(int(fd.get("size", 0)), 0)))
+		row.set_text(7, census_datetime(maxi(int(fd.get("created", 0)), 0)))
+		row.set_text(8, census_datetime(maxi(int(fd.get("modified", 0)), 0)))
+		row.set_metadata(0, {"path": p, "line": int(min_line.get(p, 1))})
+
+
+## Trailing directories group: every directory with direct/recursive
+## counts and sizes (addons paths hidden with the toggle off;
+## aggregates always cover the full tree). Inert rows.
+func _add_dirs_group(root: TreeItem, dirs: Array) -> void:
+	var shown: Array = []
+	for d in dirs:
+		if not (d is Dictionary):
+			continue
+		var p := str((d as Dictionary).get("path", ""))
+		if p == "":
+			continue
+		if not _include_addons and FullScan.is_addons_path(p):
+			continue
+		shown.append(d)
+	if shown.is_empty():
+		return
+	shown.sort_custom(func(a: Variant, b: Variant) -> bool: return str((a as Dictionary).get("path", "")) < str((b as Dictionary).get("path", "")))
+	var node := _tree.create_item(root)
+	node.set_text(0, "directories: %d" % shown.size())
+	node.collapsed = true
+	_set_row_selectable(node, false)
+	for d in shown:
+		var dd := d as Dictionary
+		var row := _tree.create_item(node)
+		row.set_text(0, str(dd.get("path", "")))
+		row.set_text(1, str(maxi(int(dd.get("files", 0)), 0)))
+		row.set_text(2, str(maxi(int(dd.get("subdirs", 0)), 0)))
+		row.set_text(3, str(maxi(int(dd.get("files_recursive", 0)), 0)))
+		row.set_text(4, str(maxi(int(dd.get("subdirs_recursive", 0)), 0)))
+		row.set_text(5, FullScan.human_size(maxi(int(dd.get("size", 0)), 0)))
+		row.set_text(6, FullScan.human_size(maxi(int(dd.get("size_recursive", 0)), 0)))
+		row.set_text(7, census_datetime(maxi(int(dd.get("created", 0)), 0)))
+		row.set_text(8, census_datetime(maxi(int(dd.get("modified", 0)), 0)))
+		_set_row_selectable(row, false)
+
+
+## Legacy rows for reports without a file inventory: extension-count
+## children under each group, like the old flat list. Each group
+## shows its own extensions (the merged view stands in for a missing
+## project partition). Inert rows.
+func _rebuild_legacy_rows(root: TreeItem, census: Dictionary) -> void:
+	var proj: Dictionary = (census as Dictionary).get("project", {})
+	if not (proj is Dictionary) or (proj as Dictionary).is_empty():
+		proj = census
+	var groups: Array = [["project", proj]]
+	if _include_addons:
+		groups.append(["addons", (census as Dictionary).get("addons", {})])
+	var built := 0
+	for g in groups:
+		var gdict: Dictionary = (g as Array)[1]
+		var summary := _census_group_row(str((g as Array)[0]), gdict)
+		if summary == "":
+			continue
+		var node := _tree.create_item(root)
+		node.set_text(0, summary)
+		node.collapsed = true
+		_set_row_selectable(node, false)
+		built += 1
+		for r in _sorted_count_rows(gdict.get("extensions", {})):
+			var row := _tree.create_item(node)
+			row.set_text(0, str(r))
+			_set_row_selectable(row, false)
+	if built == 0:
+		var hint := _tree.create_item(root)
+		hint.set_text(0, CENSUS_HINT)
+		_set_row_selectable(hint, false)
+
+
+## "ext: N" strings from an extensions map, count order with
+## alphabetical ties. Pure.
+static func _sorted_count_rows(exts: Variant) -> Array:
+	var map: Dictionary = (exts as Dictionary) if exts is Dictionary else {}
+	var keys: Array = map.keys()
+	keys.sort_custom(func(a: Variant, b: Variant) -> bool:
+		var ca := int(map.get(a, 0))
+		var cb := int(map.get(b, 0))
+		if ca != cb:
+			return ca > cb
+		return str(a) < str(b))
+	var rows: Array = []
+	for k in keys:
+		rows.append("%s: %d" % [str(k), int(map.get(k, 0))])
+	return rows
+
+
+## Marks every column of a row (un)selectable. Never fails.
+func _set_row_selectable(row: TreeItem, selectable: bool) -> void:
+	if row == null or not is_instance_valid(row):
+		return
+	for c in range(TREE_COLUMNS):
+		row.set_selectable(c, selectable)
+
+
+## File-row activation: navigates to the file's first issue (line 1
+## when clean). Group/dir rows carry no target and stay inert.
+func _on_tree_item_selected() -> void:
+	var sel := _tree.get_selected()
+	if sel == null or not is_instance_valid(sel):
+		return
+	var md: Variant = sel.get_metadata(0)
+	if not (md is Dictionary) or str((md as Dictionary).get("path", "")) == "":
+		return
+	if _goto.is_valid():
+		_goto.call(md)
+
+
+## Sort dropdown: re-sorts the file groups, persisting the choice.
+func _on_sort_changed(idx: int) -> void:
+	if idx < 0 or idx >= SORT_KEYS.size():
+		return
+	_sort_key = str(SORT_KEYS[idx])
+	_persist_filters()
+	_rebuild_file_tree()
+
+
+## Order toggle: flips ascending/descending, persisting the choice.
+func _on_desc_toggled(pressed_on: bool) -> void:
+	_sort_desc = bool(pressed_on)
+	if _sort_desc_btn != null and is_instance_valid(_sort_desc_btn):
+		_sort_desc_btn.button_pressed = _sort_desc
+	_persist_filters()
+	_rebuild_file_tree()
 
 
 ## Drops every known issue.
@@ -476,14 +697,68 @@ func _ensure_built() -> void:
 	_addons_btn.button_pressed = true
 	_addons_btn.pressed.connect(_on_addons_toggled)
 	files_bar.add_child(_addons_btn)
-	_census_list = ItemList.new()
-	_census_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	files_page.add_child(_census_list)
+	_sort_opt = OptionButton.new()
+	_sort_opt.focus_mode = Control.FOCUS_NONE
+	_sort_opt.tooltip_text = "Sort files by"
+	_sort_opt.fit_to_longest_item = false
+	_sort_opt.clip_text = true
+	for k in SORT_KEYS:
+		_sort_opt.add_item(str(SORT_LABELS.get(k, k)))
+	_sort_opt.selected = 0
+	_sort_opt.item_selected.connect(_on_sort_changed)
+	files_bar.add_child(_sort_opt)
+	_sort_desc_btn = CheckButton.new()
+	_sort_desc_btn.text = "Descending"
+	_sort_desc_btn.focus_mode = Control.FOCUS_NONE
+	_sort_desc_btn.tooltip_text = "Reverse the file order"
+	_sort_desc_btn.toggled.connect(_on_desc_toggled)
+	files_bar.add_child(_sort_desc_btn)
+	_tree = Tree.new()
+	_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_tree.columns = TREE_COLUMNS
+	_tree.set_column_title(0, "Path")
+	_tree.set_column_title(1, "Files")
+	_tree.set_column_title(2, "Subdirs")
+	_tree.set_column_title(3, "Files (rec)")
+	_tree.set_column_title(4, "Subdirs (rec)")
+	_tree.set_column_title(5, "Size")
+	_tree.set_column_title(6, "Size (rec)")
+	_tree.set_column_title(7, "Created")
+	_tree.set_column_title(8, "Modified")
+	_tree.hide_root = true
+	_tree.column_titles_visible = true
+	_tree.item_selected.connect(_on_tree_item_selected)
+	files_page.add_child(_tree)
 	if Engine.is_editor_hint():
 		_apply_filters(load_filters())
 		_census = FullScan.load_results().get("census", {})
 	_paint_census()
 	refresh()
+
+
+## Merges a stored filter payload over the defaults: unknown keys
+## dropped, missing keys kept on, non-dicts ignored, sort key
+## validated, descending strictly boolean. Pure.
+static func sanitize_filters(raw: Variant) -> Dictionary:
+	var clean := FullScan.default_filters()
+	if not (raw is Dictionary):
+		return clean
+	var stored_show: Variant = (raw as Dictionary).get("show", {})
+	var stored_types: Variant = (raw as Dictionary).get("types", {})
+	if stored_show is Dictionary:
+		for k in (clean.get("show", {}) as Dictionary).keys():
+			if (stored_show as Dictionary).has(k):
+				(clean.get("show", {}) as Dictionary)[k] = bool((stored_show as Dictionary).get(k, true))
+	if stored_types is Dictionary:
+		for k in (clean.get("types", {}) as Dictionary).keys():
+			if (stored_types as Dictionary).has(k):
+				(clean.get("types", {}) as Dictionary)[k] = bool((stored_types as Dictionary).get(k, true))
+	var stored_addons: Variant = (raw as Dictionary).get("include_addons", true)
+	clean["include_addons"] = stored_addons if stored_addons is bool else true
+	clean["sort"] = sanitize_sort_key((raw as Dictionary).get("sort", "path"))
+	var stored_desc: Variant = (raw as Dictionary).get("descending", false)
+	clean["descending"] = stored_desc if stored_desc is bool else false
+	return clean
 
 
 ## Applies a persisted filter payload to the state and buttons
@@ -493,6 +768,8 @@ func _apply_filters(stored: Dictionary) -> void:
 	_show = (clean.get("show", {}) as Dictionary).duplicate()
 	_types = (clean.get("types", {}) as Dictionary).duplicate()
 	_include_addons = bool(clean.get("include_addons", true))
+	_sort_key = sanitize_sort_key(clean.get("sort", "path"))
+	_sort_desc = bool(clean.get("descending", false))
 	for k in _show.keys():
 		if _sev_btns.has(k):
 			(_sev_btns[k] as Button).button_pressed = bool(_show.get(k, true))
@@ -501,6 +778,10 @@ func _apply_filters(stored: Dictionary) -> void:
 			(_type_btns[k] as Button).button_pressed = bool(_types.get(k, true))
 	if _addons_btn != null and is_instance_valid(_addons_btn):
 		_addons_btn.button_pressed = _include_addons
+	if _sort_opt != null and is_instance_valid(_sort_opt):
+		_sort_opt.select(maxi(SORT_KEYS.find(_sort_key), 0))
+	if _sort_desc_btn != null and is_instance_valid(_sort_desc_btn):
+		_sort_desc_btn.button_pressed = _sort_desc
 
 
 static func _make_toggle(label_text: String, tip: String) -> Button:
@@ -538,7 +819,7 @@ func _on_addons_toggled() -> void:
 func _persist_filters() -> void:
 	if not Engine.is_editor_hint():
 		return
-	save_filters(_show, _types, _include_addons)
+	save_filters(_show, _types, _include_addons, _sort_key, _sort_desc)
 
 
 func _on_rescan() -> void:

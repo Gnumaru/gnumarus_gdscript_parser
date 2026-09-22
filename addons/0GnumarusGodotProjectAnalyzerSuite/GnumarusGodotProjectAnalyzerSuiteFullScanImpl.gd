@@ -99,11 +99,12 @@ static func empty_doc() -> Dictionary:
 	return {"version": 1, "generated_unix": 0.0, "stages": {}, "errors": [], "warnings": [], "summary": {"stages": [], "files": 0, "errors": 0, "warnings": 0}, "filters": default_filters(), "census": _norm_census_group({}, true)}
 
 
-## Default dock filter state (everything visible, addons counted).
-## The dock owns the same shape; this copy lets the report carry it
-## without depending on the dock script.
+## Default dock filter state (everything visible, addons counted,
+## files sorted by path ascending). The dock owns the same shape;
+## this copy lets the report carry it without depending on the dock
+## script.
 static func default_filters() -> Dictionary:
-	return {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "include_addons": true}
+	return {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "include_addons": true, "sort": "path", "descending": false}
 
 
 ## Loads the on-disk report, or an empty doc when missing/unreadable.
@@ -214,14 +215,14 @@ static func _write_doc(doc: Dictionary) -> Dictionary:
 	return doc
 
 
-## Stores dock filter state ("show"/"types" toggle maps plus the
-## addons-census flag) in the report without touching any stage entry
-## or aggregate. Returns the full doc. The dock calls this as its
-## file-level persistence; the EditorSettings copy (when available)
-## takes precedence on load.
-static func store_filters(show: Dictionary, types: Dictionary, include_addons := true) -> Dictionary:
+## Stores dock filter state ("show"/"types" toggle maps, the
+## addons-census flag and the Files-tab sort) in the report without
+## touching any stage entry or aggregate. Returns the full doc. The
+## dock calls this as its file-level persistence; the EditorSettings
+## copy (when available) takes precedence on load.
+static func store_filters(show: Dictionary, types: Dictionary, include_addons := true, sort_key := "path", descending := false) -> Dictionary:
 	var doc := load_results()
-	doc["filters"] = {"show": show.duplicate(), "types": types.duplicate(), "include_addons": bool(include_addons)}
+	doc["filters"] = {"show": show.duplicate(), "types": types.duplicate(), "include_addons": bool(include_addons), "sort": str(sort_key), "descending": bool(descending)}
 	doc["generated_unix"] = Time.get_unix_time_from_system()
 	return _write_doc(doc)
 
@@ -267,38 +268,57 @@ static func human_size(bytes: int) -> String:
 	return "%.1f %s" % [v, units[u]]
 
 
-## Size (bytes) and mtime (unix seconds) of one file, zeros when
-## missing/unreadable. Static, pure IO, headless-safe.
+## Size (bytes), creation and modification unixtimes of one file.
+## `created` is always 0: Godot exposes no creation-time API
+## (FileAccess has modified/access only), so the schema carries the
+## key for forward compatibility while collection stays honest.
+## Zeros when missing/unreadable. Static, pure IO, headless-safe.
 static func file_stat(path: String) -> Dictionary:
 	var size := 0
-	var mtime := 0
+	var modified := 0
 	if str(path) != "" and FileAccess.file_exists(path):
-		mtime = int(FileAccess.get_modified_time(path))
-		var f := FileAccess.open(path, FileAccess.READ)
-		if f != null:
-			size = maxi(int((f as FileAccess).get_length()), 0)
-			(f as FileAccess).close()
-	return {"size": size, "mtime": mtime}
+		modified = int(FileAccess.get_modified_time(path))
+		size = maxi(int(FileAccess.get_size(path)), 0)
+	return {"size": size, "created": 0, "modified": modified}
 
 
 ## Enriched census group for paths: counts plus byte sum, human size,
-## and oldest/newest mtimes. `read_stat` optionally stubs per-file
-## stats (Callable(path) -> {"size","mtime"}; real FileAccess
-## otherwise, so hermetic tests stay file-free). Pure modulo stats.
+## and oldest/newest modification mtimes. `read_stat` optionally stubs
+## per-file stats (Callable(path) -> {"size","created","modified"};
+## real FileAccess otherwise, so hermetic tests stay file-free).
+## Pure modulo stats.
 static func census_group(paths: Array, read_stat := Callable()) -> Dictionary:
+	return census_group_entries(stat_file_entries(paths, read_stat))
+
+
+## One stat entry per path ({"path","size","created","modified"}).
+## Pure modulo stats.
+static func stat_file_entries(paths: Array, read_stat := Callable()) -> Array:
+	var out: Array = []
+	for p in paths:
+		var st: Dictionary = (read_stat.call(str(p)) as Dictionary) if read_stat.is_valid() else file_stat(str(p))
+		out.append({"path": str(p), "size": maxi(int(st.get("size", 0)), 0), "created": maxi(int(st.get("created", 0)), 0), "modified": maxi(int(st.get("modified", 0)), 0)})
+	return out
+
+
+## Aggregates stat entries into a census group (counts, byte sum,
+## human size, oldest/newest mtimes). Pure.
+static func census_group_entries(entries: Array) -> Dictionary:
 	var exts := {}
 	var total := 0
 	var bytes := 0
 	var newest := 0
 	var oldest := 0
 	var seen := false
-	for p in paths:
-		var ext := census_ext(p)
+	for e in entries:
+		if not (e is Dictionary):
+			continue
+		var ed := e as Dictionary
+		var ext := census_ext(str(ed.get("path", "")))
 		exts[ext] = int(exts.get(ext, 0)) + 1
 		total += 1
-		var st: Dictionary = (read_stat.call(str(p)) as Dictionary) if read_stat.is_valid() else file_stat(str(p))
-		bytes += maxi(int(st.get("size", 0)), 0)
-		var mt := maxi(int(st.get("mtime", 0)), 0)
+		bytes += maxi(int(ed.get("size", 0)), 0)
+		var mt := maxi(int(ed.get("modified", 0)), 0)
 		if not seen or mt < oldest:
 			oldest = mt
 		if not seen or mt > newest:
@@ -358,6 +378,102 @@ static func _res_path(root: String, abspath: String) -> String:
 	return abspath
 
 
+## Every project directory under root as res:// paths (root itself
+## included as "res://"), skipping generated and version-control
+## subtrees (`.godot/`, `.git/`). Static, pure IO, headless-safe.
+static func collect_project_dirs(root: String) -> Array:
+	var out: Array = []
+	if root == "" or not DirAccess.dir_exists_absolute(root):
+		return out
+	var dirs: Array = [root]
+	while not dirs.is_empty():
+		var dir: String = str(dirs.pop_back())
+		if dir == "" or not DirAccess.dir_exists_absolute(dir):
+			continue
+		out.append(_res_path(root, dir))
+		for sub in DirAccess.get_directories_at(dir):
+			if str(sub) != ".godot" and str(sub) != ".git":
+				dirs.append(dir + "/" + str(sub))
+	out.sort()
+	return out
+
+
+## Parent res:// directory of a file or dir path ("" for the root
+## itself). The res:// double slash is preserved ("res://x.gd" lives
+## in "res://", not "res:/"). Pure.
+static func _parent_dir(path: String) -> String:
+	var s := str(path)
+	while s.ends_with("/") and s.length() > 7:
+		s = s.substr(0, s.length() - 1)
+	if s == "" or s == "res://" or s == "res:/":
+		return ""
+	var slash := s.rfind("/")
+	if slash < 0:
+		return ""
+	var parent := s.substr(0, slash)
+	if parent == "res:/":
+		return "res://"
+	return parent
+
+
+## Per-directory rollups for `dirs` from pre-statted `file_entries`
+## ({"path","size",...}): direct file/subdir counts, recursive file/
+## subdir totals, direct and recursive byte sums. Directory dates
+## stay 0: DirAccess exposes no stat API (documented gap, same as
+## file creation times). Children roll into parents deepest-first.
+## Pure.
+static func census_dir_entries(dirs: Array, file_entries: Array) -> Array:
+	var by_parent_files := {}
+	for f in file_entries:
+		if not (f is Dictionary):
+			continue
+		var parent := _parent_dir(str((f as Dictionary).get("path", "")))
+		if not by_parent_files.has(parent):
+			by_parent_files[parent] = []
+		(by_parent_files[parent] as Array).append(f)
+	var by_parent_dirs := {}
+	for d in dirs:
+		var ds := str(d)
+		if ds == "":
+			continue
+		var parent := _parent_dir(ds)
+		if parent != "":
+			if not by_parent_dirs.has(parent):
+				by_parent_dirs[parent] = []
+			(by_parent_dirs[parent] as Array).append(ds)
+	var ordered: Array = (dirs as Array).duplicate()
+	ordered.sort_custom(func(a: Variant, b: Variant) -> bool: return str(a).length() > str(b).length())
+	var acc := {}
+	var out: Array = []
+	for ds in ordered:
+		var dsp := str(ds)
+		if dsp == "":
+			continue
+		var dfiles: Array = (by_parent_files.get(dsp, []) as Array).duplicate()
+		var ddirs: Array = (by_parent_dirs.get(dsp, []) as Array).duplicate()
+		var direct_bytes := 0
+		for f in dfiles:
+			direct_bytes += maxi(int((f as Dictionary).get("size", 0)), 0)
+		var rec_files := dfiles.size()
+		var rec_subdirs := ddirs.size()
+		var rec_bytes := direct_bytes
+		for child in ddirs:
+			var cr: Dictionary = acc.get(str(child), {})
+			rec_files += int(cr.get("files_recursive", 0))
+			rec_subdirs += int(cr.get("subdirs_recursive", 0))
+			rec_bytes += int(cr.get("size_recursive", 0))
+		var entry := {
+			"path": dsp, "created": 0, "modified": 0,
+			"files": dfiles.size(), "subdirs": ddirs.size(),
+			"files_recursive": rec_files, "subdirs_recursive": rec_subdirs,
+			"size": direct_bytes, "size_recursive": rec_bytes,
+		}
+		acc[dsp] = entry
+		out.append(entry)
+	out.sort_custom(func(a: Variant, b: Variant) -> bool: return str((a as Dictionary).get("path", "")) < str((b as Dictionary).get("path", "")))
+	return out
+
+
 ## True for paths inside res://addons/ (the dir itself counts too).
 ## Pure, unit-tested headless.
 static func is_addons_path(path: String) -> bool:
@@ -369,32 +485,65 @@ static func is_addons_path(path: String) -> bool:
 ## project tree ("project", res://addons/ excluded) and the addons
 ## subtree ("addons"), plus the merged view (same group shape).
 ## Every group carries counts, byte sum, human size and oldest/newest
-## mtimes. `read_stat` stubs per-file stats (see census_group).
-## Static, pure IO.
+## mtimes; the report additionally lists every file
+## ({"path","size","created","modified"}) and every directory (see
+## census_dir_entries). `read_stat` stubs per-file stats (see
+## census_group). Static, pure IO.
 static func collect_file_census(root: String, read_stat := Callable()) -> Dictionary:
-	var project: Array = []
-	var addons: Array = []
-	for p in collect_project_files(root):
-		if is_addons_path(str(p)):
-			addons.append(p)
+	var entries := stat_file_entries(collect_project_files(root), read_stat)
+	var pentries: Array = []
+	var aentries: Array = []
+	for e in entries:
+		if is_addons_path(str((e as Dictionary).get("path", ""))):
+			aentries.append(e)
 		else:
-			project.append(p)
-	var pg := census_group(project, read_stat)
-	var ag := census_group(addons, read_stat)
+			pentries.append(e)
+	var pg := census_group_entries(pentries)
+	var ag := census_group_entries(aentries)
 	var merged := _merge_groups(pg, ag)
-	return {"extensions": merged.get("extensions", {}), "total": int(merged.get("total", 0)), "bytes": int(merged.get("bytes", 0)), "size": str(merged.get("size", "")), "newest": int(merged.get("newest", 0)), "oldest": int(merged.get("oldest", 0)), "project": pg, "addons": ag}
+	return {"extensions": merged.get("extensions", {}), "total": int(merged.get("total", 0)), "bytes": int(merged.get("bytes", 0)), "size": str(merged.get("size", "")), "newest": int(merged.get("newest", 0)), "oldest": int(merged.get("oldest", 0)), "project": pg, "addons": ag, "files": entries, "dirs": census_dir_entries(collect_project_dirs(root), entries)}
 
 
 ## Stores the file census in the report without touching any stage
 ## entry or aggregate. Persists the merged view plus the project and
-## addons partitions, each with counts, byte sum, human size and
-## oldest/newest mtimes (the dock toggle and Files tab read them);
-## missing keys normalize to zero. Returns the full doc.
+## addons partitions (each with counts, byte sum, human size and
+## oldest/newest mtimes), the per-file inventory ({"path","size",
+## "created","modified"}) and the per-directory rollups (see
+## census_dir_entries). Missing keys normalize to zero/empty.
+## Returns the full doc.
 static func store_census(census: Dictionary) -> Dictionary:
 	var doc := load_results()
 	doc["census"] = _norm_census_group(census, true)
+	(doc["census"] as Dictionary)["files"] = _norm_file_entries(census.get("files", []))
+	(doc["census"] as Dictionary)["dirs"] = _norm_dir_entries(census.get("dirs", []))
 	doc["generated_unix"] = Time.get_unix_time_from_system()
 	return _write_doc(doc)
+
+
+## Normalized per-file entries (unknown shapes dropped). Pure.
+static func _norm_file_entries(files: Variant) -> Array:
+	var out: Array = []
+	if not (files is Array):
+		return out
+	for f in (files as Array):
+		if not (f is Dictionary):
+			continue
+		var d := f as Dictionary
+		out.append({"path": str(d.get("path", "")), "size": maxi(int(d.get("size", 0)), 0), "created": maxi(int(d.get("created", 0)), 0), "modified": maxi(int(d.get("modified", 0)), 0)})
+	return out
+
+
+## Normalized per-directory entries (unknown shapes dropped). Pure.
+static func _norm_dir_entries(dirs: Variant) -> Array:
+	var out: Array = []
+	if not (dirs is Array):
+		return out
+	for d in (dirs as Array):
+		if not (d is Dictionary):
+			continue
+		var e := d as Dictionary
+		out.append({"path": str(e.get("path", "")), "created": maxi(int(e.get("created", 0)), 0), "modified": maxi(int(e.get("modified", 0)), 0), "files": maxi(int(e.get("files", 0)), 0), "subdirs": maxi(int(e.get("subdirs", 0)), 0), "files_recursive": maxi(int(e.get("files_recursive", 0)), 0), "subdirs_recursive": maxi(int(e.get("subdirs_recursive", 0)), 0), "size": maxi(int(e.get("size", 0)), 0), "size_recursive": maxi(int(e.get("size_recursive", 0)), 0)})
+	return out
 
 
 ## Normalized census group (counts, bytes, size, mtimes; zeros when
