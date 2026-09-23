@@ -40,11 +40,14 @@ Install from Project → Plugins and open any script:
   warnings into `.godot/0GnumarusGodotProjectAnalyzerSuiteData/ScanResults.json`.
   From the Tools menu it runs in the background pool (same
   exclusive mode as the warm pass); File → Run stays synchronous.
+  The resource pass also analyzes GDScript embedded in `.tscn`/`.tres`
+  (per-node user JSONs, opt out via `gnumarus_analyzer/analyze_embedded_scripts`).
 - A bottom-panel dock with Issues and Files tabs: every known
   issue with severity toggles (errors / warnings / future notes)
   and per-type toggles (`gd`, `tscn`, `tres`, `godot`, other);
   picking a row jumps to it and reveals the right workspace
-  (Script for scripts). The Files tab shows the project inventory
+  (Script for scripts; embedded rows open the scene, focus the node
+  and open its script at the error line). The Files tab shows the project inventory
   as a Tree (files with size/dates, sortable; directories with
   direct/recursive counts and sizes), with an `addons` include toggle.
 - Broken resource refs (`preload`/`load`/`extends`/`@icon`) are

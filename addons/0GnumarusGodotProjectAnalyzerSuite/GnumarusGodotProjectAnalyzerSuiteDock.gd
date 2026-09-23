@@ -118,6 +118,9 @@ static func severity_mark(sev: String) -> String:
 static func format_row(issue: Dictionary) -> String:
 	var sev := normalize_severity(issue)
 	var line := maxi(int(issue.get("line", 1)), 1)
+	var scene_line := maxi(int(issue.get("scene_line", 0)), 0)
+	if scene_line > 0:
+		return "[%s] %s:%d:%d: [%s] %s" % [severity_mark(sev), str(issue.get("path", "?")), scene_line, line, str(issue.get("kind", "?")), str(issue.get("message", ""))]
 	return "[%s] %s:%d: [%s] %s" % [severity_mark(sev), str(issue.get("path", "?")), line, str(issue.get("kind", "?")), str(issue.get("message", ""))]
 
 
@@ -138,9 +141,11 @@ static func filter_issues(issues: Array, show: Dictionary, types: Dictionary) ->
 
 ## Stable identity of one issue for the per-row hide button:
 ## issues sharing every field hide as one (they are indistinguishable
-## on screen anyway). Pure, unit-tested headless.
+## on screen anyway). The node and scene line ride along so the same
+## embedded error on two nodes (same path/script line) hides per node.
+## Pure, unit-tested headless.
 static func hide_key(issue: Dictionary) -> String:
-	return "%s|%s|%s|%s|%d|%d|%s" % [
+	return "%s|%s|%s|%s|%d|%d|%s|%s|%d" % [
 		str(issue.get("stage", "")),
 		str(issue.get("severity", "")),
 		str(issue.get("kind", "")),
@@ -148,6 +153,8 @@ static func hide_key(issue: Dictionary) -> String:
 		maxi(int(issue.get("line", 1)), 1),
 		maxi(int(issue.get("column", 0)), 0),
 		str(issue.get("message", "")),
+		str(issue.get("node", "")),
+		maxi(int(issue.get("scene_line", 0)), 0),
 	]
 
 

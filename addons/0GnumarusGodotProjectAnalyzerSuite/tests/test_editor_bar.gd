@@ -47,6 +47,7 @@ func run() -> Dictionary:
 	_bar_snapshot(h)
 	_exit_clears(h)
 	_tree_nulls(h)
+	_embedded_nav(h)
 	return h
 
 
@@ -255,6 +256,31 @@ func _on_goto(issue: Dictionary) -> void:
 func _tree_nulls(h) -> void:
 	_tree_nulls_basic(h)
 	_tree_ui(h)
+
+
+func _embedded_nav(h) -> void:
+	_check(h, EdTree.relative_node_path("SceneRoot/d/e", "SceneRoot") == "d/e", "embedded relative strips root")
+	_check(h, EdTree.relative_node_path("SceneRoot", "SceneRoot") == ".", "embedded root itself dots")
+	_check(h, EdTree.relative_node_path("Other/x", "SceneRoot") == "Other/x", "embedded foreign kept")
+	_check(h, EdTree.relative_node_path("", "SceneRoot") == "", "embedded empty kept")
+	_check(h, not EdTree.focus_scene_node("SceneRoot/e"), "embedded focus false headless")
+	_check(h, not EdTree.focus_scene_node(""), "embedded focus empty false")
+	_check(h, not EdTree.open_node_script("SceneRoot/e", 3), "embedded node script false headless")
+	_check(h, not EdTree.open_embedded_issue("res://a/b/c.tscn", "SceneRoot/e", 3), "embedded open false headless")
+	_check(h, not EdTree.open_embedded_issue("", "SceneRoot/e", 3), "embedded open empty scene false")
+	var g1 := EdTree.note_navigation()
+	var g2 := EdTree.note_navigation()
+	_check(h, g2 == g1 + 1, "navigation generations bump")
+	EdTree._assert_script_screen_soon(g2, 3)
+	_check(h, true, "deferred assert schedules nothing headless")
+	EdTree._deferred_script_focus(1, g1, 3)
+	_check(h, true, "stale deferred assert quiet")
+	EdTree._deferred_script_focus(3, g2, 3)
+	_check(h, true, "current deferred assert quiet headless")
+	var impl = Impl.new(null)
+	impl._goto_dock_issue({"path": "res://a/b/c.tscn", "line": 3, "column": 0, "kind": "return_mismatch", "message": "m", "severity": "error", "node": "SceneRoot/e", "scene": "res://a/b/c.tscn", "embedded_base": "a_b_c.tscn_SceneRoot_e"})
+	_check(h, true, "embedded dock goto quiet headless")
+	impl.exit_tree()
 
 
 func _tree_nulls_basic(h) -> void:

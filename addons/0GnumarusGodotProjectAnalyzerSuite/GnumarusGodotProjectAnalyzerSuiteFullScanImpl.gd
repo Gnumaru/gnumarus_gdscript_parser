@@ -6,8 +6,12 @@ extends RefCounted
 ## Runs every implemented analysis pass over the whole project and
 ## merges each pass result into a single JSON report,
 ## `.godot/0GnumarusGodotProjectAnalyzerSuiteData/ScanResults.json`.
-## Current stages: "gdscript" (full analyzer over every project .gd)
-## and "resource_integrity" (text resources plus .gd load literals).
+## Current stages: "gdscript" (full analyzer over every project .gd;
+## never embedded scripts, so scripts-only runs stay separable) and
+## "resource_integrity" (text resources plus .gd load literals, plus
+## embedded GDScripts as a consequence of the resource scan unless
+## {"embedded": false} or the analyze_embedded_scripts setting opts
+## out).
 ## Future stages only need a new stage name and a store_stage() call:
 ## aggregation (merge, sort, summary) is generic over the stages map,
 ## so no existing code changes when a stage is added.
@@ -28,7 +32,9 @@ extends RefCounted
 ##               "errors": int, "warnings": int},
 ## }
 ## Every issue carries its stage plus severity/kind/message/path/line/
-## column, sorted by (path, line, column, severity, kind).
+## column, sorted by (path, line, column, severity, kind, node —
+## embedded scripts on two nodes share path and script line, so the
+## node breaks that tie before the message).
 ##
 ## Deliberately RefCounted with no Editor dependency (same split as
 ## the analyzer and the integrity checker): the whole flow runs
@@ -40,6 +46,8 @@ extends RefCounted
 
 const SynParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
 const Analyzer = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptAnalyzer.gd")
+const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
+const TextParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteTextResourceParser.gd")
 const Integrity = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteResourceIntegrity.gd")
 const Uid = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteUidCache.gd")
 const Dumper = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGodotTypesInfoDumper.gd")
@@ -47,6 +55,11 @@ const Dumper = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/Gnumarus
 ## Stage names (new stages add one constant and one runner).
 const STAGE_GDSCRIPT := "gdscript"
 const STAGE_INTEGRITY := "resource_integrity"
+
+## ProjectSetting toggling GDScript embedded in text resources
+## (sub_resource GDScript in .tscn/.tres): true analyzes them as a
+## consequence of the integrity stage, false skips them. Default true.
+const SETTING_EMBEDDED := "gnumarus_analyzer/analyze_embedded_scripts"
 
 const RESULTS_FILE := "ScanResults.json"
 const UID_CACHE := "res://.godot/uid_cache.bin"
@@ -119,7 +132,8 @@ static func load_results() -> Dictionary:
 
 
 ## Cross-file issue order: path first, then position, errors before
-## warnings on ties. Static, pure.
+## warnings on ties (same embedded script line on two nodes orders by
+## node before message, so shared scripts stay grouped). Static, pure.
 static func _issue_less(a: Variant, b: Variant) -> bool:
 	if not (a is Dictionary):
 		return false
@@ -147,16 +161,23 @@ static func _issue_less(a: Variant, b: Variant) -> bool:
 	var bk := str(bd.get("kind", ""))
 	if ak != bk:
 		return ak < bk
+	var an := str(ad.get("node", ""))
+	var bn := str(bd.get("node", ""))
+	if an != bn:
+		return an < bn
 	return str(ad.get("message", "")) < str(bd.get("message", ""))
 
 
 ## Normalizes one analyzer/integrity issue into the report shape.
+## Embedded-script extras (scene/node/embedded_base/embedded_sub) ride
+## along when present, so dock navigation can open the scene, focus
+## the node and jump to the embedded line. Static, pure.
 static func _tag(stage: String, issue: Variant, fallback_path: String) -> Dictionary:
 	var d: Dictionary = issue as Dictionary if issue is Dictionary else {}
 	var sev := str(d.get("severity", "error"))
 	if sev != "warning":
 		sev = "error"
-	return {
+	var out := {
 		"stage": stage,
 		"severity": sev,
 		"kind": str(d.get("kind", "?")),
@@ -165,6 +186,73 @@ static func _tag(stage: String, issue: Variant, fallback_path: String) -> Dictio
 		"line": maxi(int(d.get("line", 1)), 1),
 		"column": maxi(int(d.get("column", 0)), 0),
 	}
+	for k in ["scene", "node", "embedded_base", "embedded_sub"]:
+		if (d as Dictionary).has(k) and str((d as Dictionary).get(k, "")) != "":
+			out[k] = str((d as Dictionary).get(k, ""))
+	if (d as Dictionary).has("scene_line") and int((d as Dictionary).get("scene_line", 0)) > 0:
+		out["scene_line"] = maxi(int((d as Dictionary).get("scene_line", 0)), 1)
+	return out
+
+
+## True when embedded GDScripts ride along the integrity stage.
+## `opts` optionally pins {"embedded": bool} (worker/tests); otherwise
+## the ProjectSetting decides (default true). Static, headless-safe.
+static func embedded_enabled(opts := {}) -> bool:
+	if (opts as Dictionary).has("embedded"):
+		return bool((opts as Dictionary).get("embedded", true))
+	return bool(ProjectSettings.get_setting(SETTING_EMBEDDED, true))
+
+
+## Analyzes every GDScript embedded in one text resource: parses the
+## resource, joins each sub_resource GDScript with the nodes using it
+## (see TextParser.embedded_with_nodes), runs the full analyzer per
+## (script, node) pair and returns {"errors", "warnings"} with
+## path = the resource, line/column inside the embedded source, plus
+## scene/node/embedded_base/embedded_sub/scene_line for navigation and
+## JSON naming (scene_line = the script/source line in the scene, so
+## rows render scene:script; one user JSON per root base plus one per
+## inner class, dotted). `text` avoids a second disk read when the
+## caller already has it; `opts` pins policy/embedded (worker
+## dispatch). Never fails (unreadable sources yield no issues, not
+## crashes).
+func analyze_embedded_text(resource_path: String, text: String, opts := {}) -> Dictionary:
+	var errors: Array = []
+	var warnings: Array = []
+	if str(resource_path) == "":
+		return {"errors": errors, "warnings": warnings}
+	var parsed: Dictionary = TextParser.new().parse_text(text, resource_path)
+	var items: Array = TextParser.embedded_with_nodes(parsed)
+	for item in items:
+		if not (item is Dictionary):
+			continue
+		var source := str((item as Dictionary).get("source", ""))
+		if source == "":
+			continue
+		var node_path := str((item as Dictionary).get("node_path", ""))
+		var sub_id := str((item as Dictionary).get("sub_id", ""))
+		var scene_line := maxi(int((item as Dictionary).get("line", 1)), 1)
+		var base := SemParser.embedded_base(resource_path, node_path, sub_id)
+		var ana = _fresh_analyzer(opts)
+		var res: Dictionary = ana.analyze(SynParser.new().parse_text(source), resource_path, base)
+		for e in res.get("errors", []):
+			var ed := (e as Dictionary).duplicate() if e is Dictionary else {}
+			ed["path"] = resource_path
+			ed["scene"] = resource_path
+			ed["node"] = node_path
+			ed["embedded_base"] = base
+			ed["embedded_sub"] = sub_id
+			ed["scene_line"] = scene_line
+			errors.append(ed)
+		for w in res.get("warnings", []):
+			var wd := (w as Dictionary).duplicate() if w is Dictionary else {}
+			wd["path"] = resource_path
+			wd["scene"] = resource_path
+			wd["node"] = node_path
+			wd["embedded_base"] = base
+			wd["embedded_sub"] = sub_id
+			wd["scene_line"] = scene_line
+			warnings.append(wd)
+	return {"errors": errors, "warnings": warnings}
 
 
 ## Direct issue for scan-infra failures (unreadable files).
@@ -809,9 +897,12 @@ func run_gdscript(root_os := "", targets := [], opts := {}, cancel := Callable()
 ## `by_uid`/`by_path` plus `exists`/`read_text` exist for hermetic
 ## tests (a valid `exists` stub means "use the given maps as-is");
 ## real runs load .godot/uid_cache.bin when the maps are empty.
-## `cancel` aborts between files (worker dispatch).
+## `opts` pins policy/embedded (worker dispatch; {"embedded": false}
+## skips embedded GDScripts). Embedded scripts ride along here — never
+## in run_gdscript, so scripts-only and resources-only runs stay
+## separable. `cancel` aborts between files (worker dispatch).
 ## Returns the full stored doc.
-func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, exists := Callable(), read_text := Callable(), cancel := Callable()) -> Dictionary:
+func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, exists := Callable(), read_text := Callable(), cancel := Callable(), opts := {}) -> Dictionary:
 	var root := root_os if root_os != "" else project_root()
 	var files: Array = (targets as Array).duplicate() if not (targets as Array).is_empty() else Integrity.collect_text_resources(root) + Integrity.collect_gd_scripts(root)
 	files.sort()
@@ -831,6 +922,7 @@ func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, ex
 	var errors: Array = []
 	var warnings: Array = []
 	var i := 0
+	var do_embedded := embedded_enabled(opts)
 	for target in files:
 		if cancel.is_valid() and bool(cancel.call()):
 			print("Gnumarus Full Scan: integrity cancelled.")
@@ -843,6 +935,12 @@ func run_integrity(root_os := "", targets := [], by_uid := {}, by_path := {}, ex
 			errors.append(_tag(STAGE_INTEGRITY, e, path))
 		for w in res.get("warnings", []):
 			warnings.append(_tag(STAGE_INTEGRITY, w, path))
+		if do_embedded and not path.ends_with(".gd") and FileAccess.file_exists(path):
+			var emb: Dictionary = analyze_embedded_text(path, FileAccess.get_file_as_string(path), opts)
+			for e in emb.get("errors", []):
+				errors.append(_tag(STAGE_INTEGRITY, e, path))
+			for w in emb.get("warnings", []):
+				warnings.append(_tag(STAGE_INTEGRITY, w, path))
 	return store_stage(STAGE_INTEGRITY, errors, warnings, files.size())
 
 
@@ -855,7 +953,7 @@ func run(root_os := "", opts := {}, cancel := Callable()) -> Dictionary:
 	var gd := run_gdscript(root, [], opts, cancel)
 	if bool(gd.get("cancelled", false)):
 		return gd
-	var ri := run_integrity(root, [], {}, {}, Callable(), Callable(), cancel)
+	var ri := run_integrity(root, [], {}, {}, Callable(), Callable(), cancel, opts)
 	if bool(ri.get("cancelled", false)):
 		return ri
 	var doc := store_census(collect_file_census(root))

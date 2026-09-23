@@ -93,13 +93,40 @@ var _interface_names: Dictionary = {}
 var _script_scope: Dictionary = {}
 var _script_infos: Dictionary = {}
 var _written: Array = []
+## Embedded-script base override (see embedded_base): when non-empty,
+## user JSONs are named from it instead of user_file_base, with the
+## script class_name appended after "_" when present. Set by analyze().
+var _embedded_base: String = ""
+
+
+## Base file stem for a GDScript embedded in a text resource: the
+## resource path without res:// plus the using node path (or the
+## sub_resource id when no node uses the script), with "/" and "\"
+## as "_". "res://a/b/c.tscn" + "SceneRoot/d/e" becomes
+## "a_b_c.tscn_SceneRoot_d_e" (dots kept, so the resource extension
+## survives). Falls back to "embedded" when everything is empty.
+## Static, pure.
+static func embedded_base(resource_path: String, node_path: String, sub_id: String) -> String:
+	var rp := str(resource_path).trim_prefix("res://").replace("/", "_").replace("\\", "_")
+	var np := str(node_path).replace("/", "_").replace("\\", "_")
+	var sid := str(sub_id).replace("/", "_").replace("\\", "_")
+	if np != "":
+		return (rp + "_" + np) if rp != "" else np
+	if sid != "":
+		return (rp + "_" + sid) if rp != "" else sid
+	return rp if rp != "" else "embedded"
 
 
 ## Analyzes an AST in place and returns it with "semantic_errors" and
 ## "user_types_written" added. script_path should be the res:// path of
 ## the analyzed script (used for user file naming when there is no
 ## class_name); an absolute path under the project also works.
-func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
+## `embedded` optionally pins the user-file base for GDScript embedded
+## in a text resource (see embedded_base): the resource path still
+## comes from script_path (the .tscn/.tres), while file names use the
+## embedded stem plus "_Class" when the script declares class_name.
+func analyze(ast: Dictionary, script_path: String = "", embedded: String = "") -> Dictionary:
+	_embedded_base = str(embedded)
 	_errors = []
 	_type_cache = {}
 	_type_miss = {}
@@ -2587,8 +2614,14 @@ func _infer_primary(tokens: Array, idx: int, scope: Dictionary, self_type: Strin
 
 func _write_user_types(ast: Dictionary) -> void:
 	var base_name = user_file_base(_script_class, _script_resource_path, "")
+	if _embedded_base != "":
+		base_name = _embedded_base
+		if _script_class != "":
+			base_name += "_" + _script_class
 	var root_prefix = _script_class
 	if root_prefix == "":
+		root_prefix = base_name
+	elif _embedded_base != "":
 		root_prefix = base_name
 	var main = _script_type_info(ast, base_name, root_prefix)
 	_ensure_user_dir()

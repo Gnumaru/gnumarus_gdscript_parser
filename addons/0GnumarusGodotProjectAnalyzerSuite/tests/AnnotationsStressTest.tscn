@@ -1,0 +1,558 @@
+[gd_scene format=3 uid="uid://bo2qscigvkjxo"]
+
+[sub_resource type="GDScript" id="GDScript_06whq"]
+script/source = "# @nullable_policy distrust
+# Stress exercise for every annotation in one file: lines marked OK
+# are clean, ERROR lines carry our analyzer errors, WARNING lines our
+# warnings. The file itself parses in Godot, so every diagnostic below
+# comes only from this repo analyzer.
+
+
+extends Node
+
+
+# Tuples: definition, conforming and broken literals, indexing.
+
+# @tuple StressPair 2 int String
+# @var spair_ok StressPair
+var spair_ok: Array = [1, \"a\"] # OK
+
+# @var spair_len StressPair
+var spair_len: Array = [1, 2, 3] # ERROR: expects 2 elements, got 3
+
+# @var spair_elem StressPair
+var spair_elem: Array = [\"a\", \"b\"] # ERROR: element 0 expects int
+
+# @var spair_narrow StressPair
+var spair_narrow: Array = [3.14, \"a\"] # ERROR: element 0 expects int, got float
+
+# @tuple StressWide 2 float float
+# @var spair_wide StressWide
+var spair_wide: Array = [1, 2] # OK: int widens into float
+
+# @tuple StressBad 1 Nope
+# @var spair_bad StressBad
+var spair_bad: Array = [1] # ERROR on the definition above: unknown type
+
+
+func tuple_index_demo() -> void:
+	print(spair_ok[0]) # OK
+	print(spair_ok[5]) # ERROR: index out of bounds
+
+
+# Structs: definition, key sets, value types, member reads.
+
+# @struct StressPoint 2 x:int y:int
+# @var spoint_ok StressPoint
+var spoint_ok: Dictionary = {\"x\": 1, \"y\": 2} # OK
+
+# @var spoint_short StressPoint
+var spoint_short: Dictionary = {\"x\": 1} # ERROR: expects 2 fields, got 1
+
+# @var spoint_extra StressPoint
+var spoint_extra: Dictionary = {\"x\": 1, \"y\": 2, \"z\": 3} # ERROR: expects 2 fields, got 3
+
+# @var spoint_key StressPoint
+var spoint_key: Dictionary = {\"x\": 1, \"z\": 2} # ERROR: has no field z
+
+# @var spoint_val StressPoint
+var spoint_val: Dictionary = {\"x\": 1, \"y\": \"a\"} # ERROR: field y expects int
+
+# @var spoint_narrow StressPoint
+var spoint_narrow: Dictionary = {\"x\": 1, \"y\": 3.14} # ERROR: field y expects int, got float
+
+# @struct StressPointF 2 x:int y:float
+# @var spoint_wide StressPointF
+var spoint_wide: Dictionary = {\"x\": 1, \"y\": 2} # OK: int widens into float
+
+
+func struct_read_demo() -> void:
+	print(spoint_ok.x) # OK
+	print(spoint_ok.zzz) # ERROR: no member zzz
+	print(spoint_ok[\"x\"]) # OK
+	print(spoint_ok[\"zzz\"]) # ERROR: no member zzz
+
+
+# Aliases: use, null arms, broken blocks, contradictions.
+
+# @alias StressNum int|float @endalias
+# @var snum_ok StressNum
+var snum_ok: Variant = 2 # OK: dynamic slots skip narrowing
+
+# @var snum_bad StressNum
+var snum_bad := \"a\" # ERROR on the tag above: neither arm fits String
+
+# @alias StressMaybeNode Node|null @endalias
+# @var smaybe_node StressMaybeNode
+var smaybe_node: Variant = null # OK
+
+# @alias StressBroken int|float
+var sfiller := 0 # ERROR on the tag above: missing end marker
+
+# @var snotnull_bad StressMaybeNode notnull
+var snotnull_bad: Variant = null # ERROR on the tag above: contradicts nullable type, plus null init rejected
+
+# @var snullable_ok StressMaybeNode nullable
+var snullable_ok: Variant = null # OK: redundant marker stays silent
+
+
+# Templates and generics.
+
+# @template StressTNum of int|float
+# @param tx StressTNum
+# @return StressTNum
+func double_it(tx):
+	return tx
+
+
+func template_demo() -> void:
+	double_it(2) # OK
+	double_it(\"nope\") # ERROR: String violates int|float
+
+
+# @template StressTBox
+# @generic StressTBox
+class StressBox:
+	# @param sx StressTBox
+	func store(sx) -> void:
+		pass
+
+
+# @generic Nope
+class StressBadBox:
+	pass # ERROR on the tag above: non-template name
+
+
+func generic_demo() -> void:
+	var sb: StressBox
+	sb.store(\"anything\") # OK: bare instances stay opaque
+
+
+# Interfaces and implementations.
+
+# @interface StressDrawable
+# func:ping:void
+# @endinterface
+
+
+# @implements StressDrawable
+class StressGoodImpl:
+	func ping() -> void:
+		pass # OK
+
+
+# @implements StressDrawable
+class StressBadImpl: # ERROR: missing ping
+	func nope() -> void:
+		pass
+
+
+func interface_demo() -> void:
+	var sm: Variant = StressGoodImpl.new()
+	# @var sm StressDrawable
+	sm.ping() # WARNING: interface receivers stay watched
+	sm.bogus() # ERROR: nobody provides bogus
+
+
+# Own private and deprecated members.
+
+# @private
+func _secret_func() -> void:
+	pass
+
+
+# @deprecated Use fresh_func instead.
+func stale_func() -> void:
+	pass
+
+
+func fresh_func() -> void:
+	pass
+
+
+# @deprecated Use fresh_sig instead.
+signal stale_sig
+signal fresh_sig
+
+
+# @deprecated Use FRESH_C instead.
+const STALE_C := 1
+const FRESH_C := 1
+
+
+# @private
+static var _hidden := 7
+
+
+func own_flag_demo() -> void:
+	_secret_func() # OK: own private usable inside the owner
+	stale_func() # WARNING: own deprecated use still warns
+	print(_hidden) # OK
+	print(STALE_C) # WARNING
+	print(FRESH_C) # OK
+
+
+func sig_demo() -> void:
+	stale_sig.connect(_on_sig) # WARNING
+	fresh_sig.connect(_on_sig) # OK
+	stale_sig.emit() # WARNING
+
+
+func _on_sig() -> void:
+	pass
+
+
+# Cross-file exercises against the other showcases.
+
+func cross_demo(s2: Variant) -> void:
+	if s2 is GnumarusGodotProjectAnalyzerSuiteAnnotationsShowcase2:
+		s2.new_api() # OK: public member from another file
+		s2.old_api() # WARNING: deprecated member from another file
+		s2._my_private_func() # ERROR: private member from another file
+		print(s2._secret) # ERROR: private field from another file
+		s2.need_node(null) # ERROR: null argument to notnull parameter
+		s2.need_node(Node.new()) # OK
+
+
+func cross_bare_demo(s2: GnumarusGodotProjectAnalyzerSuiteAnnotationsShowcase2) -> void:
+	s2.new_api() # WARNING: implicitly nullable receiver
+
+
+func cross_boundary_demo(s2: Variant) -> void:
+	if s2 is GnumarusGodotProjectAnalyzerSuiteAnnotationsShowcase2:
+		# @var swatched Node nullable
+		var swatched: Node
+		s2.take_node(swatched) # WARNING: maybe argument over the boundary
+
+
+func cross_policy_demo() -> void:
+	var s3 := GnumarusGodotProjectAnalyzerSuiteAnnotationsShowcase3.new()
+	s3.need(null) # ERROR: refusal holds across policies
+	s3.need(Node.new()) # OK
+
+
+# Tag mechanics: mismatches, unknown names, misplaced tags.
+
+# @var tag_bad int
+var tag_bad := \"a\" # ERROR on the tag above: String is not int
+
+# @var tag_unknown Nope
+var tag_unknown # ERROR on the tag above: unknown type
+
+# @var tag_noname int
+var tag_other := 1 # ERROR on the tag above: no variable tag_noname
+
+# @var tag_fact Node
+var tag_fact: Node # OK
+
+
+func fact_demo(tn: Node) -> void:
+	# @var tn Control
+	print(tn) # OK: narrows the local
+
+
+# @param pmismatch int
+func take_mismatch(pmismatch: String) -> void:
+	pass # ERROR on the tag above: neither int nor String
+
+
+# @param punknown Nope
+func take_unknown(punknown) -> void:
+	pass # ERROR on the tag above: unknown type
+
+
+func multi_param_demo(
+		# @param ma int
+		ma: int
+	) -> void:
+	print(ma) # OK
+
+
+# @return void notnull
+func void_notnull_demo() -> void:
+	pass # ERROR on the tag above: void cannot combine
+
+
+# @return Node
+func wide_return_demo() -> Control: # ERROR: Node is wider than Control
+	return Control.new()
+
+
+# @return int
+func bare_return_demo():
+	return # ERROR: bare return in non-void function
+
+
+# @return int
+var misplaced_return := 1 # ERROR: misplaced tag
+
+
+class InnerReturn:
+	# @return int
+	func make_inner() -> int:
+		return 1 # OK: inner functions take tags
+
+
+# @return int
+var lamb_ok = func():
+	return 1 # OK
+
+
+# @return void
+var lamb_bad = func():
+	return 1 # ERROR: value in void lambda
+
+
+# Null arms and the reserved null name.
+
+# @var nullarm_ok Node|null
+var nullarm_ok: Variant = null # OK
+
+# @var nullonly null
+var nullonly: Variant = null # OK: exactly null
+
+# @tuple null 1 x:int
+
+
+# Notnull slots: initializers, defaults, reassignments, call sites.
+
+# @var nn_init Node notnull
+var nn_init: Node = null # ERROR on the tag above: cannot assign null to notnull variable
+
+
+# @param nn_param Node notnull
+func need_it(nn_param: Node = null): # ERROR on the tag above: null default
+	pass
+
+
+func nn_reassign_demo() -> void:
+	nn_init = null # ERROR: cannot assign null
+
+
+# @param nn_arg Node notnull
+func take_arg(nn_arg: Node) -> void:
+	pass
+
+
+func nn_call_demo() -> void:
+	take_arg(null) # ERROR: null argument
+	self.take_arg(null) # ERROR: null argument
+	take_arg(Node.new()) # OK
+
+
+class NnBase:
+	# @param nx Node notnull
+	func m(nx: Node) -> void:
+		pass
+
+
+class NnKid extends NnBase:
+	func f() -> void:
+		super.m(null) # ERROR: null argument
+
+
+# @return Node notnull
+func make_nn() -> Node:
+	return null # ERROR: cannot return null
+
+
+# @return Node notnull
+func make_nn_ok() -> Node:
+	return Node.new() # OK
+
+
+func nn_downstream_demo() -> void:
+	take_arg(make_nn_ok()) # OK: notnull results trusted
+
+
+# Nullable slots and result taint.
+
+# @var watched_stress Node nullable
+var watched_stress: Node
+
+
+func nullable_use_demo() -> void:
+	watched_stress.queue_free() # WARNING: explicitly watched
+
+
+# @return Node nullable
+func make_maybe_stress() -> Node:
+	return null # OK: nullable may return null
+
+
+func taint_demo_stress() -> void:
+	var r = make_maybe_stress()
+	r.queue_free() # WARNING: tainted result
+	make_maybe_stress().queue_free() # OK: direct chains stay silent
+
+
+# Guards: equality, typeof, instance checks, truthiness, loops.
+
+func guard_demo_stress(n: Node) -> void:
+	if n == null:
+		n.queue_free() # ERROR: provably null
+	if n != null:
+		n.queue_free() # OK
+
+
+func guard_flip_demo(n: Node) -> void:
+	if null == n:
+		pass
+	else:
+		n.queue_free() # OK: reversed order narrows too
+
+
+func guard_not_demo(n: Node) -> void:
+	if not n == null:
+		n.queue_free() # OK: leading not flips polarity
+	else:
+		pass
+
+
+func guard_typeof_demo(n: Node) -> void:
+	if typeof(n) == TYPE_NIL:
+		pass
+	else:
+		n.queue_free() # OK: non-null side trusted
+
+
+func guard_instanceof_demo(n: Node) -> void:
+	if is_instance_of(n, TYPE_NIL):
+		pass
+	else:
+		n.queue_free() # OK
+
+
+func guard_bare_demo(n: Node) -> void:
+	if not n:
+		pass
+	else:
+		n.queue_free() # OK: truthy object is non-null
+
+
+func guard_bool_demo(b: bool) -> void:
+	if not b:
+		print(b) # OK: bools never misread as null
+
+
+func guard_while_demo(n: Node) -> void:
+	while n == null:
+		n.queue_free() # ERROR: provably null inside
+		break
+
+
+func guard_match_demo(n: Node) -> void:
+	match n:
+		null:
+			n.queue_free() # ERROR: provably null in the arm
+		_:
+			pass
+
+
+func guard_clause_demo(n: Node) -> void:
+	if n == null:
+		return
+	n.queue_free() # OK: clause proves non-null
+
+
+func guard_clause_else_demo(n: Node) -> void:
+	if n != null:
+		pass
+	else:
+		return
+	n.queue_free() # OK
+
+
+func guard_clause_is_demo(n: Node) -> void:
+	if n is not Node:
+		return
+	n.queue_free() # OK: failed test returned
+
+
+func guard_clause_open_demo(n: Node) -> void:
+	if n == null:
+		pass
+	n.queue_free() # WARNING: no return, still maybe null
+
+
+# Elif chains narrow from the failed state.
+
+func elif_demo(n: Node) -> void:
+	if n == null:
+		pass
+	elif n != null:
+		n.queue_free() # OK
+
+
+func elif_chain_demo(n: Node) -> void:
+	if n == null:
+		pass
+	elif n == null:
+		pass
+	else:
+		n.queue_free() # OK
+
+
+func elif_null_demo(n: Node, c: bool) -> void:
+	if c:
+		pass
+	elif n == null:
+		n.queue_free() # ERROR: provably null in the arm
+
+
+# Type tests prove non-null, except Variant.
+
+func is_demo(v: Variant) -> void:
+	if v is Node:
+		v.queue_free() # OK
+
+
+func is_variant_demo(v: Variant) -> void:
+	if v is Variant:
+		v.foo() # ERROR: Variant proves nothing, missing method
+
+
+# Reassignment replaces flow memory.
+
+func reassign_demo() -> void:
+	# @var rnull Node|null
+	var rnull: Node = Node.new()
+	rnull = null # ERROR: null write to proven non-null state
+	rnull.queue_free() # ERROR: reassigned null
+
+
+func reseat_demo() -> void:
+	# @var rseat Node|null
+	var rseat: Node = Node.new()
+	rseat = null # ERROR: null write to proven non-null state
+	rseat = Node.new()
+	rseat.queue_free() # OK: reseated non-null
+
+
+func reset_demo(n: Node, y: Variant) -> void:
+	if n != null:
+		n = y
+		n.queue_free() # WARNING: unknown write clears the guard
+
+
+# Without strict mode, untyped slots stay silent.
+
+func untyped_demo() -> void:
+	var u
+	u.foo() # OK here: would warn under strict mode
+
+
+func untyped_proven_demo() -> void:
+	var u2 = 1
+	u2.foo() # OK: proven non-null, not untyped-unknown
+
+
+# Misplaced policy tags error.
+
+func policy_misplaced_demo(n: Node) -> void:
+	# @nullable_policy distrust
+	n.queue_free() # ERROR on the tag above: misplaced tag, plus use warning
+"
+
+[node name="AnnotationsStressTest" type="Node2D" unique_id=505648352]
+script = SubResource("GDScript_06whq")

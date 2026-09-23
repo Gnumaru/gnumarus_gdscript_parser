@@ -701,3 +701,126 @@ func _unwrap(node: Variant) -> Variant:
 		"identifier":
 			return str(d.get("name", ""))
 	return node
+
+
+## Full node paths for every [node] section ({index: path}): the root
+## (no parent attr) gives the prefix, children resolve their parent
+## attr against it ("." means the root; an already-prefixed parent is
+## used as-is; anything else is relative to the root). Cycles and
+## missing parents degrade to root + "/" + name. Static, pure.
+static func node_paths(parsed: Dictionary) -> Dictionary:
+	var nodes: Array = parsed.get("nodes", [])
+	if nodes.is_empty():
+		return {}
+	var root_name := ""
+	for n in nodes:
+		if n is Dictionary and not ((n as Dictionary).get("attrs", {}) as Dictionary).has("parent"):
+			root_name = str(((n as Dictionary).get("attrs", {}) as Dictionary).get("name", ""))
+			break
+	if root_name == "":
+		root_name = str(((nodes[0] as Dictionary).get("attrs", {}) as Dictionary).get("name", ""))
+	var out := {}
+	for i in range(nodes.size()):
+		var node := nodes[i] as Dictionary
+		var attrs: Dictionary = node.get("attrs", {})
+		var nm := str(attrs.get("name", ""))
+		if not attrs.has("parent"):
+			out[i] = nm
+			continue
+		var parent := str(attrs.get("parent", ""))
+		var pfull := ""
+		if parent == "" or parent == ".":
+			pfull = root_name
+		elif parent == root_name or parent.begins_with(root_name + "/"):
+			pfull = parent
+		else:
+			pfull = root_name + "/" + parent if root_name != "" else parent
+		out[i] = pfull + "/" + nm if pfull != "" else nm
+	return out
+
+
+## SubResource id behind a node's script prop ("" when the node has no
+## script or the script is external). Only SubResource("id") counts:
+## ExtResource scripts live in .gd files and are analyzed separately.
+## Static, pure.
+static func node_script_sub_id(node: Dictionary) -> String:
+	var props: Dictionary = (node as Dictionary).get("props", {})
+	if not props.has("script"):
+		return ""
+	var snode: Variant = props.get("script")
+	if not (snode is Dictionary):
+		return ""
+	var sd := snode as Dictionary
+	if str(sd.get("type", "")) != "call" or str(sd.get("name", "")) != "SubResource":
+		return ""
+	var args: Array = sd.get("args", [])
+	if args.is_empty() or not (args[0] is Dictionary):
+		return ""
+	var first := args[0] as Dictionary
+	if str(first.get("type", "")) == "string":
+		return str(first.get("value", ""))
+	if str(first.get("type", "")) == "int":
+		return str(first.get("value", 0))
+	return ""
+
+
+## Every GDScript source embedded in the parsed file: one entry per
+## [sub_resource type="GDScript"] carrying script/source plus every
+## [resource] body with script/source (a .tres whose main resource is
+## the script). Each entry is {"source": String, "sub_id": String,
+## "line": int} (line = the script/source prop line). Static, pure.
+static func embedded_sources(parsed: Dictionary) -> Array:
+	var out: Array = []
+	for entry in parsed.get("sub_resources", []):
+		if not (entry is Dictionary):
+			continue
+		var e := entry as Dictionary
+		var attrs: Dictionary = e.get("attrs", {})
+		if str(attrs.get("type", "")) != "GDScript":
+			continue
+		var props: Dictionary = e.get("props", {})
+		if not props.has("script/source"):
+			continue
+		var snode: Variant = props.get("script/source")
+		if snode is Dictionary and str((snode as Dictionary).get("type", "")) == "string":
+			out.append({"source": str((snode as Dictionary).get("value", "")), "sub_id": str(attrs.get("id", "")), "line": int((snode as Dictionary).get("line", int(e.get("line", 1))))})
+	for body in parsed.get("resources", []):
+		if not (body is Dictionary):
+			continue
+		var props: Dictionary = (body as Dictionary).get("props", {})
+		if not props.has("script/source"):
+			continue
+		var snode: Variant = props.get("script/source")
+		if snode is Dictionary and str((snode as Dictionary).get("type", "")) == "string":
+			out.append({"source": str((snode as Dictionary).get("value", "")), "sub_id": "", "line": int((snode as Dictionary).get("line", int((body as Dictionary).get("line", 1))))})
+	return out
+
+
+## Embedded sources joined with the nodes using them: one entry per
+## (script, node) pair (a script shared by two nodes yields two
+## entries with different node_path), plus orphan scripts with
+## node_path == "". Each entry is {"source", "sub_id", "line",
+## "node_path"}. Static, pure.
+static func embedded_with_nodes(parsed: Dictionary) -> Array:
+	var paths := node_paths(parsed)
+	var nodes: Array = parsed.get("nodes", [])
+	var by_sub := {}
+	for i in range(nodes.size()):
+		if not (nodes[i] is Dictionary):
+			continue
+		var sid := node_script_sub_id(nodes[i])
+		if sid == "":
+			continue
+		if not by_sub.has(sid):
+			by_sub[sid] = []
+		(by_sub[sid] as Array).append(str(paths.get(i, "")))
+	var out: Array = []
+	for src in embedded_sources(parsed):
+		var sid := str((src as Dictionary).get("sub_id", ""))
+		var users: Array = (by_sub.get(sid, []) as Array).duplicate() if sid != "" and by_sub.has(sid) else []
+		if users.is_empty():
+			out.append({"source": str((src as Dictionary).get("source", "")), "sub_id": sid, "line": int((src as Dictionary).get("line", 1)), "node_path": ""})
+		else:
+			for np in users:
+				out.append({"source": str((src as Dictionary).get("source", "")), "sub_id": sid, "line": int((src as Dictionary).get("line", 1)), "node_path": str(np)})
+	return out

@@ -9,6 +9,7 @@ extends RefCounted
 ## JSONs the stage runs create are removed, so the suite is hermetic.
 
 const Impl = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
+const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
 const PluginImpl = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuitePluginImpl.gd")
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
@@ -113,6 +114,7 @@ func run() -> Dictionary:
 	_r_census(h)
 	_r_inventory(h)
 	_r_creation(h)
+	_r_embedded(h)
 	_r_corrupt(h)
 	_r_gdscript_stage(h)
 	_r_integrity_stage(h)
@@ -409,6 +411,58 @@ func _r_creation(h) -> void:
 	h.check(int((by_dir.get("res://a", {}) as Dictionary).get("created", 0)) == 7000 + "/proj/a".length(), "enrich maps dirs by path")
 	h.check(int((by_dir.get("res://b", {}) as Dictionary).get("modified", 0)) == 8000 + "/proj/b".length(), "enrich maps sorted dirs")
 	h.check(int((fentries[0] as Dictionary).get("created", 0)) == 7000 + "/proj/a.gd".length(), "enrich fills file created")
+
+
+func _r_embedded(h) -> void:
+	h.check(SemParser.embedded_base("res://a/b/c.tscn", "SceneRoot/d/e", "GDScript_06whq") == "a_b_c.tscn_SceneRoot_d_e", "embedded base matches spec example")
+	h.check(SemParser.embedded_base("res://a/b/c.tscn", "", "GDScript_zz") == "a_b_c.tscn_GDScript_zz", "embedded orphan falls back to sub id")
+	h.check(SemParser.embedded_base("res://a\\b\\c.tscn", "R\\d", "") == "a_b_c.tscn_R_d", "embedded base handles backslashes")
+	h.check(SemParser.embedded_base("", "", "") == "embedded", "embedded base never empty")
+	h.check(Impl.embedded_enabled({"embedded": true}), "embedded opts pin on")
+	h.check(not Impl.embedded_enabled({"embedded": false}), "embedded opts pin off")
+	var key := Impl.SETTING_EMBEDDED
+	var had := ProjectSettings.has_setting(key)
+	var prev: Variant = ProjectSettings.get_setting(key, true)
+	ProjectSettings.set_setting(key, true)
+	h.check(Impl.embedded_enabled({}), "embedded default analyzes")
+	ProjectSettings.set_setting(key, false)
+	h.check(not Impl.embedded_enabled({}), "embedded setting opts out")
+	if had:
+		ProjectSettings.set_setting(key, prev)
+	else:
+		ProjectSettings.set_setting(key, true)
+	var tagged: Dictionary = Impl._tag(Impl.STAGE_INTEGRITY, {"severity": "error", "kind": "return_mismatch", "message": "m", "line": 3, "column": 1, "path": "res://a/b/c.tscn", "scene": "res://a/b/c.tscn", "node": "SceneRoot/e", "embedded_base": "a_b_c.tscn_SceneRoot_e", "embedded_sub": "GDScript_06whq", "scene_line": 4}, "res://a/b/c.tscn")
+	h.check(str(tagged.get("node", "")) == "SceneRoot/e" and str(tagged.get("embedded_base", "")) == "a_b_c.tscn_SceneRoot_e", "tag preserves embedded extras")
+	h.check(int(tagged.get("scene_line", 0)) == 4, "tag preserves scene line")
+	var plain: Dictionary = Impl._tag(Impl.STAGE_INTEGRITY, {"severity": "error", "kind": "k", "message": "m", "line": 1, "column": 0}, "res://x.tscn")
+	h.check(not (plain as Dictionary).has("node"), "tag adds no extras unasked")
+	var sa := _mk_issue("res://x.tscn", 3, 1, "k")
+	sa["node"] = "R/B"
+	var sb := _mk_issue("res://x.tscn", 3, 1, "k")
+	sb["node"] = "R/A"
+	var sorted: Array = [sa, sb]
+	sorted.sort_custom(Impl._issue_less)
+	h.check(str((sorted[0] as Dictionary).get("node", "")) == "R/A", "sort breaks embedded ties by node")
+	var before := _user_files()
+	var bad_text := "[gd_scene format=3 uid=\"uid://bo2qscigvkjxo\"]\n\n[sub_resource type=\"GDScript\" id=\"GDScript_06whq\"]\nscript/source = \"extends Node\\n# @return int\\nfunc f() -> String:\\n\\treturn 1\\nclass Inner:\\n\\tvar y := 1\\n\"\n\n[node name=\"SceneRoot\" type=\"Node\"]\n\n[node name=\"e\" type=\"Node\" parent=\".\"]\nscript = SubResource(\"GDScript_06whq\")\n"
+	var emb: Dictionary = Impl.new().analyze_embedded_text("res://a/b/c.tscn", bad_text, {"embedded": true})
+	var errs: Array = emb.get("errors", [])
+	h.check(errs.size() == 1 and str((errs[0] as Dictionary).get("kind", "")) == "return_mismatch", "embedded analysis reports script error")
+	h.check(str((errs[0] as Dictionary).get("path", "")) == "res://a/b/c.tscn", "embedded issue path is the scene")
+	h.check(str((errs[0] as Dictionary).get("node", "")) == "SceneRoot/e", "embedded issue carries node")
+	h.check(str((errs[0] as Dictionary).get("embedded_base", "")) == "a_b_c.tscn_SceneRoot_e", "embedded issue carries base")
+	h.check(int((errs[0] as Dictionary).get("scene_line", 0)) == 4, "embedded issue carries scene line")
+	var fresh: Array = []
+	for f in _user_files():
+		if not before.has(f):
+			fresh.append(str(f))
+	h.check("a_b_c.tscn_SceneRoot_e.json" in fresh, "embedded root json named per spec")
+	h.check("a_b_c.tscn_SceneRoot_e.Inner.json" in fresh, "embedded inner json dotted")
+	_clean_user_jsons(before)
+	var clean: Dictionary = Impl.new().analyze_embedded_text("res://a/b/c.tscn", "[gd_scene format=3]\n\n[node name=\"R\" type=\"Node\"]\n", {"embedded": true})
+	h.check((clean.get("errors", []) as Array).is_empty() and (clean.get("warnings", []) as Array).is_empty(), "embedded scriptless clean")
+	h.check((Impl.new().analyze_embedded_text("", bad_text, {}) as Dictionary).get("errors", []).is_empty(), "embedded empty path safe")
+	_clean_user_jsons(before)
 
 
 func _r_corrupt(h) -> void:

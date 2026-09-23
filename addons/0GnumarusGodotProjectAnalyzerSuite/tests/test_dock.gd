@@ -83,6 +83,10 @@ func _r_pure(h) -> void:
 	h.check(Dock.severity_mark("note") == "N", "mark note")
 	h.check(Dock.format_row(_issue("error", "res://x.gd", 10, "null_use")) == "[E] res://x.gd:10: [null_use] m", "row format")
 	h.check(Dock.format_row(_issue("warning", "res://x.tscn", 0, "w")) == "[W] res://x.tscn:1: [w] m", "row clamps line")
+	var emb := _issue("error", "res://a/b/c.tscn", 18, "tuple_mismatch")
+	emb["node"] = "SceneRoot/e"
+	emb["scene_line"] = 4
+	h.check(Dock.format_row(emb) == "[E] res://a/b/c.tscn:4:18: [tuple_mismatch] m", "embedded row shows scene and script lines")
 	h.check(Dock.status_text(0, 0, 0, 0) == "no issues", "status empty")
 	h.check(Dock.status_text(2, 1, 0, 0) == "2 errors  1 warning", "status counts")
 	h.check(Dock.status_text(1, 0, 0, 0) == "1 error", "status singular")
@@ -419,6 +423,12 @@ func _r_hide(h) -> void:
 	var b := _issue("warning", "res://b.gd", 2, "k2")
 	h.check(Dock.hide_key(a) == Dock.hide_key(a.duplicate()), "hide key stable")
 	h.check(Dock.hide_key(a) != Dock.hide_key(b), "hide key distinguishes issues")
+	var e1 := _issue("error", "res://x.tscn", 3, "k")
+	e1["node"] = "R/A"
+	e1["scene_line"] = 4
+	var e2 := e1.duplicate()
+	e2["node"] = "R/B"
+	h.check(Dock.hide_key(e1) != Dock.hide_key(e2), "hide key distinguishes embedded nodes")
 	h.check(Dock.apply_hidden([a, b], {}).size() == 2, "no hidden keeps all")
 	h.check(Dock.apply_hidden([a, b], {Dock.hide_key(a): true}) == [b], "hidden drops one")
 	h.check(Dock.apply_hidden(["junk", a], {Dock.hide_key(a): true}).is_empty(), "hidden drops non-dicts")

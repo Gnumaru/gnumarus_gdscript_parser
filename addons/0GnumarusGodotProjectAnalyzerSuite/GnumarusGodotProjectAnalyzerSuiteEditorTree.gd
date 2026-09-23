@@ -9,6 +9,19 @@ extends RefCounted
 
 const CODE_EDIT_CLASS := "CodeEdit"
 
+## Generation counter for deferred Script-workspace asserts (see
+## _assert_script_screen_soon): every navigation bumps it, and a
+## deferred assert only fires when nothing newer arrived, so rapid
+## clicks never yank the user back to a stale target.
+static var _focus_gen := 0
+
+
+## Records a navigation and returns its generation (see _focus_gen).
+## Callers with deferred work pass it along; deferred asserts check it.
+static func note_navigation() -> int:
+	_focus_gen += 1
+	return _focus_gen
+
 
 ## The ScriptEditor singleton, or null outside the editor.
 static func script_editor() -> Object:
@@ -487,3 +500,145 @@ static func open_scene(path: String) -> bool:
 		return false
 	(ei as Object).call("open_scene_from_path", path)
 	return true
+
+
+## Relative node path inside the edited scene for an absolute
+## scene-root-prefixed path ("SceneRoot/d/e" -> "d/e", root itself ->
+## "."). Pure.
+static func relative_node_path(node_path: String, root_name: String) -> String:
+	var np := str(node_path)
+	var rn := str(root_name)
+	if np == "" or rn == "":
+		return np
+	if np == rn:
+		return "."
+	if np.begins_with(rn + "/"):
+		return np.substr(rn.length() + 1)
+	return np
+
+
+## Focuses a node in the edited scene (selects it so the inspector
+## shows its script): opens nothing, so callers open the scene first.
+## False headless, without editor support or when the node is missing.
+static func focus_scene_node(node_path: String) -> bool:
+	var ei := editor_interface()
+	if ei == null:
+		return false
+	if str(node_path).strip_edges() == "":
+		return false
+	if not (ei as Object).has_method("get_edited_scene_root") or not (ei as Object).has_method("get_selection"):
+		return false
+	var root: Variant = (ei as Object).call("get_edited_scene_root")
+	if not (root is Node) or not is_instance_valid(root):
+		return false
+	var rn := str((root as Node).name)
+	var rel := relative_node_path(node_path, rn)
+	var target: Node = null
+	if rel == ".":
+		target = root
+	else:
+		target = (root as Node).get_node_or_null(rel)
+	if target == null or not is_instance_valid(target):
+		return false
+	var sel: Variant = (ei as Object).call("get_selection")
+	if sel == null or not (sel is Object) or not is_instance_valid(sel):
+		return false
+	if (sel as Object).has_method("clear"):
+		(sel as Object).call("clear")
+	if (sel as Object).has_method("add_node"):
+		(sel as Object).call("add_node", target)
+	return true
+
+
+## Opens the GDScript attached to a scene node and jumps to a 1-based
+## embedded line. The scene must already be open (callers open it and
+## focus the node first). Schedules a deferred Script-workspace assert
+## (see _assert_script_screen_soon): opening the scene flips to 2D/3D
+## after our immediate screen switch, so the workspace is re-asserted
+## once the dust settles. False headless, without support or when the
+## node carries no script.
+static func open_node_script(node_path: String, line: int) -> bool:
+	var ei := editor_interface()
+	if ei == null:
+		return false
+	if str(node_path).strip_edges() == "":
+		return false
+	var root: Variant = null
+	if (ei as Object).has_method("get_edited_scene_root"):
+		root = (ei as Object).call("get_edited_scene_root")
+	if not (root is Node) or not is_instance_valid(root):
+		return false
+	var rn := str((root as Node).name)
+	var rel := relative_node_path(node_path, rn)
+	var target: Node = (root as Node) if rel == "." else (root as Node).get_node_or_null(rel)
+	if target == null or not is_instance_valid(target):
+		return false
+	if not (target as Object).has_method("get_script"):
+		return false
+	var scr: Variant = (target as Object).call("get_script")
+	if not (scr is Script):
+		return false
+	if not (ei as Object).has_method("edit_script"):
+		return false
+	(ei as Object).call("edit_script", scr)
+	show_main_screen("Script")
+	var se := script_editor()
+	if se != null and line >= 1:
+		goto_line(null, se, line)
+	_assert_script_screen_soon(note_navigation(), line)
+	return true
+
+
+## Schedules a deferred re-assert of the Script workspace plus the
+## caret line: scene opening switches to 2D/3D after (sometimes well
+## after) the synchronous call returns, burying an immediate
+## show_main_screen("Script"). After three process frames the switch
+## has settled, so the deferred pass wins the race. Generation-guarded
+## (a newer navigation cancels the stale assert) and fully
+## null-safe: headless (no tree) it schedules nothing.
+static func _assert_script_screen_soon(gen: int, line: int) -> void:
+	var se := script_editor()
+	if se == null or not (se is Node):
+		return
+	var tree: SceneTree = (se as Node).get_tree()
+	if tree == null:
+		return
+	tree.process_frame.connect(func() -> void: _deferred_script_focus(3, gen, line), CONNECT_ONE_SHOT)
+
+
+## Deferred tail of _assert_script_screen_soon: counts frames down,
+## then re-shows the Script workspace and re-moves the caret, unless
+## a newer navigation arrived (gen mismatch) or the editor went away.
+## Never fails.
+static func _deferred_script_focus(frames_left: int, gen: int, line: int) -> void:
+	if gen != _focus_gen:
+		return
+	var se := script_editor()
+	if se == null or not (se is Node):
+		return
+	var tree: SceneTree = (se as Node).get_tree()
+	if tree == null:
+		return
+	if frames_left > 1:
+		tree.process_frame.connect(func() -> void: _deferred_script_focus(frames_left - 1, gen, line), CONNECT_ONE_SHOT)
+		return
+	show_main_screen("Script")
+	if line >= 1:
+		goto_line(null, se, line)
+
+
+## Opens an embedded-script issue: the scene, then the node focus,
+## then the node script at the embedded line. Best-effort chain where
+## every step is null-guarded: a failed node focus still tries the
+## script open, and anything failing returns false headless-style.
+## `scene`/`node`/`line` come from the issue dict extras.
+static func open_embedded_issue(scene: String, node: String, line: int) -> bool:
+	if str(scene).strip_edges() == "":
+		return false
+	if not open_scene(scene):
+		return false
+	if str(node).strip_edges() != "":
+		focus_scene_node(node)
+		if open_node_script(node, line):
+			return true
+	return false

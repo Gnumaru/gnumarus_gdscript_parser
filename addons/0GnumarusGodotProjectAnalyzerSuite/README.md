@@ -422,6 +422,19 @@ var same: Dictionary = scene.parse_text("[resource]\na = 1\n")
   kept on every section and value node. Fault tolerant like the
   stages above: each bad header/value becomes an entry in
   `error_list` (`{"message", "line"}`) and parsing continues.
+- Embedded GDScripts (static, pure): `embedded_sources(parsed)`
+  lists every `[sub_resource type="GDScript"]` carrying
+  `script/source` (escape-decoded, e.g. `\"` back to `"`) plus every
+  `[resource]` body with `script/source` (a `.tres` whose main
+  resource is the script); `node_paths(parsed)` resolves every
+  `[node]` to its root-prefixed path (`"."` parents mean the root,
+  already-prefixed parents are kept, anything else is relative to
+  the root); `node_script_sub_id(node)` reads the `SubResource`
+  behind a node's `script` prop (`ExtResource` scripts live in
+  `.gd` files and are ignored here); `embedded_with_nodes(parsed)`
+  joins them into one entry per (script, node) pair
+  (`{"source", "sub_id", "line", "node_path"}` — shared scripts fan
+  out per node, orphans keep `node_path == ""`).
 
 ## 8. GnumarusGodotProjectAnalyzerSuiteUidCache
 
@@ -528,13 +541,44 @@ Editor dependency, headless-testable — the same proxy split as the
 analyzer plugin itself).
 
 `run()` executes each stage in order — currently `gdscript` (the
-full analyzer over every project `.gd`) and `resource_integrity`
-(text resources plus `.gd` load literals) — and each stage persists
+full analyzer over every project `.gd`, never embedded scripts, so
+scripts-only runs stay separable) and `resource_integrity`
+(text resources plus `.gd` load literals, plus embedded GDScripts
+as a consequence of the resource scan) — and each stage persists
 `ScanResults.json` when it finishes, so the report stays complete
 even if a later stage is interrupted. Future stages only add a stage
 name plus one `store_stage()` call: the report merges generically
 (load on-disk doc, replace only that stage entry, recompute sorted
 aggregates and summary), so no existing code changes.
+
+## embedded GDScripts as a consequence of the resource scan) — and each stage persists
+`ScanResults.json` when it finishes, so the report stays complete
+even if a later stage is interrupted. Future stages only add a stage
+name plus one `store_stage()` call: the report merges generically
+(load on-disk doc, replace only that stage entry, recompute sorted
+aggregates and summary), so no existing code changes.
+
+Embedded scripts ride along the integrity stage only (default on,
+`{"embedded": false}` opts out per run,
+`gnumarus_analyzer/analyze_embedded_scripts` opts out persistently):
+each `sub_resource` GDScript is analyzed per using node with the
+full analyzer (`analyze_embedded_text(resource, text, opts)`), so
+embedded errors appear with every other error/warning (tagged
+`resource_integrity`, `path` = the scene, `line`/`column` inside the
+embedded source, plus `scene`/`node`/`embedded_base`/`embedded_sub`
+/`scene_line` extras for navigation — `scene_line` is the
+`script/source` line in the scene). They obey the dock `tscn`/`tres`
+type toggles like any other scene issue (path keeps the scene
+extension), and rows render both lines:
+`[E] res://a/b/c.tscn:4:18: [kind] message` (scene line, then script
+line). User JSONs follow the resource + node stem:
+`res://a/b/c.tscn` on node `SceneRoot/d/e` writes
+`a_b_c.tscn_SceneRoot_d_e.json` (orphans use the sub id, a declared
+`class_name` appends after `_`), plus one dotted file per inner
+class (`…_d_e.Inner.json`, `…_d_e.Inner.InnerInner.json`); both
+`GdscriptAnalyzer.analyze()` and `GdscriptSemanticParser.analyze()`
+take the stem as an optional third (`embedded`) argument, keeping
+the resource path in the JSON while naming files from the stem.
 
 `ScanResults.json` shape: `version`, `generated_unix`, per-stage
 `stages` (`errors` / `warnings` / `files` each), flat sorted
@@ -590,7 +634,11 @@ button brings them all back. Stale hides prune themselves when
 their issue disappears. A status label counts visible issues and how many
 the filters hide; picking a row navigates to it (same-file `.gd`
 reuses the status-bar path, other scripts open in the script editor,
-scenes open on the main screen — script jumps also reveal the Script
+scenes open on the main screen, embedded-script rows open the scene,
+focus the node and open its script at the embedded line — the Script
+workspace is re-asserted a few frames later, since opening the scene
+flips to 2D/3D after the click (a newer navigation cancels the stale
+assert, so rapid clicks never yank back) — script jumps also reveal the Script
 workspace, since opening alone leaves 2D/3D/Game/AssetLib on
 screen). Rescan re-runs the full scan and
 reveals the dock; Clear drops the list. Toggle state persists in
@@ -1578,11 +1626,14 @@ suites still print, so the marker alone could look green).
   no auto warm on enable or filesystem scans (dirty flag only),
   deferred begin/pump loop and dep-change gating;
   origin marker paint; snapshot/restore of foreign highlights and
-  exit-time clearing),
+  exit-time clearing; embedded navigation: relative node paths plus
+  headless-safe scene focus, node-script open and dock-goto),
   `test_scene.gd` (scene/resource/config parsing: value nodes,
   sections, multiline values, comments, errors, reuse, plus the
   `Node3D.tscn`, `Environment.tres`, `ProceduralSkyMaterial.tres`,
-  `Sky.tres` fixtures and `project.godot`),
+  `Sky.tres` fixtures and `project.godot`; embedded GDScripts:
+  escaped-quote sources, node path resolution, script-to-node joins,
+  shared/orphan/tres-body/external cases),
   `test_uid_cache.gd` (UID cache reading: id/text conversion,
   synthetic binaries, truncation errors, reuse, plus the live
   `.godot/uid_cache.bin` cross-checked against the `.uid` sidecars
@@ -1622,8 +1673,9 @@ suites still print, so the marker alone could look green).
   cross references per analysis).
   `test_full_scan.gd` (aggregated full scan: `ScanResults.json`
   merge/sort/summary, corrupt-file fallback, hermetic gdscript +
-  integrity stages, EditorScript dumb-proxy shape, Project > Tools
-  wiring null-safety).
+  integrity stages, embedded scripts (stem naming, opt-out setting,
+  per-node analysis with JSONs, tag extras), EditorScript dumb-proxy
+  shape, Project > Tools wiring null-safety).
   `test_dock.gd` (bottom-panel dock: severity/type filter logic,
   row format and status text, per-file overlay plus scan-report
   replacement, toggle wiring, row navigation, rescan/clear, editor
@@ -1690,6 +1742,9 @@ first-painted-line scan).
   Nullability defaults live in Project → Project Settings (see
   Nullability): `gnumarus_analyzer/nullable_policy`
   (`trust`/`distrust`) and `gnumarus_analyzer/strict_untyped`.
+  Embedded GDScripts in text resources are analyzed with the
+  resource scan by default; `gnumarus_analyzer/analyze_embedded_scripts`
+  (false) skips them.
 - Use: open any GDScript and issues show right away; after that
   analysis is realtime with debounce (1s after the last edit, or past
   Godot's `idle_parse_delay` when larger). Opening/switching files

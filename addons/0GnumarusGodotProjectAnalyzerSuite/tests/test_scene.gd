@@ -22,6 +22,7 @@ func run() -> Dictionary:
 	_s_reuse(h)
 	_s_fixtures(h)
 	_s_project(h)
+	_s_embedded(h)
 	return h.result()
 
 
@@ -166,3 +167,34 @@ func _s_project(h) -> void:
 	h.check(str(nm.get("value", "")) == "gnumarus_gdscript_parser", "project name prop")
 	var feats: Dictionary = (app as Dictionary).get("props", {}).get("config/features", {})
 	h.check(str(feats.get("type", "")) == "call" and str(feats.get("name", "")) == "PackedStringArray", "project features call")
+
+
+func _s_embedded(h) -> void:
+	var txt := "[gd_scene format=3 uid=\"uid://bo2qscigvkjxo\"]\n\n[sub_resource type=\"GDScript\" id=\"GDScript_06whq\"]\nscript/source = \"#primeira linha do script\nvar a = \\\"text\\\"\n#ultima linha do script\"\n\n[node name=\"SceneRoot\" type=\"Node\"]\n\n[node name=\"d\" type=\"Node\" parent=\".\"]\n\n[node name=\"e\" type=\"Node\" parent=\"d\"]\nscript = SubResource(\"GDScript_06whq\")\n"
+	var d := Scene.new().parse_text(txt, "res://a/b/c.tscn")
+	h.check(int(d.get("errors", -1)) == 0, "embedded example zero errors")
+	h.check((Scene.node_paths(d) as Dictionary) == {0: "SceneRoot", 1: "SceneRoot/d", 2: "SceneRoot/d/e"}, "embedded node paths resolve")
+	var srcs: Array = Scene.embedded_sources(d)
+	h.check(srcs.size() == 1, "embedded one source")
+	h.check(str((srcs[0] as Dictionary).get("source", "")) == "#primeira linha do script\nvar a = \"text\"\n#ultima linha do script", "embedded quotes unescape")
+	var joined: Array = Scene.embedded_with_nodes(d)
+	h.check(joined.size() == 1, "embedded one join")
+	h.check(str((joined[0] as Dictionary).get("node_path", "")) == "SceneRoot/d/e", "embedded join node path")
+	var prefixed := Scene.new().parse_text("[gd_scene format=3]\n\n[sub_resource type=\"GDScript\" id=\"g\"]\nscript/source = \"extends Node\n\"\n\n[node name=\"SceneRoot\" type=\"Node\"]\n\n[node name=\"e\" type=\"Node\" parent=\"SceneRoot/d\"]\nscript = SubResource(\"g\")\n")
+	h.check(str((Scene.embedded_with_nodes(prefixed)[0] as Dictionary).get("node_path", "")) == "SceneRoot/d/e", "embedded prefixed parent kept")
+	var shared := Scene.new().parse_text("[gd_scene format=3]\n\n[sub_resource type=\"GDScript\" id=\"g\"]\nscript/source = \"extends Node\n\"\n\n[node name=\"R\" type=\"Node\"]\n\n[node name=\"A\" type=\"Node\" parent=\".\"]\nscript = SubResource(\"g\")\n\n[node name=\"B\" type=\"Node\" parent=\".\"]\nscript = SubResource(\"g\")\n")
+	var sj: Array = Scene.embedded_with_nodes(shared)
+	h.check(sj.size() == 2, "embedded shared script joins both nodes")
+	var ext_only := Scene.new().parse_text("[gd_scene format=3]\n\n[ext_resource type=\"Script\" path=\"res://x.gd\" id=\"1\"]\n\n[node name=\"R\" type=\"Node\"]\nscript = ExtResource(\"1\")\n")
+	h.check((Scene.embedded_with_nodes(ext_only) as Array).is_empty(), "embedded external script ignored")
+	var orphan := Scene.new().parse_text("[gd_scene format=3]\n\n[sub_resource type=\"GDScript\" id=\"GDScript_zz\"]\nscript/source = \"extends Node\n\"\n\n[node name=\"R\" type=\"Node\"]\n")
+	var oj: Array = Scene.embedded_with_nodes(orphan)
+	h.check(oj.size() == 1 and str((oj[0] as Dictionary).get("node_path", "")) == "", "embedded orphan keeps empty node")
+	var tres := Scene.new().parse_text("[gd_resource type=\"Script\" format=3]\n\n[resource]\nscript/source = \"extends RefCounted\n\"\n")
+	var tj: Array = Scene.embedded_with_nodes(tres)
+	h.check(tj.size() == 1 and str((tj[0] as Dictionary).get("node_path", "")) == "", "embedded tres body found")
+	var fix := Scene.new().parse(DIR + "Node3D.tscn")
+	var fj: Array = Scene.embedded_with_nodes(fix)
+	h.check(fj.size() == 1, "embedded fixture one script")
+	h.check(str((fj[0] as Dictionary).get("node_path", "")) == "Node3D/Node", "embedded fixture node path")
+	h.check("extends Node" in str((fj[0] as Dictionary).get("source", "")), "embedded fixture source")

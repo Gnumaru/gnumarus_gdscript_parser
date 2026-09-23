@@ -123,6 +123,7 @@ static func _live_debounce() -> float:
 func enter_tree() -> void:
 	_ensure_policy_setting()
 	_ensure_strict_setting()
+	_ensure_embedded_setting()
 	_ensure_debounce()
 	_hook_signals(true)
 	_hook_filesystem(true)
@@ -158,6 +159,19 @@ static func _ensure_strict_setting() -> void:
 	if not ProjectSettings.has_setting(key):
 		ProjectSettings.set_setting(key, false)
 	ProjectSettings.set_initial_value(key, false)
+	ProjectSettings.add_property_info({"name": key, "type": TYPE_BOOL})
+
+
+## Registers the embedded-scripts ProjectSetting once (keeps the user
+## value on later enables): the integrity stage analyzes GDScript
+## embedded in text resources (sub_resource GDScript in .tscn/.tres)
+## as a consequence of the resource scan; false skips them. Default
+## true. Applies on the next full scan.
+static func _ensure_embedded_setting() -> void:
+	var key := "gnumarus_analyzer/analyze_embedded_scripts"
+	if not ProjectSettings.has_setting(key):
+		ProjectSettings.set_setting(key, true)
+	ProjectSettings.set_initial_value(key, true)
 	ProjectSettings.add_property_info({"name": key, "type": TYPE_BOOL})
 
 
@@ -947,6 +961,7 @@ static func _issue_less(a: Variant, b: Variant) -> bool:
 
 
 func _goto_issue(issue: Dictionary) -> void:
+	EdTree.note_navigation()
 	var se := EdTree.script_editor()
 	if se == null:
 		return
@@ -963,11 +978,18 @@ func _goto_issue(issue: Dictionary) -> void:
 ## caret) and reveal the Script workspace; any other .gd opens in the
 ## script editor first (also revealing Script), scenes open on the
 ## main screen (open_scene_from_path switches to 2D/3D natively),
-## anything else falls back to the bar path (harmless no-op when the
-## file is not the current one).
+## embedded-script issues (scene + node extras from the integrity
+## stage) open the scene, focus the node and open its script at the
+## embedded line; anything else falls back to the bar path (harmless
+## no-op when the file is not the current one).
 func _goto_dock_issue(issue: Dictionary) -> void:
+	EdTree.note_navigation()
 	var path := str(issue.get("path", ""))
 	var line := int(issue.get("line", 0))
+	var node := str(issue.get("node", ""))
+	if node != "" and (path.ends_with(".tscn") or path.ends_with(".scn") or path.ends_with(".tres")):
+		if EdTree.open_embedded_issue(path, node, line):
+			return
 	var se := EdTree.script_editor()
 	if se != null and (path == "" or path == EdTree.current_path(se)):
 		EdTree.show_main_screen("Script")

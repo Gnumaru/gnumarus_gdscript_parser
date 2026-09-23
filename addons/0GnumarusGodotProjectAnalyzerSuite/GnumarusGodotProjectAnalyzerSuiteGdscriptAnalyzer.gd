@@ -250,6 +250,10 @@ var _script_resource_path = ""
 var _project_root = ""
 var _write_base = NativeDumper.DATA_DIR_NAME
 var _written: Array = []
+## Embedded-script base override (see SemParser.embedded_base): when
+## non-empty, user JSONs are named from it instead of user_file_base,
+## with the script class_name appended after "_" when present.
+var _embedded_base: String = ""
 ## Type file lookups (builtin/classes/user JSON info or miss marker),
 ## cached per analyze() call for \@return name resolution.
 var _type_cache: Dictionary = {}
@@ -790,8 +794,13 @@ func _ensure_script_key(key: String, path: String) -> Dictionary:
 ## Analyzes a semantic-parser AST in place. Returns a Dictionary with
 ## the modified "ast" plus flat "errors" and "warnings" arrays.
 ## script_path should be the res:// path of the analyzed script (used
-## for user file naming when there is no class_name).
-func analyze(ast: Dictionary, script_path: String = "") -> Dictionary:
+## for user file naming when there is no class_name). `embedded`
+## optionally pins the user-file base for GDScript embedded in a text
+## resource (see SemParser.embedded_base): the resource path still
+## comes from script_path (the .tscn/.tres), while file names use the
+## embedded stem plus "_Class" when the script declares class_name.
+func analyze(ast: Dictionary, script_path: String = "", embedded: String = "") -> Dictionary:
+	_embedded_base = str(embedded)
 	_errors = []
 	_warnings = []
 	_members = {}
@@ -10936,8 +10945,14 @@ func _flow_accessor(node: Dictionary, scope: Dictionary, owner: String) -> void:
 ## plus analysis lists); missing files get a minimal equivalent.
 func _update_user_files(ast: Dictionary) -> void:
 	var base_name = SemParser.user_file_base(_script_class, _script_resource_path, "")
+	if _embedded_base != "":
+		base_name = _embedded_base
+		if _script_class != "":
+			base_name += "_" + _script_class
 	var root_prefix = _script_class
 	if root_prefix == "":
+		root_prefix = base_name
+	elif _embedded_base != "":
 		root_prefix = base_name
 	_ensure_user_dir()
 	_write_class_file(base_name, "", ast, root_prefix)
