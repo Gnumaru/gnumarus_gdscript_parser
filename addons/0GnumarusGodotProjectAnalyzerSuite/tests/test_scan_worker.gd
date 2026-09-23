@@ -19,10 +19,17 @@ const TMP_GD := "res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/TmpScanWo
 var _backup := ""
 var _had_backup := false
 var _task_seen := 0
+var _result_worker: RefCounted = null
 
 
 func _task_count() -> void:
 	_task_seen += 1
+
+
+## Task body for the handoff test: stores a payload exactly like the
+## plugin impl's full-scan task does (Object.call into set_result).
+func _task_store_result() -> void:
+	(_result_worker as Object).call("set_result", {"files": 3, "ok": true})
 
 
 func run() -> Dictionary:
@@ -86,6 +93,17 @@ func _r_mechanics(h) -> void:
 	w3.wait_done()
 	h.check(w3.is_done(), "cancelled task still terminates")
 	h.check(_task_seen >= 1, "cancel race stays sane")
+	var w4 := Worker.new()
+	h.check(Callable(w4, "set_result").is_valid(), "set_result callable via method")
+	h.check((w4 as Object).call("set_result", {"a": 1}) == null, "set_result call shape holds")
+	h.check((w4 as Object).call("get_result") == {"a": 1}, "direct set_result roundtrips")
+	_result_worker = Worker.new()
+	(_result_worker as Object).call("set_result", {})
+	(_result_worker as Worker).dispatch(Callable(self, "_task_store_result"), "test")
+	(_result_worker as Worker).wait_done()
+	h.check((_result_worker as Object).call("is_done"), "handoff task completes")
+	h.check(((_result_worker as Object).call("get_result") as Dictionary).get("ok", false), "worker-thread set_result hands back")
+	_result_worker = null
 
 
 func _write_tmp() -> void:

@@ -5,8 +5,15 @@ extends VBoxContainer
 ## the last full-scan report (ScanResults.json, loaded on build).
 ##
 ## Two tabs share one toolbar: "Issues" (the filtered error/warning
-## list) and "Files" (the project file census grouped by extension).
-## Two toggle groups filter the issue list (same idea as the Output
+## list) and "Files" (the project file census in two simultaneous
+## views behind hidden inner tabs: the 9-column table and the
+## single-column concatenated rows without the res:// prefix, each
+## with a button switching to the other). Clicking a column header
+## compacts that column to fit its content (never truncated);
+## clicking again stretches it back. Every issue row
+## carries a hide button on its right (Tree cell button, so rows keep
+## text height); hiding drops that single issue until "Unhide" (in
+## the toolbar) brings every hidden issue back. Two toggle groups filter the issue list (same idea as the Output
 ## panel filter buttons): severities (Errors / Warnings / Notes —
 ## nothing emits notes yet, the toggle is ready for them) and
 ## resource types (gd / tscn / tres / godot / other, derived from the
@@ -33,22 +40,41 @@ const CENSUS_HINT := "No file census yet. Run Project > Tools > Gnumaru's Full S
 const SORT_KEYS := ["path", "size", "created", "modified"]
 const SORT_LABELS := {"path": "Path", "size": "Size", "created": "Created", "modified": "Modified"}
 const TREE_COLUMNS := 9
+## Files-tab inner views (hidden tabs of the view TabContainer):
+## the 9-column table or the single-column concatenated rows.
+const VIEW_COLUMNS := 0
+const VIEW_FLAT := 1
+## Tree button id of the per-issue hide button (Issues tab).
+const HIDE_BUTTON_ID := 0
+## Narrow button column width: icon-sized, so issue rows keep text
+## height (well under twice the old ItemList row height).
+const HIDE_COLUMN_WIDTH := 24
+## Fallback hide glyph size (procedural X, used headless or when the
+## editor theme has no Close icon): smaller than a text row.
+const HIDE_ICON_SIZE := 12
+
+static var _hide_icon_cache: Texture2D = null
 
 var _by_path: Dictionary = {}
 var _shown: Array = []
+var _hidden := {}
 var _show := {"error": true, "warning": true, "note": true}
 var _types := {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}
 var _census := {}
 var _include_addons := true
 var _goto: Callable = Callable()
 var _rescan: Callable = Callable()
+var _collapsed_cols := {}
 
-var _list: ItemList = null
+var _issues: Tree = null
+var _unhide_btn: Button = null
 var _status: Label = null
 var _files: Label = null
 var _addons_btn: Button = null
 var _tabs: TabContainer = null
 var _tree: Tree = null
+var _flat_tree: Tree = null
+var _view_tabs: TabContainer = null
 var _sort_opt: OptionButton = null
 var _sort_desc_btn: CheckButton = null
 var _sort_key := "path"
@@ -105,6 +131,34 @@ static func filter_issues(issues: Array, show: Dictionary, types: Dictionary) ->
 		if not bool(show.get(normalize_severity(e), false)):
 			continue
 		if not bool(types.get(resource_type(str((e as Dictionary).get("path", ""))), false)):
+			continue
+		out.append(e)
+	return out
+
+
+## Stable identity of one issue for the per-row hide button:
+## issues sharing every field hide as one (they are indistinguishable
+## on screen anyway). Pure, unit-tested headless.
+static func hide_key(issue: Dictionary) -> String:
+	return "%s|%s|%s|%s|%d|%d|%s" % [
+		str(issue.get("stage", "")),
+		str(issue.get("severity", "")),
+		str(issue.get("kind", "")),
+		str(issue.get("path", "")),
+		maxi(int(issue.get("line", 1)), 1),
+		maxi(int(issue.get("column", 0)), 0),
+		str(issue.get("message", "")),
+	]
+
+
+## Issues minus the user-hidden ones (non-dicts dropped). Pure,
+## unit-tested headless.
+static func apply_hidden(issues: Array, hidden: Dictionary) -> Array:
+	var out: Array = []
+	for e in issues:
+		if not (e is Dictionary):
+			continue
+		if bool((hidden as Dictionary).get(hide_key(e), false)):
 			continue
 		out.append(e)
 	return out
@@ -247,6 +301,91 @@ static func census_rows(census: Variant, include_addons: bool) -> Array:
 	return rows
 
 
+## File path without the res:// prefix (flat view shows paths bare
+## to save space): "res://" becomes "/", anything else passes
+## through untouched. Pure, unit-tested headless.
+static func flat_path(path: String) -> String:
+	var p := str(path)
+	if p == "res://" or p == "res:/":
+		return "/"
+	if p.begins_with("res://"):
+		return "/" + p.substr(6)
+	return p
+
+
+## One flat-view file row ("/a.png: created: …; modified: …; size:
+## …"), stamps blank when unknown. Pure, unit-tested headless.
+static func flat_file_row(f: Dictionary) -> String:
+	return "%s: created: %s; modified: %s; size: %s" % [
+		flat_path(str(f.get("path", ""))),
+		census_datetime(maxi(int(f.get("created", 0)), 0)),
+		census_datetime(maxi(int(f.get("modified", 0)), 0)),
+		FullScan.human_size(maxi(int(f.get("size", 0)), 0)),
+	]
+
+
+## One flat-view directory row (direct/recursive sizes plus direct
+## and total file/subdir counts). Pure, unit-tested headless.
+static func flat_dir_row(d: Dictionary) -> String:
+	return "%s: created: %s; modified: %s; size: %s; rec-size: %s; direct files: %d; all files: %d; direct dirs: %d; all dirs: %d" % [
+		flat_path(str(d.get("path", ""))),
+		census_datetime(maxi(int(d.get("created", 0)), 0)),
+		census_datetime(maxi(int(d.get("modified", 0)), 0)),
+		FullScan.human_size(maxi(int(d.get("size", 0)), 0)),
+		FullScan.human_size(maxi(int(d.get("size_recursive", 0)), 0)),
+		maxi(int(d.get("files", 0)), 0),
+		maxi(int(d.get("files_recursive", 0)), 0),
+		maxi(int(d.get("subdirs", 0)), 0),
+		maxi(int(d.get("subdirs_recursive", 0)), 0),
+	]
+
+
+## File partitions shown in either Files-tab view: "project" plus
+## "addons" unless toggled off (each [label, group dict]). Pure.
+static func view_groups(census: Dictionary, include_addons: bool, files: Array) -> Array:
+	var groups: Array = []
+	if (census.get("project") is Dictionary) or not files.is_empty():
+		groups.append(["project", (census.get("project", {}) as Dictionary)])
+	if include_addons and ((census.get("addons") is Dictionary) or not files.is_empty()):
+		groups.append(["addons", (census.get("addons", {}) as Dictionary)])
+	return groups
+
+
+## Inventory files belonging to one partition ("project" skips
+## res://addons/ paths, "addons" keeps only those). Pure.
+static func own_files(files: Array, label: String) -> Array:
+	var own: Array = []
+	for f in files:
+		if not (f is Dictionary):
+			continue
+		var p := str((f as Dictionary).get("path", ""))
+		if p == "":
+			continue
+		if label == "addons" and not FullScan.is_addons_path(p):
+			continue
+		if label == "project" and FullScan.is_addons_path(p):
+			continue
+		own.append(f)
+	return own
+
+
+## Inventory directories shown in either Files-tab view (addons paths
+## hidden with the toggle off), sorted by path. Pure.
+static func shown_dirs(dirs: Array, include_addons: bool) -> Array:
+	var shown: Array = []
+	for d in dirs:
+		if not (d is Dictionary):
+			continue
+		var p := str((d as Dictionary).get("path", ""))
+		if p == "":
+			continue
+		if not include_addons and FullScan.is_addons_path(p):
+			continue
+		shown.append(d)
+	shown.sort_custom(func(a: Variant, b: Variant) -> bool: return str((a as Dictionary).get("path", "")) < str((b as Dictionary).get("path", "")))
+	return shown
+
+
 ## Sort key guard ("path" fallback). Pure.
 static func sanitize_sort_key(raw: Variant) -> String:
 	return str(raw) if str(raw) in SORT_KEYS else "path"
@@ -278,6 +417,18 @@ static func sort_file_entries(files: Array, sort_key: String, descending := fals
 			cmp = -1 if qa < qb else (1 if qa > qb else 0)
 		return cmp > 0 if descending else cmp < 0)
 	return rows
+
+
+## Toggled collapsed state for one Files-tab column: flips the flag
+## for a valid column, ignores anything out of range, keeps every
+## other entry. Returns a new dict (the input is never mutated).
+## Pure, unit-tested headless.
+static func toggle_collapsed_state(collapsed: Dictionary, column: int, total: int) -> Dictionary:
+	var next := (collapsed as Dictionary).duplicate()
+	if column < 0 or column >= total:
+		return next
+	next[column] = not bool(next.get(column, false))
+	return next
 
 
 ## Loads the persisted filter state: the EditorSettings copy wins
@@ -390,12 +541,13 @@ func census_count() -> int:
 
 
 ## Paints the census label (hidden when uncensused) and rebuilds
-## the Files-tab tree. Never fails.
+## both Files-tab trees (columns and flat). Never fails.
 func _paint_census() -> void:
 	_ensure_built()
 	_files.text = census_text(_census, _include_addons)
 	_files.visible = _files.text != ""
 	_rebuild_file_tree()
+	_rebuild_flat_tree()
 
 
 ## First issue line per path (min), for file-row navigation targets.
@@ -431,37 +583,85 @@ func _rebuild_file_tree() -> void:
 	var dirs: Array = (census.get("dirs", []) as Array).duplicate()
 	if files.is_empty() and dirs.is_empty():
 		_rebuild_legacy_rows(root, census)
+		_refit_collapsed_columns()
 		return
-	var groups: Array = []
-	if (census.get("project") is Dictionary) or not files.is_empty():
-		groups.append(["project", (census.get("project", {}) as Dictionary), false])
-	if _include_addons and ((census.get("addons") is Dictionary) or not files.is_empty()):
-		groups.append(["addons", (census.get("addons", {}) as Dictionary), false])
-	for g in groups:
+	for g in view_groups(census, _include_addons, files):
 		_add_file_group(root, str((g as Array)[0]), (g as Array)[1], files, min_line)
 	_add_dirs_group(root, dirs)
 	if root.get_child_count() == 0:
 		var hint := _tree.create_item(root)
 		hint.set_text(0, CENSUS_HINT)
 		_set_row_selectable(hint, false)
+	_refit_collapsed_columns()
+
+
+## Rebuilds the flat Files-tab tree from the same census: one row
+## per group plus one concatenated single-column row per file and
+## directory (no res:// prefix). File rows navigate like the column
+## view; group/dir rows are inert. Legacy reports and the empty hint
+## mirror the column view. Never fails.
+func _rebuild_flat_tree() -> void:
+	_ensure_built()
+	_flat_tree.clear()
+	var root := _flat_tree.create_item()
+	var min_line := _first_issue_lines(_by_path)
+	var census := _census if _census is Dictionary else {}
+	var files: Array = (census.get("files", []) as Array).duplicate()
+	var dirs: Array = (census.get("dirs", []) as Array).duplicate()
+	if files.is_empty() and dirs.is_empty():
+		_rebuild_flat_legacy_rows(root, census)
+		return
+	for g in view_groups(census, _include_addons, files):
+		_add_flat_file_group(root, str((g as Array)[0]), (g as Array)[1], files, min_line)
+	_add_flat_dirs_group(root, dirs)
+	if root.get_child_count() == 0:
+		var hint := _flat_tree.create_item(root)
+		hint.set_text(0, CENSUS_HINT)
+		_set_row_selectable(hint, false, 1)
+
+
+## One collapsed flat file-group row with its sorted file children
+## (single concatenated row per file).
+func _add_flat_file_group(root: TreeItem, label: String, group: Variant, files: Array, min_line: Dictionary) -> void:
+	var own := own_files(files, label)
+	var summary := _census_group_row(label, group)
+	if summary == "" and not own.is_empty():
+		summary = "%s: %d file%s" % [label, own.size(), "" if own.size() == 1 else "s"]
+	if summary == "":
+		return
+	var node := _flat_tree.create_item(root)
+	node.set_text(0, summary)
+	node.collapsed = true
+	_set_row_selectable(node, false, 1)
+	for f in sort_file_entries(own, _sort_key, _sort_desc):
+		var fd := f as Dictionary
+		var p := str(fd.get("path", ""))
+		var row := _flat_tree.create_item(node)
+		row.set_text(0, flat_file_row(fd))
+		row.set_metadata(0, {"path": p, "line": int(min_line.get(p, 1))})
+
+
+## Trailing flat directories group: one concatenated row per
+## directory. Inert rows.
+func _add_flat_dirs_group(root: TreeItem, dirs: Array) -> void:
+	var shown := shown_dirs(dirs, _include_addons)
+	if shown.is_empty():
+		return
+	var node := _flat_tree.create_item(root)
+	node.set_text(0, "directories: %d" % shown.size())
+	node.collapsed = true
+	_set_row_selectable(node, false, 1)
+	for d in shown:
+		var row := _flat_tree.create_item(node)
+		row.set_text(0, flat_dir_row(d))
+		_set_row_selectable(row, false, 1)
 
 
 ## One collapsed file-group row with its sorted file children.
 ## Falls back to the live file count when the group dict carries no
 ## summary (hand-made censuses), so files never vanish silently.
 func _add_file_group(root: TreeItem, label: String, group: Variant, files: Array, min_line: Dictionary) -> void:
-	var own: Array = []
-	for f in files:
-		if not (f is Dictionary):
-			continue
-		var p := str((f as Dictionary).get("path", ""))
-		if p == "":
-			continue
-		if label == "addons" and not FullScan.is_addons_path(p):
-			continue
-		if label == "project" and FullScan.is_addons_path(p):
-			continue
-		own.append(f)
+	var own := own_files(files, label)
 	var summary := _census_group_row(label, group)
 	if summary == "" and not own.is_empty():
 		summary = "%s: %d file%s" % [label, own.size(), "" if own.size() == 1 else "s"]
@@ -486,19 +686,9 @@ func _add_file_group(root: TreeItem, label: String, group: Variant, files: Array
 ## counts and sizes (addons paths hidden with the toggle off;
 ## aggregates always cover the full tree). Inert rows.
 func _add_dirs_group(root: TreeItem, dirs: Array) -> void:
-	var shown: Array = []
-	for d in dirs:
-		if not (d is Dictionary):
-			continue
-		var p := str((d as Dictionary).get("path", ""))
-		if p == "":
-			continue
-		if not _include_addons and FullScan.is_addons_path(p):
-			continue
-		shown.append(d)
+	var shown := shown_dirs(dirs, _include_addons)
 	if shown.is_empty():
 		return
-	shown.sort_custom(func(a: Variant, b: Variant) -> bool: return str((a as Dictionary).get("path", "")) < str((b as Dictionary).get("path", "")))
 	var node := _tree.create_item(root)
 	node.set_text(0, "directories: %d" % shown.size())
 	node.collapsed = true
@@ -550,6 +740,36 @@ func _rebuild_legacy_rows(root: TreeItem, census: Dictionary) -> void:
 		_set_row_selectable(hint, false)
 
 
+## Flat legacy rows for reports without a file inventory:
+## extension-count children under each group, one column. Inert rows.
+func _rebuild_flat_legacy_rows(root: TreeItem, census: Dictionary) -> void:
+	var proj: Dictionary = (census as Dictionary).get("project", {})
+	if not (proj is Dictionary) or (proj as Dictionary).is_empty():
+		proj = census
+	var groups: Array = [["project", proj]]
+	if _include_addons:
+		groups.append(["addons", (census as Dictionary).get("addons", {})])
+	var built := 0
+	for g in groups:
+		var gdict: Dictionary = (g as Array)[1]
+		var summary := _census_group_row(str((g as Array)[0]), gdict)
+		if summary == "":
+			continue
+		var node := _flat_tree.create_item(root)
+		node.set_text(0, summary)
+		node.collapsed = true
+		_set_row_selectable(node, false, 1)
+		built += 1
+		for r in _sorted_count_rows(gdict.get("extensions", {})):
+			var row := _flat_tree.create_item(node)
+			row.set_text(0, str(r))
+			_set_row_selectable(row, false, 1)
+	if built == 0:
+		var hint := _flat_tree.create_item(root)
+		hint.set_text(0, CENSUS_HINT)
+		_set_row_selectable(hint, false, 1)
+
+
 ## "ext: N" strings from an extensions map, count order with
 ## alphabetical ties. Pure.
 static func _sorted_count_rows(exts: Variant) -> Array:
@@ -567,18 +787,132 @@ static func _sorted_count_rows(exts: Variant) -> Array:
 	return rows
 
 
-## Marks every column of a row (un)selectable. Never fails.
-func _set_row_selectable(row: TreeItem, selectable: bool) -> void:
+## Marks the columns of a row (un)selectable (single-column trees
+## pass their width). Never fails.
+func _set_row_selectable(row: TreeItem, selectable: bool, total := TREE_COLUMNS) -> void:
 	if row == null or not is_instance_valid(row):
 		return
-	for c in range(TREE_COLUMNS):
+	for c in range(maxi(total, 1)):
 		row.set_selectable(c, selectable)
 
 
-## File-row activation: navigates to the file's first issue (line 1
-## when clean). Group/dir rows carry no target and stay inert.
+## Header click on a Files-tab column: left-click toggles that
+## column between stretched and content-fit (other mouse buttons and
+## out-of-range columns are ignored). The fit floor is measured, not
+## trusted to the engine: header title plus every cell (hidden rows
+## included, so expanding a group never truncates), with room for
+## indentation, arrows, icons and padding. Never fails.
+func _on_column_title_clicked(column: int, mouse_button: int) -> void:
+	if mouse_button != MOUSE_BUTTON_LEFT:
+		return
+	if column < 0 or column >= TREE_COLUMNS:
+		return
+	_collapsed_cols = toggle_collapsed_state(_collapsed_cols, column, TREE_COLUMNS)
+	_apply_column_collapse(column)
+
+
+## Natural width of one column in pixels: the header title plus the
+## widest cell, hidden rows included. Padding/indent/icon room errs
+## generous on purpose (overestimates waste a few pixels,
+## underestimates truncate). Zero when unreadable. Never fails.
+func _column_fit_width(column: int) -> int:
+	if _tree == null or not is_instance_valid(_tree):
+		return 0
+	if column < 0 or column >= TREE_COLUMNS:
+		return 0
+	var font := _tree.get_theme_font("font", "Tree")
+	var fs := _tree.get_theme_font_size("font_size", "Tree")
+	if font == null or fs <= 0:
+		return 0
+	var icon_w := 16
+	if _tree.has_theme_constant("icon_max_width", "Tree"):
+		icon_w = maxi(_tree.get_theme_constant("icon_max_width", "Tree"), 1)
+	var indent := maxi(int(font.get_height(fs)), 1)
+	var best := _fit_text_width(_tree.get_column_title(column), font, fs, 0, indent, 0)
+	var root := _tree.get_root()
+	if root != null and is_instance_valid(root):
+		best = maxi(best, _subtree_fit_width(root, column, font, fs, indent, icon_w))
+	return best
+
+
+## Widest fitted cell under an item (its whole subtree, collapsed or
+## not), `depth` levels below the top rows. Never fails.
+func _subtree_fit_width(item: TreeItem, column: int, font: Font, fs: int, indent: int, icon_w: int) -> int:
+	var best := 0
+	var stack: Array = []
+	for i in range(item.get_child_count()):
+		stack.append([item.get_child(i), 0])
+	while not stack.is_empty():
+		var frame: Array = stack.pop_back()
+		var node := frame[0] as TreeItem
+		if node == null or not is_instance_valid(node):
+			continue
+		var depth := int(frame[1])
+		var extra := 0
+		if node.get_child_count() > 0 and column == 0:
+			extra += icon_w
+		if node.get_icon(column) != null:
+			extra += icon_w
+		best = maxi(best, _fit_text_width(node.get_text(column), font, fs, depth, indent, extra))
+		for i in range(node.get_child_count()):
+			stack.append([node.get_child(i), depth + 1])
+	return best
+
+
+## Fitted width of one cell text: string measure plus base padding,
+## one indent step per depth level and icon/arrow room. Pure.
+static func _fit_text_width(text: String, font: Font, fs: int, depth: int, indent: int, extra: int) -> int:
+	if font == null or fs <= 0:
+		return 0
+	var w := int(font.get_string_size(str(text), HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x)
+	return w + 12 + maxi(depth, 0) * maxi(indent, 0) + maxi(extra, 0)
+
+
+## Applies the collapsed state of one column to the tree: expand off
+## with the measured fit floor when collapsed (content never
+## truncates), stretched otherwise. Clipping stays off both ways.
+## Never fails.
+func _apply_column_collapse(column: int) -> void:
+	if _tree == null or not is_instance_valid(_tree):
+		return
+	if column < 0 or column >= TREE_COLUMNS:
+		return
+	if bool(_collapsed_cols.get(column, false)):
+		_tree.set_column_expand(column, false)
+		_tree.set_column_custom_minimum_width(column, _column_fit_width(column))
+	else:
+		_tree.set_column_expand(column, true)
+		_tree.set_column_custom_minimum_width(column, 0)
+	_tree.set_column_clip_content(column, false)
+
+
+## Re-measures the floor of every collapsed column (content changes
+## on every rebuild: rescan, sort, toggles). Never fails.
+func _refit_collapsed_columns() -> void:
+	if _tree == null or not is_instance_valid(_tree):
+		return
+	for c in _collapsed_cols.keys():
+		if bool(_collapsed_cols.get(c, false)) and int(c) >= 0 and int(c) < TREE_COLUMNS:
+			_apply_column_collapse(int(c))
+
+
+## File-row activation in either Files-tab view: navigates to the
+## file's first issue (line 1 when clean). Group/dir rows carry no
+## target and stay inert.
 func _on_tree_item_selected() -> void:
-	var sel := _tree.get_selected()
+	_navigate_tree_selection(_tree)
+
+
+## Same for the flat Files-tab view.
+func _on_flat_item_selected() -> void:
+	_navigate_tree_selection(_flat_tree)
+
+
+## Shared row activation for both Files-tab trees. Never fails.
+func _navigate_tree_selection(tree: Tree) -> void:
+	if tree == null or not is_instance_valid(tree):
+		return
+	var sel := tree.get_selected()
 	if sel == null or not is_instance_valid(sel):
 		return
 	var md: Variant = sel.get_metadata(0)
@@ -588,6 +922,23 @@ func _on_tree_item_selected() -> void:
 		_goto.call(md)
 
 
+## Files-tab view switch (hidden inner tabs): columns or flat.
+## current_tab is set for the editor, and page visibility is synced
+## immediately (TabContainer applies tab switches on a later layout
+## pass, which headless runs without frames never reach). Out-of-range
+## indices clamp. Never fails.
+func _switch_file_view(idx: int) -> void:
+	_ensure_built()
+	if _view_tabs == null or not is_instance_valid(_view_tabs):
+		return
+	var clamped := clampi(idx, VIEW_COLUMNS, VIEW_FLAT)
+	_view_tabs.current_tab = clamped
+	for i in range(_view_tabs.get_tab_count()):
+		var c := _view_tabs.get_tab_control(i)
+		if c is Control and is_instance_valid(c):
+			(c as Control).visible = (i == clamped)
+
+
 ## Sort dropdown: re-sorts the file groups, persisting the choice.
 func _on_sort_changed(idx: int) -> void:
 	if idx < 0 or idx >= SORT_KEYS.size():
@@ -595,6 +946,7 @@ func _on_sort_changed(idx: int) -> void:
 	_sort_key = str(SORT_KEYS[idx])
 	_persist_filters()
 	_rebuild_file_tree()
+	_rebuild_flat_tree()
 
 
 ## Order toggle: flips ascending/descending, persisting the choice.
@@ -604,6 +956,7 @@ func _on_desc_toggled(pressed_on: bool) -> void:
 		_sort_desc_btn.button_pressed = _sort_desc
 	_persist_filters()
 	_rebuild_file_tree()
+	_rebuild_flat_tree()
 
 
 ## Drops every known issue.
@@ -670,15 +1023,30 @@ func _ensure_built() -> void:
 	clear.tooltip_text = "Clear the issue list"
 	clear.pressed.connect(_on_clear)
 	toolbar.add_child(clear)
+	_unhide_btn = Button.new()
+	_unhide_btn.text = "Unhide (0)"
+	_unhide_btn.focus_mode = Control.FOCUS_NONE
+	_unhide_btn.tooltip_text = "Show every hidden issue again"
+	_unhide_btn.disabled = true
+	_unhide_btn.pressed.connect(_on_unhide_all)
+	toolbar.add_child(_unhide_btn)
 	_tabs = TabContainer.new()
 	_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(_tabs)
-	_list = ItemList.new()
-	_list.name = TAB_ISSUES
-	_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_list.allow_reselect = true
-	_list.item_selected.connect(_on_item_selected)
-	_tabs.add_child(_list)
+	_issues = Tree.new()
+	_issues.name = TAB_ISSUES
+	_issues.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_issues.columns = 2
+	_issues.hide_root = true
+	_issues.column_titles_visible = false
+	_issues.allow_reselect = true
+	_issues.set_column_expand(1, false)
+	_issues.set_column_custom_minimum_width(1, HIDE_COLUMN_WIDTH)
+	_issues.set_column_clip_content(1, true)
+	_issues.item_selected.connect(_on_item_selected)
+	if _issues.has_signal("button_clicked"):
+		_issues.button_clicked.connect(_on_issue_button_clicked)
+	_tabs.add_child(_issues)
 	var files_page := VBoxContainer.new()
 	files_page.name = TAB_FILES
 	files_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -727,8 +1095,48 @@ func _ensure_built() -> void:
 	_tree.set_column_title(8, "Modified")
 	_tree.hide_root = true
 	_tree.column_titles_visible = true
+	_tree.column_title_clicked.connect(_on_column_title_clicked)
 	_tree.item_selected.connect(_on_tree_item_selected)
-	files_page.add_child(_tree)
+	_view_tabs = TabContainer.new()
+	_view_tabs.tabs_visible = false
+	_view_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_view_tabs.current_tab = VIEW_COLUMNS
+	files_page.add_child(_view_tabs)
+	var columns_page := VBoxContainer.new()
+	columns_page.name = "Columns"
+	columns_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_view_tabs.add_child(columns_page)
+	var columns_bar := HBoxContainer.new()
+	columns_bar.name = "ColumnsBar"
+	columns_page.add_child(columns_bar)
+	var to_flat := Button.new()
+	to_flat.text = "Single column"
+	to_flat.focus_mode = Control.FOCUS_NONE
+	to_flat.tooltip_text = "Show the census as single-column rows"
+	to_flat.pressed.connect(_switch_file_view.bind(VIEW_FLAT))
+	columns_bar.add_child(to_flat)
+	columns_page.add_child(_tree)
+	var flat_page := VBoxContainer.new()
+	flat_page.name = "Flat"
+	flat_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_view_tabs.add_child(flat_page)
+	var flat_bar := HBoxContainer.new()
+	flat_bar.name = "FlatBar"
+	flat_page.add_child(flat_bar)
+	var to_columns := Button.new()
+	to_columns.text = "Columns"
+	to_columns.focus_mode = Control.FOCUS_NONE
+	to_columns.tooltip_text = "Show the census as a column table"
+	to_columns.pressed.connect(_switch_file_view.bind(VIEW_COLUMNS))
+	flat_bar.add_child(to_columns)
+	_flat_tree = Tree.new()
+	_flat_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_flat_tree.columns = 1
+	_flat_tree.hide_root = true
+	_flat_tree.column_titles_visible = false
+	_flat_tree.item_selected.connect(_on_flat_item_selected)
+	flat_page.add_child(_flat_tree)
+	_switch_file_view(VIEW_COLUMNS)
 	if Engine.is_editor_hint():
 		_apply_filters(load_filters())
 		_census = FullScan.load_results().get("census", {})
@@ -831,28 +1239,69 @@ func _on_clear() -> void:
 	clear_all()
 
 
-func _on_item_selected(idx: int) -> void:
-	if idx < 0 or idx >= _shown.size():
+func _on_item_selected() -> void:
+	if _issues == null or not is_instance_valid(_issues):
+		return
+	var sel := _issues.get_selected()
+	if sel == null or not is_instance_valid(sel):
+		return
+	var md: Variant = sel.get_metadata(0)
+	if not (md is Dictionary):
 		return
 	if _goto.is_valid():
-		_goto.call(_shown[idx])
+		_goto.call(md)
 
 
-## Rebuilds the visible rows from _by_path through the toggles.
+## Hide-button click on an issue row: left-click hides that single
+## issue (other buttons, columns and out-of-range ids ignored).
+## Never fails.
+func _on_issue_button_clicked(item: TreeItem, column: int, id: int, mouse_button: int) -> void:
+	if mouse_button != MOUSE_BUTTON_LEFT or id != HIDE_BUTTON_ID:
+		return
+	if item == null or not is_instance_valid(item):
+		return
+	var md: Variant = item.get_metadata(0)
+	if not (md is Dictionary):
+		return
+	_hidden[hide_key(md)] = true
+	refresh()
+
+
+## Re-shows every hidden issue. Never fails.
+func _on_unhide_all() -> void:
+	_hidden.clear()
+	refresh()
+
+
+## Rebuilds the visible rows from _by_path through the toggles and
+## the hidden set (stale hidden keys with no live issue are pruned,
+## so the set never grows stale).
 func refresh() -> void:
 	_ensure_built()
 	var all: Array = []
 	for p in _by_path.keys():
 		for e in (_by_path[p] as Array):
 			all.append(e)
-	_shown = filter_issues(all, _show, _types)
-	_list.clear()
+	_shown = apply_hidden(filter_issues(all, _show, _types), _hidden)
+	var live := {}
+	for e in all:
+		if e is Dictionary:
+			live[hide_key(e)] = true
+	for k in _hidden.keys():
+		if not live.has(k):
+			_hidden.erase(k)
+	_issues.clear()
+	var root := _issues.create_item()
+	var glyph := hide_icon()
 	for e in _shown:
+		var row := _issues.create_item(root)
+		row.set_text(0, format_row(e))
 		var icon := _severity_icon(e)
 		if icon != null:
-			_list.add_item(format_row(e), icon, true)
-		else:
-			_list.add_item(format_row(e), null, false)
+			row.set_icon(0, icon)
+		row.add_button(1, glyph, HIDE_BUTTON_ID, false, "Hide this issue")
+		row.set_metadata(0, e)
+	_update_unhide_btn()
 	var n_err := 0
 	var n_warn := 0
 	var n_note := 0
@@ -868,6 +1317,40 @@ func refresh() -> void:
 		_status.text = DOCK_HINT
 	else:
 		_status.text = "GNMR Analyzer: " + status_text(n_err, n_warn, n_note, total_count() - _shown.size())
+
+
+## Updates the toolbar Unhide button (count label, disabled when
+## nothing is hidden). Never fails.
+func _update_unhide_btn() -> void:
+	if _unhide_btn == null or not is_instance_valid(_unhide_btn):
+		return
+	_unhide_btn.text = "Unhide (%d)" % _hidden.size()
+	_unhide_btn.disabled = _hidden.is_empty()
+
+
+## Hide-button glyph: the editor Close icon when available, else a
+## small procedural X (12px, visible on dark and light themes) so
+## headless runs and bare themes still get a button. Never fails.
+static func hide_icon() -> Texture2D:
+	var ed := EdTree.editor_status_icon("Close")
+	if ed != null:
+		return ed
+	if _hide_icon_cache != null and is_instance_valid(_hide_icon_cache):
+		return _hide_icon_cache
+	var s := HIDE_ICON_SIZE
+	var img := Image.create(s, s, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var ink := Color(0.55, 0.55, 0.55, 1.0)
+	for i in range(2, s - 2):
+		for t in range(-1, 2):
+			var j1 := i + t
+			var j2 := s - 1 - i + t
+			if j1 >= 0 and j1 < s:
+				img.set_pixel(i, j1, ink)
+			if j2 >= 0 and j2 < s:
+				img.set_pixel(i, j2, ink)
+	_hide_icon_cache = ImageTexture.create_from_image(img)
+	return _hide_icon_cache
 
 
 ## Console glyph for a row severity (null headless/unknown: the row

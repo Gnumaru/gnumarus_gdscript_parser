@@ -582,7 +582,12 @@ Output panel buttons: severities (Errors / Warnings / Notes —
 nothing emits notes yet, the toggle is ready) and resource types
 (`gd` / `tscn` / `tres` / `godot` / `other`, derived from the issue
 path, so script issues and resource-integrity issues toggle
-independently). A status label counts visible issues and how many
+independently). Every row carries a hide button on its right (a
+Tree cell button with the editor Close glyph, or a 12px X fallback,
+in a fixed 24px column — rows keep text height); hiding drops that
+single issue (counted in the hidden tally), and the toolbar "Unhide"
+button brings them all back. Stale hides prune themselves when
+their issue disappears. A status label counts visible issues and how many
 the filters hide; picking a row navigates to it (same-file `.gd`
 reuses the status-bar path, other scripts open in the script editor,
 scenes open on the main screen — script jumps also reveal the Script
@@ -592,11 +597,20 @@ reveals the dock; Clear drops the list. Toggle state persists in
 both `EditorSettings` (`gnumarus_analyzer/dock_filters`, which wins
 on load) and the `ScanResults.json` `filters` copy, so it survives
 editor restarts with or without editor settings. The Files tab shows
-the inventory as a Tree: one collapsed group row per file partition
+the inventory in two simultaneous views behind hidden inner tabs
+(each with a button switching to the other; the choice is session
+state): the column table and a single-column list with one
+concatenated row per entry and no res:// prefix (files:
+`/a.png: created: …; modified: …; size: …`; directories add
+`rec-size`, `direct files`, `all files`, `direct dirs`, `all dirs`).
+Both views share filters, sorting, navigation and the
+extension-count fallback. The column table is a Tree: one collapsed group row per file partition
 plus a trailing directories group. File rows carry human size,
 creation and modification stamps and sort by path, size or either
 date (dropdown, ascending/descending toggle, path tiebreak);
-directory rows carry direct/recursive file and subdir counts plus
+clicking a column header compacts it to a measured fit of title
+plus widest cell (hidden rows included, never truncated), clicking
+again stretches it back; directory rows carry direct/recursive file and subdir counts plus
 both byte sums. All stamps render UTC `YYYY-MM-DD hh:mm:ss`. File
 rows navigate to the file's first issue; group/dir rows are inert.
 The sort choice persists with the other toggles. Reports without an
@@ -1732,7 +1746,8 @@ first-painted-line scan).
   holding the host reference for Node services), precisely so the
   logic instantiates headless in unit tests.
   `GnumarusGodotProjectAnalyzerSuiteScanWorker.gd` owns the pool
-  mechanics only (dispatch/done/cancel/wait + one mutex); scan bodies
+  mechanics only (dispatch/done/cancel/wait + one mutex, results via
+  the mutex-guarded set_result/get_result pair); scan bodies
   stay in the impl/FullScan cores, which tests and the CLI keep using
   synchronously.
 - Limitations: GDScript editors only; unsaved (`untitled`) scripts

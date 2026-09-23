@@ -38,6 +38,9 @@ func run() -> Dictionary:
 	_r_census(h)
 	_r_tabs(h)
 	_r_file_tree(h)
+	_r_column_collapse(h)
+	_r_hide(h)
+	_r_flat_view(h)
 	_r_openers(h)
 	_r_impl(h)
 	_restore_results()
@@ -167,7 +170,9 @@ func _r_widgets(h) -> void:
 	_rescan_seen = 0
 	var d := _new_dock()
 	d.call("set_file_results", "res://a.gd", [_issue("error", "res://a.gd", 1), _issue("warning", "res://a.gd", 2), _issue("error", "res://b.tscn", 3)])
-	h.check((d as Object).get("_list").item_count == 3, "rows built")
+	var itree: Tree = (d as Object).get("_issues")
+	h.check(itree.get_root().get_child_count() == 3, "rows built")
+	h.check(itree.columns == 2, "issue tree has text plus button columns")
 	_flip(d, "_sev_btns", "warning", false)
 	h.check(d.call("shown_count") == 2, "warning toggle hides")
 	h.check("hidden" in str((d as Object).get("_status").text), "status marks hidden")
@@ -178,10 +183,11 @@ func _r_widgets(h) -> void:
 	h.check(d.call("shown_count") == 3, "toggles restore")
 	d.call("_on_rescan")
 	h.check(_rescan_seen == 1, "rescan wired")
-	(d as Object).get("_list").emit_signal("item_selected", 1)
+	itree.get_root().get_child(1).select(0)
 	h.check(_goto_seen.size() == 1 and int((_goto_seen[0] as Dictionary).get("line", 0)) == 2, "row pick navigates")
-	(d as Object).get("_list").emit_signal("item_selected", 99)
-	h.check(_goto_seen.size() == 1, "out-of-range pick ignored")
+	itree.deselect_all()
+	d.call("_on_item_selected")
+	h.check(_goto_seen.size() == 1, "deselected pick ignored")
 	d.call("_on_clear")
 	h.check(d.call("total_count") == 0, "clear button clears")
 	d.free()
@@ -342,6 +348,180 @@ func _r_file_tree(h) -> void:
 	d.call("_apply_filters", {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "include_addons": true, "sort": "bogus", "descending": "yes"})
 	h.check(str((d as Object).get("_sort_key")) == "path", "apply guards sort key")
 	h.check(not bool((d as Object).get("_sort_desc")), "apply guards descending")
+	d.free()
+
+
+func _r_column_collapse(h) -> void:
+	h.check(Dock.toggle_collapsed_state({}, 2, 9) == {2: true}, "toggle collapses")
+	h.check(Dock.toggle_collapsed_state({2: true}, 2, 9) == {2: false}, "toggle restores")
+	h.check(Dock.toggle_collapsed_state({}, -1, 9).is_empty(), "toggle ignores negative")
+	h.check(Dock.toggle_collapsed_state({}, 9, 9).is_empty(), "toggle ignores overflow")
+	h.check(Dock.toggle_collapsed_state({1: true}, 2, 9) == {1: true, 2: true}, "toggle keeps other columns")
+	var src := {3: true}
+	Dock.toggle_collapsed_state(src, 0, 9)
+	h.check(not src.has(0), "toggle never mutates input")
+	var d := _new_dock()
+	d.call("set_file_results", "res://a.gd", [])
+	var tree: Tree = (d as Object).get("_tree")
+	h.check(tree.is_column_expanding(1) and not tree.is_column_clipping_content(1), "columns start normal")
+	d.call("_on_column_title_clicked", 1, MOUSE_BUTTON_LEFT)
+	h.check(bool((d as Object).get("_collapsed_cols").get(1, false)), "click records collapse")
+	h.check(not tree.is_column_expanding(1), "click compacts tree column")
+	h.check(not tree.is_column_clipping_content(1), "compacted column never clips")
+	h.check(tree.is_column_expanding(0) and tree.is_column_expanding(2), "click spares other columns")
+	d.call("_on_column_title_clicked", 1, MOUSE_BUTTON_LEFT)
+	h.check(not bool((d as Object).get("_collapsed_cols").get(1, true)), "second click records restore")
+	h.check(tree.is_column_expanding(1) and not tree.is_column_clipping_content(1), "second click restores tree column")
+	d.call("_on_column_title_clicked", 0, MOUSE_BUTTON_RIGHT)
+	h.check(not bool((d as Object).get("_collapsed_cols").get(0, false)), "right click ignored")
+	h.check(tree.is_column_expanding(0), "right click spares tree column")
+	d.call("_on_column_title_clicked", 99, MOUSE_BUTTON_LEFT)
+	h.check((d as Object).get("_collapsed_cols").size() == 1, "out-of-range click ignored")
+	d.free()
+	var d2 := _new_dock()
+	d2.call("set_file_results", "res://a.gd", [])
+	d2.call("set_census", {
+		"extensions": {"gd": 2}, "total": 2,
+		"project": {"extensions": {"gd": 1}, "total": 1},
+		"addons": {"extensions": {"gd": 1}, "total": 1},
+		"files": [
+			{"path": "res://a.gd", "size": 440729, "created": 0, "modified": 1000},
+			{"path": "res://addons/very_long_directory_name/c.gd", "size": 100, "created": 0, "modified": 2000},
+		],
+		"dirs": [],
+	})
+	var tree2: Tree = (d2 as Object).get("_tree")
+	var font := tree2.get_theme_font("font", "Tree")
+	var fs := tree2.get_theme_font_size("font_size", "Tree")
+	var path_w := int(font.get_string_size("res://addons/very_long_directory_name/c.gd", HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x)
+	h.check(d2.call("_column_fit_width", 0) >= path_w, "fit covers hidden child paths")
+	var size_w := int(font.get_string_size("430.4 KB", HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x)
+	var size_title_w := int(font.get_string_size("Size", HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x)
+	h.check(d2.call("_column_fit_width", 5) >= maxi(size_w, size_title_w), "fit covers cells and title")
+	h.check(d2.call("_column_fit_width", -1) == 0, "fit rejects negative")
+	h.check(d2.call("_column_fit_width", 9) == 0, "fit rejects overflow")
+	h.check(Dock._fit_text_width("", font, fs, 0, 16, 0) >= 12, "fit keeps padding on empty")
+	h.check(Dock._fit_text_width("x", font, fs, 2, 16, 0) > Dock._fit_text_width("x", font, fs, 0, 16, 0), "fit grows with depth")
+	d2.call("_on_column_title_clicked", 5, MOUSE_BUTTON_LEFT)
+	d2.call("set_census", {
+		"extensions": {"gd": 1}, "total": 1,
+		"project": {"extensions": {"gd": 1}, "total": 1},
+		"addons": {"extensions": {}, "total": 0},
+		"files": [{"path": "res://z.gd", "size": 10, "created": 0, "modified": 1000}],
+		"dirs": [],
+	})
+	h.check(not tree2.is_column_expanding(5), "rebuild keeps collapse")
+	d2.free()
+
+
+func _r_hide(h) -> void:
+	var a := _issue("error", "res://a.gd", 1, "k1")
+	var b := _issue("warning", "res://b.gd", 2, "k2")
+	h.check(Dock.hide_key(a) == Dock.hide_key(a.duplicate()), "hide key stable")
+	h.check(Dock.hide_key(a) != Dock.hide_key(b), "hide key distinguishes issues")
+	h.check(Dock.apply_hidden([a, b], {}).size() == 2, "no hidden keeps all")
+	h.check(Dock.apply_hidden([a, b], {Dock.hide_key(a): true}) == [b], "hidden drops one")
+	h.check(Dock.apply_hidden(["junk", a], {Dock.hide_key(a): true}).is_empty(), "hidden drops non-dicts")
+	h.check(Dock.hide_icon() is Texture2D, "hide glyph available headless")
+	var d := _new_dock()
+	d.call("set_file_results", "res://a.gd", [a])
+	d.call("set_file_results", "res://b.gd", [b])
+	var tree: Tree = (d as Object).get("_issues")
+	var unhide: Button = (d as Object).get("_unhide_btn")
+	h.check(tree.get_root().get_child_count() == 2, "hide rows built")
+	h.check(tree.get_root().get_child(0).get_button_count(1) == 1, "hide button on row")
+	h.check(unhide.disabled, "unhide starts disabled")
+	d.call("_on_issue_button_clicked", tree.get_root().get_child(0), 1, Dock.HIDE_BUTTON_ID, MOUSE_BUTTON_LEFT)
+	h.check(d.call("shown_count") == 1, "button hides one issue")
+	h.check(tree.get_root().get_child_count() == 1, "hidden row gone")
+	h.check(not unhide.disabled and "1" in unhide.text, "unhide counts hidden")
+	h.check("hidden" in str((d as Object).get("_status").text), "status marks user-hidden")
+	d.call("_on_issue_button_clicked", tree.get_root().get_child(0), 1, 99, MOUSE_BUTTON_LEFT)
+	h.check(d.call("shown_count") == 1, "foreign button id ignored")
+	d.call("_on_issue_button_clicked", tree.get_root().get_child(0), 1, Dock.HIDE_BUTTON_ID, MOUSE_BUTTON_RIGHT)
+	h.check(d.call("shown_count") == 1, "right click ignored")
+	d.call("_on_unhide_all")
+	h.check(d.call("shown_count") == 2, "unhide restores all")
+	h.check(tree.get_root().get_child_count() == 2, "unhidden rows back")
+	h.check(unhide.disabled, "unhide disables when empty")
+	d.call("_on_issue_button_clicked", tree.get_root().get_child(0), 1, Dock.HIDE_BUTTON_ID, MOUSE_BUTTON_LEFT)
+	d.call("set_scan_results", {"errors": [_issue("error", "res://c.gd", 9, "k9")], "warnings": []})
+	h.check((d as Object).get("_hidden").is_empty(), "stale hidden keys pruned")
+	h.check(d.call("shown_count") == 1, "prune keeps live rows")
+	d.free()
+
+
+func _r_flat_view(h) -> void:
+	h.check(Dock.flat_path("res://") == "/", "flat root path")
+	h.check(Dock.flat_path("res://a.png") == "/a.png", "flat strips prefix")
+	h.check(Dock.flat_path("res://a/b/c") == "/a/b/c", "flat keeps nesting")
+	h.check(Dock.flat_path("other/x") == "other/x", "flat passes foreign paths")
+	var f := {"path": "res://a.png", "size": 1536, "created": 1700000000, "modified": 1699000000}
+	h.check(Dock.flat_file_row(f) == "/a.png: created: 2023-11-14 22:13:20; modified: 2023-11-03 08:26:40; size: 1.5 KB", "flat file row format")
+	h.check(Dock.flat_file_row({"path": "res://x.gd", "size": 0, "created": 0, "modified": 0}) == "/x.gd: created: ; modified: ; size: 0 B", "flat file row blanks unknown")
+	var dd := {"path": "res://a", "created": 1700000000, "modified": 1699000000, "files": 1, "subdirs": 2, "files_recursive": 3, "subdirs_recursive": 4, "size": 1536, "size_recursive": 2048}
+	h.check(Dock.flat_dir_row(dd) == "/a: created: 2023-11-14 22:13:20; modified: 2023-11-03 08:26:40; size: 1.5 KB; rec-size: 2.0 KB; direct files: 1; all files: 3; direct dirs: 2; all dirs: 4", "flat dir row format")
+	var split := {"extensions": {"gd": 6}, "total": 6, "project": {"extensions": {"gd": 2}, "total": 2}, "addons": {"extensions": {"gd": 4}, "total": 4}}
+	h.check(Dock.view_groups(split, true, []).size() == 2, "view groups split")
+	h.check(Dock.view_groups(split, false, []).size() == 1, "view groups toggle drops addons")
+	h.check(Dock.view_groups({}, true, []).is_empty(), "view groups empty censused")
+	h.check(Dock.view_groups({}, true, [{"path": "res://x.gd"}]).size() == 2, "view groups fall back with files")
+	h.check(Dock.own_files([{"path": "res://a.gd"}, {"path": "res://addons/c.gd"}, {"nope": 1}, {"path": ""}], "project") == [{"path": "res://a.gd"}], "own files filter project")
+	h.check(Dock.own_files([{"path": "res://a.gd"}, {"path": "res://addons/c.gd"}], "addons") == [{"path": "res://addons/c.gd"}], "own files filter addons")
+	var dirs := [{"path": "res://b"}, {"path": "res://a"}, {"path": "res://addons/z"}, {"path": ""}, "junk"]
+	h.check(Dock.shown_dirs(dirs, true).map(func(e: Variant) -> String: return str((e as Dictionary).get("path", ""))) == ["res://a", "res://addons/z", "res://b"], "shown dirs sorted")
+	h.check(Dock.shown_dirs(dirs, false).size() == 2, "shown dirs toggle drops addons")
+	var files := [
+		{"path": "res://b.gd", "size": 100, "created": 0, "modified": 2000},
+		{"path": "res://a.gd", "size": 300, "created": 0, "modified": 1000},
+		{"path": "res://addons/c.gd", "size": 200, "created": 0, "modified": 3000},
+	]
+	var census := {
+		"extensions": {"gd": 3}, "total": 3, "bytes": 600, "size": "600 B", "newest": 3000, "oldest": 1000,
+		"project": {"extensions": {"gd": 2}, "total": 2, "bytes": 400, "size": "400 B", "newest": 2000, "oldest": 1000},
+		"addons": {"extensions": {"gd": 1}, "total": 1, "bytes": 200, "size": "200 B", "newest": 3000, "oldest": 3000},
+		"files": files,
+		"dirs": [{"path": "res://", "created": 0, "modified": 0, "files": 0, "subdirs": 1, "files_recursive": 3, "subdirs_recursive": 2, "size": 0, "size_recursive": 600}],
+	}
+	var d := _new_dock()
+	d.call("set_file_results", "res://a.gd", [{"severity": "error", "kind": "k", "message": "m", "line": 4, "column": 1, "path": "res://a.gd"}])
+	d.call("set_census", census)
+	var flat: Tree = (d as Object).get("_flat_tree")
+	var cols: Tree = (d as Object).get("_tree")
+	h.check(flat.columns == 1, "flat single column")
+	h.check(flat.get_root().get_child_count() == cols.get_root().get_child_count(), "flat mirrors column groups")
+	var fproj := flat.get_root().get_child(0)
+	h.check(fproj.get_child_count() == 2, "flat project file rows")
+	h.check(fproj.get_child(0).get_text(0) == Dock.flat_file_row(files[1]), "flat file row concatenated")
+	h.check(not ("res://" in fproj.get_child(0).get_text(0)), "flat file row hides prefix")
+	var fdirs := flat.get_root().get_child(2)
+	h.check(fdirs.get_child(0).get_text(0) == Dock.flat_dir_row((census.get("dirs", []) as Array)[0]), "flat dir row concatenated")
+	_goto_seen.clear()
+	fproj.collapsed = false
+	fproj.get_child(0).select(0)
+	h.check(_goto_seen.size() == 1 and str((_goto_seen[0] as Dictionary).get("path", "")) == "res://a.gd", "flat file row navigates")
+	fdirs.get_child(0).select(0)
+	h.check(_goto_seen.size() == 1, "flat dir row inert")
+	var vtabs: TabContainer = (d as Object).get("_view_tabs")
+	h.check(not vtabs.tabs_visible, "view tabs hidden")
+	h.check(vtabs.get_tab_count() == 2, "two file views")
+	h.check(vtabs.get_tab_control(0).visible and not vtabs.get_tab_control(1).visible, "columns view first")
+	d.call("_switch_file_view", Dock.VIEW_FLAT)
+	h.check(vtabs.get_tab_control(1).visible and not vtabs.get_tab_control(0).visible, "switch reaches flat view")
+	d.call("_switch_file_view", 99)
+	h.check(vtabs.get_tab_control(1).visible and not vtabs.get_tab_control(0).visible, "switch clamps overflow")
+	d.call("_switch_file_view", -5)
+	h.check(vtabs.get_tab_control(0).visible and not vtabs.get_tab_control(1).visible, "switch clamps underflow")
+	((d as Object).get("_sort_opt") as OptionButton).select(1)
+	((d as Object).get("_sort_opt") as OptionButton).emit_signal("item_selected", 1)
+	h.check(flat.get_root().get_child(0).get_child(0).get_text(0) == Dock.flat_file_row(files[0]), "flat view follows sort")
+	((d as Object).get("_addons_btn") as Button).button_pressed = false
+	((d as Object).get("_addons_btn") as Button).pressed.emit()
+	h.check(flat.get_root().get_child_count() == cols.get_root().get_child_count(), "flat mirrors addons toggle")
+	d.call("set_census", {"extensions": {"gd": 9}, "total": 9})
+	h.check(flat.get_root().get_child(0).get_child_count() == 1, "flat legacy extension rows")
+	d.call("set_census", {})
+	h.check(flat.get_root().get_child(0).get_text(0) == Dock.CENSUS_HINT, "flat hint when uncensused")
 	d.free()
 
 

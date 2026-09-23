@@ -25,6 +25,8 @@ var _task_id := -1
 ## Work closure executed on the worker thread.
 var _work: Callable = Callable()
 ## Result payload stored by the task, read on main after is_done().
+## Written via set_result (never assigned directly: the plugin impl
+## reaches the worker through Object.call, which needs a method).
 var result := {}
 ## Kind label for logs ("warm"/"full").
 var kind := ""
@@ -49,7 +51,7 @@ func dispatch(work: Callable, p_kind: String) -> int:
 
 ## Pool entry point: runs the closure, then flags done. The closure
 ## must never touch editor nodes/singletons; results hand back via
-## `result` (read on main only after is_done()).
+## set_result (read on main via get_result only after is_done()).
 func _run() -> void:
 	if _work.is_valid():
 		_work.call()
@@ -72,6 +74,23 @@ func is_cancelled() -> bool:
 	var c := _cancelled
 	_mutex.unlock()
 	return c
+
+
+## Stores the task result payload (worker thread writes, main reads
+## after is_done()). Thread-safe.
+func set_result(payload: Dictionary) -> void:
+	_mutex.lock()
+	result = (payload as Dictionary).duplicate()
+	_mutex.unlock()
+
+
+## Copy of the task result payload. Thread-safe; read on main only
+## after is_done().
+func get_result() -> Dictionary:
+	_mutex.lock()
+	var out := (result as Dictionary).duplicate()
+	_mutex.unlock()
+	return out
 
 
 ## True once the task function returned (results readable).
