@@ -7,14 +7,18 @@ extends VBoxContainer
 ## Two tabs share one toolbar: "Issues" (the filtered error/warning
 ## list) and "Files" (the project file census in two visible inner
 ## tabs, "Table" and "Text", each split into a files section and a
-## directories section). The table tab holds two separate 9-column
-## Trees — one listing only files (grouped by project/addons
-## partition), one listing only directories — each with its own
-## Include Addons toggle, sort dropdown and descending switch; the
-## text tab mirrors both sections as single-column concatenated rows
-## without the res:// prefix, following the same per-panel state.
-## Clicking a column header compacts that column to fit its content
-## (never truncated); clicking again stretches it back. Every issue row
+## directories section). The table tab holds two separate Trees — a
+## 4-column files table (files grouped by project/addons partition,
+## then by extension) and a 9-column directories table — each with
+## its own Include Addons toggle, sort dropdown and descending
+## switch; the text tab mirrors both sections as single-column
+## concatenated rows without the res:// prefix, following the same
+## per-panel state. Left-clicking a column header sorts by that
+## column (clicking the current sort column toggles
+## ascending/descending; every column sorts on both tables) and marks
+## it with ▲/▼; right-clicking toggles that column between stretched
+## and content-fit autofit (Path stretched, the rest autofitted by
+## default, never truncated). Every issue row
 ## carries a hide button on its right (Tree cell button, so rows keep
 ## text height); hiding drops that single issue until "Unhide" (in
 ## the toolbar) brings every hidden issue back. Two toggle groups filter the issue list (same idea as the Output
@@ -43,6 +47,10 @@ const TAB_FILES := "Files"
 const CENSUS_HINT := "No file census yet. Run Project > Tools > Gnumaru's Full Scan."
 const SORT_KEYS := ["path", "size", "created", "modified"]
 const SORT_LABELS := {"path": "Path", "size": "Size", "created": "Created", "modified": "Modified"}
+## Directories-panel sort keys and dropdown labels (every column
+## sorts; same buckets as FullScan.DIR_SORT_KEYS).
+const DIR_SORT_KEYS := ["path", "files", "subdirs", "files_recursive", "subdirs_recursive", "size", "size_recursive", "created", "modified"]
+const DIR_SORT_LABELS := {"path": "Path", "files": "Files", "subdirs": "Subdirs", "files_recursive": "Files (rec)", "subdirs_recursive": "Subdirs (rec)", "size": "Size", "size_recursive": "Size (rec)", "created": "Created", "modified": "Modified"}
 const TREE_COLUMNS := 9
 ## Files-only table width: Path, Size, Created, Modified (the
 ## file/subdir count columns only make sense for directories).
@@ -50,6 +58,13 @@ const FILES_COLUMNS := 4
 const FILE_COL_SIZE := 1
 const FILE_COL_CREATED := 2
 const FILE_COL_MODIFIED := 3
+## Base header titles of both tables (sort marks append below).
+const FILE_COL_TITLES := ["Path", "Size", "Created", "Modified"]
+const DIR_COL_TITLES := ["Path", "Files", "Subdirs", "Files (rec)", "Subdirs (rec)", "Size", "Size (rec)", "Created", "Modified"]
+## Sort-direction marks appended to the sorted column header
+## (ascending ▲, descending ▼).
+const SORT_ASC_MARK := " ▲"
+const SORT_DESC_MARK := " ▼"
 ## Files-tab inner views (visible tabs of the view TabContainer):
 ## the 9-column tables or the single-column concatenated rows.
 const TAB_TABLE := "Table"
@@ -413,6 +428,76 @@ static func ext_label(ext: String) -> String:
 	return "." + str(ext)
 
 
+## Extension-bucket highlight (subgroup rows read instantly).
+const EXT_GROUP_COLOR := Color(1.0, 0.85, 0.25)
+
+
+## Aggregate stats of one extension bucket: file count, byte
+## sum/min/max/avg plus oldest/newest creation and modification
+## stamps. Unknown stamps (0) never poison a min: they are excluded,
+## and the pair stays 0 when nothing is known. Pure, unit-tested
+## headless.
+static func ext_bucket_stats(files: Array) -> Dictionary:
+	var out := {"count": 0, "size_sum": 0, "size_min": 0, "size_max": 0, "size_avg": 0, "created_min": 0, "created_max": 0, "modified_min": 0, "modified_max": 0}
+	var n := 0
+	var total := 0
+	var smin := 0
+	var smax := 0
+	var cmin := 0
+	var cmax := 0
+	var mmin := 0
+	var mmax := 0
+	var cseen := false
+	var mseen := false
+	for f in files:
+		if not (f is Dictionary):
+			continue
+		var size := maxi(int((f as Dictionary).get("size", 0)), 0)
+		if n == 0:
+			smin = size
+			smax = size
+		else:
+			smin = mini(smin, size)
+			smax = maxi(smax, size)
+		total += size
+		var cr := maxi(int((f as Dictionary).get("created", 0)), 0)
+		if cr > 0:
+			if not cseen:
+				cmin = cr
+				cmax = cr
+				cseen = true
+			else:
+				cmin = mini(cmin, cr)
+				cmax = maxi(cmax, cr)
+		var mo := maxi(int((f as Dictionary).get("modified", 0)), 0)
+		if mo > 0:
+			if not mseen:
+				mmin = mo
+				mmax = mo
+				mseen = true
+			else:
+				mmin = mini(mmin, mo)
+				mmax = maxi(mmax, mo)
+		n += 1
+	out["count"] = n
+	out["size_sum"] = total
+	out["size_min"] = smin
+	out["size_max"] = smax
+	out["size_avg"] = int(total / n) if n > 0 else 0
+	out["created_min"] = cmin
+	out["created_max"] = cmax
+	out["modified_min"] = mmin
+	out["modified_max"] = mmax
+	return out
+
+
+## UTC stamp or "?" when unknown (tooltips never render blank).
+## Pure.
+static func census_stamp_or_q(mtime: int) -> String:
+	var s := census_datetime(maxi(mtime, 0))
+	return s if s != "" else "?"
+
+
 ## Inventory files belonging to one partition ("project" skips
 ## res://addons/ paths, "addons" keeps only those). Pure.
 static func own_files(files: Array, label: String) -> Array:
@@ -448,9 +533,24 @@ static func shown_dirs(dirs: Array, include_addons: bool) -> Array:
 	return shown
 
 
-## Sort key guard ("path" fallback). Pure.
-static func sanitize_sort_key(raw: Variant) -> String:
-	return str(raw) if str(raw) in SORT_KEYS else "path"
+## Sort key guard (files-panel keys by default, directories-panel
+## keys on request; anything else falls back to "path"). Pure.
+static func sanitize_sort_key(raw: Variant, allowed := SORT_KEYS) -> String:
+	return str(raw) if str(raw) in allowed else "path"
+
+
+## Sort keys accepted on one panel. Pure.
+static func panel_sort_keys(panel: String) -> Array:
+	if str(panel) == PANEL_DIRS:
+		return DIR_SORT_KEYS
+	return SORT_KEYS
+
+
+## Dropdown labels of one panel. Pure.
+static func panel_sort_labels(panel: String) -> Dictionary:
+	if str(panel) == PANEL_DIRS:
+		return DIR_SORT_LABELS
+	return SORT_LABELS
 
 
 ## File entries sorted by key ("path"/"size"/"created"/"modified",
@@ -481,15 +581,16 @@ static func sort_file_entries(files: Array, sort_key: String, descending := fals
 	return rows
 
 
-## Directory entries sorted like files ("size" reads the direct byte
-## sum), path-tied always. Returns a sorted copy; non-dicts and
-## pathless entries dropped. Pure, unit-tested headless.
+## Directory entries sorted by key (every column sorts: "size"
+## reads the direct byte sum), path-tied always, ascending unless
+## descending. Returns a sorted copy; non-dicts and pathless entries
+## dropped. Pure, unit-tested headless.
 static func sort_dir_entries(dirs: Array, sort_key: String, descending := false) -> Array:
 	var rows: Array = []
 	for d in dirs:
 		if d is Dictionary and str((d as Dictionary).get("path", "")) != "":
 			rows.append(d)
-	var key := sanitize_sort_key(sort_key)
+	var key := sanitize_sort_key(sort_key, DIR_SORT_KEYS)
 	rows.sort_custom(func(a: Variant, b: Variant) -> bool:
 		var cmp := 0
 		if key == "path":
@@ -644,7 +745,7 @@ func _panel_addons(panel: String) -> bool:
 
 
 func _panel_sort(panel: String) -> String:
-	return sanitize_sort_key(_panel_state(panel).get("sort", "path"))
+	return sanitize_sort_key(_panel_state(panel).get("sort", "path"), panel_sort_keys(panel))
 
 
 func _panel_desc(panel: String) -> bool:
@@ -652,15 +753,38 @@ func _panel_desc(panel: String) -> bool:
 
 
 ## Paints the census label (hidden when uncensused; counts follow the
-## files panel) and rebuilds all four Files-tab trees. Never fails.
+## files panel), refreshes the sort-direction header marks and
+## rebuilds all four Files-tab trees. Never fails.
 func _paint_census() -> void:
 	_ensure_built()
 	_files.text = census_text(_census, _panel_addons(PANEL_FILES))
 	_files.visible = _files.text != ""
+	_sync_sort_titles()
 	_rebuild_files_tree()
 	_rebuild_dirs_tree()
 	_rebuild_files_flat()
 	_rebuild_dirs_flat()
+
+
+## Appends the sort-direction mark (▲ ascending, ▼ descending) to
+## the sorted column header of both tables, plain titles elsewhere.
+## Runs on every census paint, so header clicks, dropdowns, toggles
+## and applies all reflect immediately. Never fails.
+func _sync_sort_titles() -> void:
+	_paint_sort_titles(_files_tree, PANEL_FILES, FILE_COL_TITLES)
+	_paint_sort_titles(_dirs_tree, PANEL_DIRS, DIR_COL_TITLES)
+
+
+func _paint_sort_titles(tree: Tree, panel: String, base: Array) -> void:
+	if tree == null or not is_instance_valid(tree):
+		return
+	var sort_key := _panel_sort(panel)
+	var desc := _panel_desc(panel)
+	for c in range(mini(tree.columns, base.size())):
+		var title := str(base[c])
+		if column_sort_key(panel, c) == sort_key:
+			title += SORT_DESC_MARK if desc else SORT_ASC_MARK
+		tree.set_column_title(c, title)
 
 
 ## First issue line per path (min), for file-row navigation targets.
@@ -679,7 +803,7 @@ static func _first_issue_lines(by_path: Dictionary) -> Dictionary:
 	return out
 
 
-## Rebuilds the files-only column tree: one collapsed group row per
+## Rebuilds the files-only column tree: one expanded group row per
 ## file partition (project, addons unless toggled off) with sorted
 ## file children. File rows carry size/creation/modification and
 ## navigate to the file's first issue (line 1 when clean); group rows
@@ -723,11 +847,13 @@ func _rebuild_dirs_tree() -> void:
 	_refit_collapsed_columns()
 
 
-## Single hint row on a column tree. Never fails.
+## Single hint row on a column tree (width derived from the tree
+## itself, so 4-column and 9-column tables never go out of bounds).
+## Never fails.
 func _add_tree_hint(tree: Tree, root: TreeItem) -> void:
 	var hint := tree.create_item(root)
 	hint.set_text(0, CENSUS_HINT)
-	_set_row_selectable(hint, false)
+	_set_row_selectable(hint, false, tree.columns if tree != null and is_instance_valid(tree) else TREE_COLUMNS)
 
 
 ## One directory row on a column tree (inert). Never fails.
@@ -745,7 +871,7 @@ func _add_dir_row(tree: Tree, parent: TreeItem, d: Variant) -> void:
 	row.set_text(6, FullScan.human_size(maxi(int(dd.get("size_recursive", 0)), 0)))
 	row.set_text(7, census_datetime(maxi(int(dd.get("created", 0)), 0)))
 	row.set_text(8, census_datetime(maxi(int(dd.get("modified", 0)), 0)))
-	_set_row_selectable(row, false)
+	_set_row_selectable(row, false, TREE_COLUMNS)
 
 
 ## Rebuilds the files-only flat tree from the same census: one row
@@ -791,7 +917,7 @@ func _rebuild_dirs_flat() -> void:
 		_set_row_selectable(hint, false, 1)
 
 
-## One collapsed flat file-group row with one collapsed extension
+## One expanded flat file-group row with one expanded extension
 ## subgroup per bucket holding the sorted concatenated file rows
 ## (single column, no res:// prefix).
 func _add_flat_file_group(root: TreeItem, label: String, group: Variant, files: Array, min_line: Dictionary) -> void:
@@ -803,12 +929,13 @@ func _add_flat_file_group(root: TreeItem, label: String, group: Variant, files: 
 		return
 	var node := _files_flat.create_item(root)
 	node.set_text(0, summary)
-	node.collapsed = true
+	node.collapsed = false
 	_set_row_selectable(node, false, 1)
 	for bucket in group_files_by_ext(own):
 		var sub := _files_flat.create_item(node)
 		sub.set_text(0, ext_label(str((bucket as Array)[0])))
-		sub.collapsed = true
+		sub.set_custom_color(0, EXT_GROUP_COLOR)
+		sub.collapsed = false
 		_set_row_selectable(sub, false, 1)
 		for f in sort_file_entries((bucket as Array)[1], _panel_sort(PANEL_FILES), _panel_desc(PANEL_FILES)):
 			var fd := f as Dictionary
@@ -818,11 +945,14 @@ func _add_flat_file_group(root: TreeItem, label: String, group: Variant, files: 
 			row.set_metadata(0, {"path": p, "line": int(min_line.get(p, 1))})
 
 
-## One collapsed file-group row with one collapsed extension
+## One expanded file-group row with one expanded extension
 ## subgroup per bucket (project > .gd > files) holding the sorted
-## file children. Falls back to the live file count when the group
-## dict carries no summary (hand-made censuses), so files never
-## vanish silently. File rows carry size/creation/modification only.
+## file children. Subgroup rows read yellow with the byte sum in
+## Size (min/max/avg tooltip) and the newest creation/modification
+## stamps (min/max tooltips). Falls back to the live file count when
+## the group dict carries no summary (hand-made censuses), so files
+## never vanish silently. File rows carry size/creation/
+## modification only.
 func _add_file_group(tree: Tree, root: TreeItem, label: String, group: Variant, files: Array, min_line: Dictionary) -> void:
 	var own := own_files(files, label)
 	var summary := _census_group_row(label, group)
@@ -832,13 +962,22 @@ func _add_file_group(tree: Tree, root: TreeItem, label: String, group: Variant, 
 		return
 	var node := tree.create_item(root)
 	node.set_text(0, summary)
-	node.collapsed = true
+	node.collapsed = false
 	_set_row_selectable(node, false, FILES_COLUMNS)
 	for bucket in group_files_by_ext(own):
 		var ext := str((bucket as Array)[0])
+		var st := ext_bucket_stats((bucket as Array)[1])
 		var sub := tree.create_item(node)
 		sub.set_text(0, ext_label(ext))
-		sub.collapsed = true
+		for c in FILES_COLUMNS:
+			sub.set_custom_color(c, EXT_GROUP_COLOR)
+		sub.set_text(FILE_COL_SIZE, FullScan.human_size(int(st.get("size_sum", 0))))
+		sub.set_tooltip_text(FILE_COL_SIZE, "min: %s, max: %s, avg: %s" % [FullScan.human_size(int(st.get("size_min", 0))), FullScan.human_size(int(st.get("size_max", 0))), FullScan.human_size(int(st.get("size_avg", 0)))])
+		sub.set_text(FILE_COL_CREATED, census_datetime(int(st.get("created_max", 0))))
+		sub.set_tooltip_text(FILE_COL_CREATED, "min: %s, max: %s" % [census_stamp_or_q(int(st.get("created_min", 0))), census_stamp_or_q(int(st.get("created_max", 0)))])
+		sub.set_text(FILE_COL_MODIFIED, census_datetime(int(st.get("modified_max", 0))))
+		sub.set_tooltip_text(FILE_COL_MODIFIED, "min: %s, max: %s" % [census_stamp_or_q(int(st.get("modified_min", 0))), census_stamp_or_q(int(st.get("modified_max", 0)))])
+		sub.collapsed = false
 		_set_row_selectable(sub, false, FILES_COLUMNS)
 		for f in sort_file_entries((bucket as Array)[1], _panel_sort(PANEL_FILES), _panel_desc(PANEL_FILES)):
 			_add_files_table_row(tree, sub, f, min_line)
@@ -877,17 +1016,17 @@ func _rebuild_files_legacy_rows(root: TreeItem, census: Dictionary) -> void:
 			continue
 		var node := _files_tree.create_item(root)
 		node.set_text(0, summary)
-		node.collapsed = true
-		_set_row_selectable(node, false)
+		node.collapsed = false
+		_set_row_selectable(node, false, FILES_COLUMNS)
 		built += 1
 		for r in _sorted_count_rows(gdict.get("extensions", {})):
 			var row := _files_tree.create_item(node)
 			row.set_text(0, str(r))
-			_set_row_selectable(row, false)
+			_set_row_selectable(row, false, FILES_COLUMNS)
 	if built == 0:
 		var hint := _files_tree.create_item(root)
 		hint.set_text(0, CENSUS_HINT)
-		_set_row_selectable(hint, false)
+		_set_row_selectable(hint, false, FILES_COLUMNS)
 
 
 ## Flat legacy rows for the files-only text tree (reports without a
@@ -908,7 +1047,7 @@ func _rebuild_files_flat_legacy_rows(root: TreeItem, census: Dictionary) -> void
 			continue
 		var node := _files_flat.create_item(root)
 		node.set_text(0, summary)
-		node.collapsed = true
+		node.collapsed = false
 		_set_row_selectable(node, false, 1)
 		built += 1
 		for r in _sorted_count_rows(gdict.get("extensions", {})):
@@ -939,32 +1078,88 @@ static func _sorted_count_rows(exts: Variant) -> Array:
 
 
 ## Marks the columns of a row (un)selectable (single-column trees
-## pass their width). Never fails.
+## pass their width). Clamped to the owning tree's width, so a stale
+## width never throws set_selectable out of bounds. Never fails.
 func _set_row_selectable(row: TreeItem, selectable: bool, total := TREE_COLUMNS) -> void:
 	if row == null or not is_instance_valid(row):
 		return
-	for c in range(maxi(total, 1)):
+	var limit := maxi(total, 1)
+	if (row as Object).has_method("get_tree"):
+		var owner: Variant = (row as Object).call("get_tree")
+		if owner is Tree and is_instance_valid(owner):
+			limit = mini(limit, maxi((owner as Tree).columns, 1))
+	for c in range(limit):
 		row.set_selectable(c, selectable)
 
 
-## Header click on a Files-tab column tree: left-click toggles that
-## column between stretched and content-fit (other mouse buttons and
-## out-of-range columns are ignored). Each table keeps its own
-## collapse state (different layouts). The fit floor is measured, not
-## trusted to the engine: header title plus every cell (hidden rows
-## included, so expanding a group never truncates), with room for
-## indentation, arrows, icons and padding. Never fails.
+## Sort key behind a table header click ("" only for unknown
+## panels/columns: every column sorts on both tables). Pure,
+## unit-tested headless.
+static func column_sort_key(panel: String, column: int) -> String:
+	if panel == PANEL_FILES:
+		match column:
+			0:
+				return "path"
+			FILE_COL_SIZE:
+				return "size"
+			FILE_COL_CREATED:
+				return "created"
+			FILE_COL_MODIFIED:
+				return "modified"
+	elif panel == PANEL_DIRS:
+		match column:
+			0:
+				return "path"
+			1:
+				return "files"
+			2:
+				return "subdirs"
+			3:
+				return "files_recursive"
+			4:
+				return "subdirs_recursive"
+			5:
+				return "size"
+			6:
+				return "size_recursive"
+			7:
+				return "created"
+			8:
+				return "modified"
+	return ""
+
+
+## Header click on a Files-tab column tree: left-click sorts by that
+## column (a second left-click on the current sort column flips
+## ascending/descending; count columns sort nothing and are
+## ignored); right-click toggles that column between stretched and
+## content-fit autofit (any other button ignored). Sorting syncs the
+## panel toolbar, persists and rebuilds; autofit keeps its own
+## per-table state (different layouts). Never fails.
 func _on_column_title_clicked(column: int, mouse_button: int, tree: Tree, key: String) -> void:
-	if mouse_button != MOUSE_BUTTON_LEFT:
-		return
 	if tree == null or not is_instance_valid(tree):
 		return
 	if column < 0 or column >= tree.columns:
 		return
-	var collapsed: Dictionary = (_collapsed_cols.get(key, {}) as Dictionary).duplicate()
-	collapsed = toggle_collapsed_state(collapsed, column, tree.columns)
-	_collapsed_cols[key] = collapsed
-	_apply_column_collapse(tree, key, column)
+	if mouse_button == MOUSE_BUTTON_RIGHT:
+		var collapsed: Dictionary = (_collapsed_cols.get(key, {}) as Dictionary).duplicate()
+		collapsed = toggle_collapsed_state(collapsed, column, tree.columns)
+		_collapsed_cols[key] = collapsed
+		_apply_column_collapse(tree, key, column)
+		return
+	if mouse_button != MOUSE_BUTTON_LEFT:
+		return
+	var sort_key := column_sort_key(key, column)
+	if sort_key == "":
+		return
+	if _panel_sort(key) == sort_key:
+		(_panel[key] as Dictionary)["descending"] = not _panel_desc(key)
+	else:
+		(_panel[key] as Dictionary)["sort"] = sort_key
+		(_panel[key] as Dictionary)["descending"] = false
+	_persist_filters()
+	_paint_census()
+	_sync_panel_widgets()
 
 
 ## Natural width of one column in pixels on one column tree: the
@@ -1099,9 +1294,9 @@ func _on_panel_addons(panel: String) -> void:
 
 
 func _on_panel_sort(idx: int, panel: String) -> void:
-	if idx < 0 or idx >= SORT_KEYS.size():
+	if idx < 0 or idx >= panel_sort_keys(panel).size():
 		return
-	(_panel[panel] as Dictionary)["sort"] = str(SORT_KEYS[idx])
+	(_panel[panel] as Dictionary)["sort"] = str(panel_sort_keys(panel)[idx])
 	_persist_filters()
 	_paint_census()
 
@@ -1241,6 +1436,7 @@ func _ensure_built() -> void:
 	if Engine.is_editor_hint():
 		_apply_filters(load_filters())
 		_census = FullScan.load_results().get("census", {})
+	_reset_column_autofit()
 	_paint_census()
 	refresh()
 
@@ -1308,15 +1504,8 @@ static func _make_column_tree() -> Tree:
 	var tree := Tree.new()
 	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tree.columns = TREE_COLUMNS
-	tree.set_column_title(0, "Path")
-	tree.set_column_title(1, "Files")
-	tree.set_column_title(2, "Subdirs")
-	tree.set_column_title(3, "Files (rec)")
-	tree.set_column_title(4, "Subdirs (rec)")
-	tree.set_column_title(5, "Size")
-	tree.set_column_title(6, "Size (rec)")
-	tree.set_column_title(7, "Created")
-	tree.set_column_title(8, "Modified")
+	for c in range(DIR_COL_TITLES.size()):
+		tree.set_column_title(c, str(DIR_COL_TITLES[c]))
 	tree.hide_root = true
 	tree.column_titles_visible = true
 	return tree
@@ -1328,10 +1517,8 @@ static func _make_files_tree() -> Tree:
 	var tree := Tree.new()
 	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tree.columns = FILES_COLUMNS
-	tree.set_column_title(0, "Path")
-	tree.set_column_title(FILE_COL_SIZE, "Size")
-	tree.set_column_title(FILE_COL_CREATED, "Created")
-	tree.set_column_title(FILE_COL_MODIFIED, "Modified")
+	for c in range(FILE_COL_TITLES.size()):
+		tree.set_column_title(c, str(FILE_COL_TITLES[c]))
 	tree.hide_root = true
 	tree.column_titles_visible = true
 	return tree
@@ -1345,6 +1532,21 @@ static func _make_flat_tree() -> Tree:
 	tree.hide_root = true
 	tree.column_titles_visible = false
 	return tree
+
+
+## Default column state: Path stretched, every other column on
+## both tables autofitted (compacted to content); right-click
+## stretches one back. Session-only (never persisted). Never fails.
+func _reset_column_autofit() -> void:
+	var files := {}
+	for c in FILES_COLUMNS:
+		if c != 0:
+			files[c] = true
+	var dirs := {}
+	for c in TREE_COLUMNS:
+		if c != 0:
+			dirs[c] = true
+	_collapsed_cols = {"files": files, "dirs": dirs}
 
 
 ## One table-tab panel section: header label, toolbar (addons
@@ -1367,8 +1569,8 @@ func _add_panel_section(page: VBoxContainer, panel: String, title: String, tree:
 	sort_opt.tooltip_text = "Sort " + title.to_lower() + " by"
 	sort_opt.fit_to_longest_item = false
 	sort_opt.clip_text = true
-	for k in SORT_KEYS:
-		sort_opt.add_item(str(SORT_LABELS.get(k, k)))
+	for k in panel_sort_keys(panel):
+		sort_opt.add_item(str(panel_sort_labels(panel).get(k, k)))
 	sort_opt.selected = 0
 	sort_opt.item_selected.connect(_on_panel_sort.bind(panel))
 	bar.add_child(sort_opt)
@@ -1415,7 +1617,7 @@ func _sync_panel_widgets() -> void:
 			addons_btn.button_pressed = _panel_addons(panel)
 		var sort_opt: OptionButton = widgets.get("sort", null)
 		if sort_opt != null and is_instance_valid(sort_opt):
-			sort_opt.select(maxi(SORT_KEYS.find(_panel_sort(panel)), 0))
+			sort_opt.select(maxi(panel_sort_keys(panel).find(_panel_sort(panel)), 0))
 		var desc_btn: CheckButton = widgets.get("desc", null)
 		if desc_btn != null and is_instance_valid(desc_btn):
 			desc_btn.button_pressed = _panel_desc(panel)

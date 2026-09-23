@@ -594,10 +594,11 @@ addons toggle switches views without rescanning; each group carries
 1024-based string), `newest` / `oldest` (unix mtimes). The report
 additionally lists every file (`files`: `path`, `size`, `created`,
 `modified`) and every directory (`dirs`: direct and recursive
-file/subdir counts plus direct and recursive byte sums). Sizes come
-from `FileAccess`, file modification times from
-`FileAccess.get_modified_time`, file creation times and both
-directory stamps from one batched shell lookup per scan
+file/subdir counts plus direct and recursive byte sums).
+File sizes and modification times come straight from `FileAccess`
+(`get_size`, `get_modified_time` — no shell involved); file
+creation times and both directory stamps come from one batched
+shell lookup per scan
 (`stat -c '%W|%Y'` on Linux, `stat -f '%B|%m'` on macOS, a single
 powershell script over all paths on Windows): Godot exposes no
 creation-time API and DirAccess has no stat calls, so anything the
@@ -648,7 +649,8 @@ editor restarts with or without editor settings. The Files tab shows
 the inventory in two visible inner tabs, Table and Text. The table
 tab holds two separate Trees: files only (grouped by
 project/addons partition, then by extension: project > `.gd` >
-files) and directories only, each with its own
+files, subgroup rows in yellow with the byte sum and newest stamps
+plus min/max/avg tooltips) and directories only, each with its own
 Include Addons toggle, sort dropdown and Descending switch (per-panel
 state, persisted under `filters.files` / `filters.dirs`; pre-split
 reports migrate their flat keys into both panels). The files table
@@ -663,10 +665,16 @@ column-collapse state (different layouts). File rows navigate to the file's
 first issue while group/dir rows are inert.
 File rows carry human size,
 creation and modification stamps and sort by path, size or either
-date (dropdown, ascending/descending toggle, path tiebreak);
-directory rows sort the same way over their direct byte sum.
-Clicking a column header compacts it to a measured fit of title
-plus widest cell (hidden rows included, never truncated), clicking
+date (dropdown, header left-click, ascending/descending toggle, path tiebreak);
+directory rows sort by every column (dropdown, header left-click;
+direct/recursive counts and byte sums included, the sorted header
+marked ▲ ascending / ▼ descending).
+Left-clicking a column header makes it the sort column (a second
+left-click on the current sort column flips ascending/descending); right-clicking a column
+toggles it between stretched and content-fit autofit (Path
+stretched, the rest autofitted by default, each table keeps its own
+state). Autofit measures
+a fit of title plus widest cell (hidden rows included, never truncated), clicking
 again stretches it back; directory rows carry direct/recursive file and subdir counts plus
 both byte sums. All stamps render UTC `YYYY-MM-DD hh:mm:ss`. File
 rows navigate to the file's first issue; group/dir rows are inert.
@@ -1692,7 +1700,7 @@ suites still print, so the marker alone could look green).
   openers headless-safe, dock lifecycle null-safety, Issues/Files
   tabs with visible Table/Text views, separate files-only and
   directories-only Trees with per-panel addons/sort/order state,
-  sortable dir rows and shared column collapse).
+  sortable dir rows and per-table column collapse).
   `test_scan_worker.gd` (background scans: pool dispatch/done/
   cancel/wait mechanics, FullScan policy-snapshot and cancel plumbs,
   plugin dispatch null-safety headless).

@@ -120,6 +120,14 @@ static func default_filters() -> Dictionary:
 	return {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "files": default_panel_state(), "dirs": default_panel_state()}
 
 
+## Sort keys accepted on the files panel (one sortable column each).
+const SORT_KEYS := ["path", "size", "created", "modified"]
+
+## Sort keys accepted on the directories panel (every column sorts:
+## the file keys plus the direct/recursive count and byte-sum keys).
+const DIR_SORT_KEYS := ["path", "files", "subdirs", "files_recursive", "subdirs_recursive", "size", "size_recursive", "created", "modified"]
+
+
 ## Default Files-tab panel state (one copy per panel: "files" lists
 ## files, "dirs" lists directories, each with its own addons toggle,
 ## sort key and order). Pure.
@@ -142,7 +150,7 @@ static func normalize_panel_state(raw: Variant, legacy := {}) -> Dictionary:
 	if src.has("include_addons") and (src.get("include_addons") is bool):
 		out["include_addons"] = bool(src.get("include_addons", true))
 	var sk := str(src.get("sort", "path"))
-	out["sort"] = sk if sk in ["path", "size", "created", "modified"] else "path"
+	out["sort"] = sk if sk in SORT_KEYS + DIR_SORT_KEYS else "path"
 	if src.has("descending") and (src.get("descending") is bool):
 		out["descending"] = bool(src.get("descending", false))
 	return out
