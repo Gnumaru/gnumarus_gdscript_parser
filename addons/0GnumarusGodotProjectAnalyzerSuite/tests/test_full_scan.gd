@@ -28,6 +28,79 @@ func _stat_stub(p: String) -> Dictionary:
 	return {"size": p.length() * 100, "created": 0, "modified": 1700000000 + p.length()}
 
 
+var _runner_calls: Array = []
+
+
+## Fake process runner: answers "created|modified" from the path
+## length for trailing path args (stat: after flag+format,
+## powershell: after the four option/script args).
+func _fake_shell_ok(exe: String, args: Array) -> Dictionary:
+	_runner_calls.append([exe, args])
+	var paths: Array = []
+	var take := false
+	var skip := 0
+	for a in args:
+		if take and skip > 0:
+			skip -= 1
+			continue
+		if take:
+			paths.append(str(a))
+		elif str(a) == "-Command":
+			take = true
+			skip = 1
+		elif str(a) == "-c" or str(a) == "-f":
+			take = true
+			skip = 1
+	var out: Array = []
+	for p in paths:
+		out.append("%d|%d" % [5000 + p.length(), 6000 + p.length()])
+	return {"code": 0, "out": out}
+
+
+func _fake_shell_fail(exe: String, args: Array) -> Dictionary:
+	_runner_calls.append([exe, args])
+	return {"code": 1, "out": []}
+
+
+func _fake_shell_failover(exe: String, args: Array) -> Dictionary:
+	if str(exe) == "powershell":
+		_runner_calls.append([exe, args])
+		return {"code": 1, "out": []}
+	return _fake_shell_ok(exe, args)
+
+
+## Mimics the real OS.execute shape: stdout arrives as ONE blob with
+## embedded newlines, not one array element per file.
+func _fake_shell_blob(exe: String, args: Array) -> Dictionary:
+	_runner_calls.append([exe, args])
+	var paths: Array = []
+	var take := false
+	var skip := 0
+	for a in args:
+		if take and skip > 0:
+			skip -= 1
+			continue
+		if take:
+			paths.append(str(a))
+		elif str(a) == "-Command":
+			take = true
+			skip = 1
+		elif str(a) == "-c" or str(a) == "-f":
+			take = true
+			skip = 1
+	var blob := ""
+	for p in paths:
+		blob += "%d|%d\n" % [5000 + p.length(), 6000 + p.length()]
+	return {"code": 0, "out": [blob]}
+
+
+func _fake_lookup(os_paths: Array) -> Dictionary:
+	var out := {}
+	for p in os_paths:
+		out[str(p)] = {"created": 7000 + str(p).length(), "modified": 8000 + str(p).length()}
+	return out
+
+
 func run() -> Dictionary:
 	var h = H.new()
 	h.suite = "full_scan"
@@ -39,6 +112,7 @@ func run() -> Dictionary:
 	_r_filters(h)
 	_r_census(h)
 	_r_inventory(h)
+	_r_creation(h)
 	_r_corrupt(h)
 	_r_gdscript_stage(h)
 	_r_integrity_stage(h)
@@ -260,9 +334,81 @@ func _r_inventory(h) -> void:
 		if not ((f as Dictionary).has("path") and (f as Dictionary).has("size") and (f as Dictionary).has("created") and (f as Dictionary).has("modified")):
 			bad_shape = true
 	h.check(not bad_shape, "inventory file shape")
+	var saw_created := false
+	for f in inv.get("files", []):
+		if (f as Dictionary).has("created"):
+			saw_created = true
+	h.check(saw_created, "inventory files carry created")
+	var saw_dir_dates := false
+	for dd in inv.get("dirs", []):
+		if (dd as Dictionary).has("created") and (dd as Dictionary).has("modified"):
+			saw_dir_dates = true
+	h.check(saw_dir_dates, "inventory dirs carry dates")
 	var rdoc := Impl.store_census(inv)
 	h.check(((rdoc.get("census", {}) as Dictionary).get("files", []) as Array).size() == (inv.get("files", []) as Array).size(), "roundtrip keeps files")
 	h.check(((rdoc.get("census", {}) as Dictionary).get("dirs", []) as Array).size() == (inv.get("dirs", []) as Array).size(), "roundtrip keeps dirs")
+
+
+func _r_creation(h) -> void:
+	h.check(Impl._os_path("/proj", "res://") == "/proj", "os path maps root")
+	h.check(Impl._os_path("/proj", "res://a/b.gd") == "/proj/a/b.gd", "os path joins")
+	h.check(Impl._os_path("/proj/", "res://a.gd") == "/proj/a.gd", "os path tolerates slash")
+	h.check(Impl._parse_stat_pair("111|222") == [111, 222], "stat pair parses")
+	h.check(Impl._parse_stat_pair("oops").is_empty(), "stat pair rejects garbage")
+	h.check(Impl._parse_stat_pair("1|2|3").is_empty(), "stat pair rejects triples")
+	h.check(Impl.creation_map([], Callable(self, "_fake_shell_ok")).is_empty(), "creation empty paths")
+	_runner_calls.clear()
+	var linux := Impl.creation_map_for("Linux", ["/a", "/bb"], Callable(self, "_fake_shell_ok"))
+	h.check(str(_runner_calls[0][0]) == "stat" and "-c" in _runner_calls[0][1], "linux uses gnu stat")
+	h.check(int((linux.get("/a", {}) as Dictionary).get("created", -1)) == 5002, "linux parses created")
+	h.check(int((linux.get("/bb", {}) as Dictionary).get("modified", -1)) == 6003, "linux parses modified")
+	_runner_calls.clear()
+	var mac := Impl.creation_map_for("macOS", ["/a"], Callable(self, "_fake_shell_ok"))
+	h.check(str(_runner_calls[0][0]) == "stat" and "-f" in _runner_calls[0][1], "macos uses bsd stat")
+	h.check(int((mac.get("/a", {}) as Dictionary).get("created", -1)) == 5002, "macos parses created")
+	_runner_calls.clear()
+	var win := Impl.creation_map_for("Windows", [String("C:/a").replace("/", "\\")], Callable(self, "_fake_shell_ok"))
+	h.check(str(_runner_calls[0][0]) == "powershell", "windows tries powershell first")
+	h.check(not (win as Dictionary).is_empty(), "windows parses values")
+	_runner_calls.clear()
+	var fover := Impl.creation_map_for("Windows", ["/a"], Callable(self, "_fake_shell_failover"))
+	h.check(not (fover as Dictionary).is_empty(), "windows falls back to pwsh")
+	var exes := []
+	for c in _runner_calls:
+		exes.append(str((c as Array)[0]))
+	h.check(exes == ["powershell", "pwsh"], "failover tries both shells")
+	_runner_calls.clear()
+	h.check(Impl.creation_map_for("Plan9", ["/a"], Callable(self, "_fake_shell_ok")).is_empty(), "unknown os degrades")
+	h.check(_runner_calls.is_empty(), "unknown os spawns nothing")
+	_runner_calls.clear()
+	var retry := Impl._creation_map_stat(["/a", "/b", "/c"], Callable(self, "_fake_shell_fail"), true)
+	h.check(retry.is_empty(), "failed batches stay empty")
+	h.check(_runner_calls.size() == 4, "misshapen batch retries per file")
+	_runner_calls.clear()
+	Impl._creation_map_stat(["/a", "/b", "/c", "/d", "/e"], Callable(self, "_fake_shell_ok"), true, 2)
+	h.check(_runner_calls.size() == 3, "chunking batches calls")
+	h.check(Impl._parse_stat_pair("111|222\n") == [111, 222], "stat pair strips newline")
+	h.check(Impl._parse_stat_pair("111|222\r\n") == [111, 222], "stat pair strips crlf")
+	h.check(Impl._flatten_process_lines(["111|222\n333|444\n"]) == ["111|222", "333|444"], "flatten splits single blob")
+	h.check(Impl._flatten_process_lines(["111|222", "333|444"]) == ["111|222", "333|444"], "flatten keeps per-line shape")
+	h.check(Impl._flatten_process_lines(["111|222\r\n333|444\r\n"]) == ["111|222", "333|444"], "flatten strips carriage returns")
+	_runner_calls.clear()
+	var blob := Impl._creation_map_stat(["/a", "/bb"], Callable(self, "_fake_shell_blob"), true)
+	h.check(int((blob.get("/a", {}) as Dictionary).get("created", -1)) == 5002, "single blob batch parses created")
+	h.check(int((blob.get("/bb", {}) as Dictionary).get("modified", -1)) == 6003, "single blob batch parses modified")
+	h.check(_runner_calls.size() == 1, "single blob needs no retry")
+	_runner_calls.clear()
+	var win_blob := Impl.creation_map_for("Windows", ["/a", "/bb"], Callable(self, "_fake_shell_blob"))
+	h.check(int((win_blob.get("/a", {}) as Dictionary).get("created", -1)) == 5002, "windows single blob parses")
+	var fentries := [{"path": "res://a.gd", "size": 10, "created": 0, "modified": 100}]
+	var dentries: Array = Impl.census_dir_entries(["res://b", "res://a"], fentries)
+	Impl._enrich_creation("/proj", ["res://a.gd"], fentries, ["res://b", "res://a"], dentries, Callable(self, "_fake_lookup"))
+	var by_dir := {}
+	for d in dentries:
+		by_dir[str((d as Dictionary).get("path", ""))] = d
+	h.check(int((by_dir.get("res://a", {}) as Dictionary).get("created", 0)) == 7000 + "/proj/a".length(), "enrich maps dirs by path")
+	h.check(int((by_dir.get("res://b", {}) as Dictionary).get("modified", 0)) == 8000 + "/proj/b".length(), "enrich maps sorted dirs")
+	h.check(int((fentries[0] as Dictionary).get("created", 0)) == 7000 + "/proj/a.gd".length(), "enrich fills file created")
 
 
 func _r_corrupt(h) -> void:

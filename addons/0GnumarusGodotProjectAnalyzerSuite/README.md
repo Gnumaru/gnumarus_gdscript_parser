@@ -547,7 +547,23 @@ name extension: the merged view plus the `project`
 (res://addons/ excluded) and `addons` partitions, so the dock
 addons toggle switches views without rescanning; each group carries
 `extensions` / `total` plus `bytes` (byte sum), `size` (human
-1024-based string), `newest` / `oldest` (unix mtimes); dots in
+1024-based string), `newest` / `oldest` (unix mtimes). The report
+additionally lists every file (`files`: `path`, `size`, `created`,
+`modified`) and every directory (`dirs`: direct and recursive
+file/subdir counts plus direct and recursive byte sums). Sizes come
+from `FileAccess`, file modification times from
+`FileAccess.get_modified_time`, file creation times and both
+directory stamps from one batched shell lookup per scan
+(`stat -c '%W|%Y'` on Linux, `stat -f '%B|%m'` on macOS, a single
+powershell script over all paths on Windows): Godot exposes no
+creation-time API and DirAccess has no stat calls, so anything the
+shell cannot report stays 0 and renders blank (blank dates therefore
+mean a stale pre-fix report or a failed lookup — rescan to refresh).
+Batches are order-matched with per-file retry on shape mismatch
+(OS.execute returns stdout as one newline-embedded blob, so output
+is flattened before matching), directory dates are matched by path,
+unknown OSes spawn nothing, and stubbed runs skip
+the shell entirely — hermetic tests never spawn processes; dots in
 directory names never count, so extensionless names group under
 `(no ext)`; the walk skips `.godot/` and `.git/`).
 

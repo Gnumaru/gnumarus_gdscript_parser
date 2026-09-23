@@ -268,11 +268,161 @@ static func human_size(bytes: int) -> String:
 	return "%.1f %s" % [v, units[u]]
 
 
-## Size (bytes), creation and modification unixtimes of one file.
-## `created` is always 0: Godot exposes no creation-time API
-## (FileAccess has modified/access only), so the schema carries the
-## key for forward compatibility while collection stays honest.
-## Zeros when missing/unreadable. Static, pure IO, headless-safe.
+## Creation/modification unixtimes via the OS shell (Godot exposes
+## no creation-time API: FileAccess has modified/access only, and
+## DirAccess has no stat calls at all): {os_path: {"created": int,
+## "modified": int}}. One process per chunk (250 paths), order-matched
+## output, per-file retry on shape mismatch; anything unparseable
+## degrades to zeros with a single warning. `runner` stubs process
+## spawns for hermetic tests (Callable(exe, args) -> {"code", "out"}).
+## Blocking: worker thread only in production. Static, never fails.
+static func creation_map(os_paths: Array, runner := Callable()) -> Dictionary:
+	return creation_map_for(OS.get_name(), os_paths, runner)
+
+
+## OS-dispatched creation lookup (testable without a real OS or shell:
+## "Windows" runs one powershell script over all paths — trying
+## powershell, then pwsh — "Linux"/"macOS" run stat in chunks;
+## anything else degrades to {}. Unknown filesystems (birth time
+## unsupported) report 0 and stay 0 downstream.
+static func creation_map_for(os_name: String, os_paths: Array, runner := Callable()) -> Dictionary:
+	var paths: Array = []
+	for p in os_paths:
+		if str(p) != "":
+			paths.append(str(p))
+	if paths.is_empty():
+		return {}
+	if str(os_name) == "Windows":
+		return _creation_map_windows(paths, runner)
+	if str(os_name) == "Linux":
+		return _creation_map_stat(paths, runner, true)
+	if str(os_name) == "macOS":
+		return _creation_map_stat(paths, runner, false)
+	return {}
+
+
+## One synchronous process (worker thread only): {"code", "out"}.
+## Stubbed by tests via `runner`. Never fails (spawn errors degrade
+## to code -1 with empty output).
+static func _run_process(exe: String, args: Array, runner: Callable) -> Dictionary:
+	if runner.is_valid():
+		var stub: Variant = runner.call(exe, args)
+		if stub is Dictionary:
+			return {"code": int((stub as Dictionary).get("code", -1)), "out": (stub as Dictionary).get("out", [])}
+		return {"code": -1, "out": []}
+	var str_args := PackedStringArray()
+	for a in args:
+		str_args.append(str(a))
+	var out: Array = []
+	var code := OS.execute(exe, str_args, out, false)
+	return {"code": code, "out": out}
+
+
+## "created|modified" line parser (exactly two ints, else []).
+## Strips surrounding whitespace: OS.execute returns one blob with
+## embedded newlines, so callers split first and lines may carry
+## trailing "\n"/"\r". Pure.
+static func _parse_stat_pair(line: String) -> Array:
+	var s := str(line).strip_edges()
+	var parts := s.split("|")
+	if parts.size() != 2:
+		return []
+	if not parts[0].is_valid_int() or not parts[1].is_valid_int():
+		return []
+	return [int(parts[0]), int(parts[1])]
+
+
+## Flattens OS.execute output blobs into lines: Godot returns stdout
+## as a single array element with embedded newlines ("a|b\nc|d\n"),
+## while stubbed runners return one element per line. Splitting every
+## chunk on "\n" handles both shapes; trailing blanks are dropped.
+## Pure.
+static func _flatten_process_lines(raw: Array) -> Array:
+	var lines: Array = []
+	for chunk in raw:
+		for part in str(chunk).split("\n"):
+			lines.append(str(part).replace("\r", ""))
+	while not lines.is_empty() and str(lines[lines.size() - 1]).strip_edges() == "":
+		lines.pop_back()
+	return lines
+
+
+## stat-backed lookup (GNU "%W|%Y", BSD "%B|%m"): chunked batches
+## with per-file retry of misshapen batches. `chunk` exists for
+## tests (production uses 250). Never fails.
+static func _creation_map_stat(paths: Array, runner: Callable, gnu: bool, chunk := 250) -> Dictionary:
+	var out := {}
+	var i := 0
+	var step := maxi(chunk, 1)
+	while i < paths.size():
+		var slice := (paths as Array).slice(i, i + step)
+		if not _creation_stat_chunk(slice, runner, gnu, out):
+			for single in slice:
+				_creation_stat_chunk([single], runner, gnu, out)
+		i += step
+	if out.is_empty() and not paths.is_empty():
+		printerr("Gnumarus Full Scan: creation lookup produced nothing (stat missing or unsupported).")
+	return out
+
+
+## One stat batch: parses "created|modified" lines order-matched
+## against paths. Records nothing and returns false on any shape
+## mismatch (exit code, line count, unparseable line). Never fails.
+static func _creation_stat_chunk(paths: Array, runner: Callable, gnu: bool, out: Dictionary) -> bool:
+	var args: Array = ["-c", "%W|%Y"] if gnu else ["-f", "%B|%m"]
+	for p in paths:
+		args.append(str(p))
+	var res := _run_process("stat", args, runner)
+	if int(res.get("code", 1)) != 0:
+		return false
+	var lines := _flatten_process_lines(res.get("out", []))
+	if lines.size() != paths.size():
+		return false
+	var tmp: Array = []
+	for ln in lines:
+		var pair := _parse_stat_pair(str(ln))
+		if pair.is_empty():
+			return false
+		tmp.append(pair)
+	for i in range(paths.size()):
+		(out as Dictionary)[str(paths[i])] = {"created": int((tmp[i] as Array)[0]), "modified": int((tmp[i] as Array)[1])}
+	return true
+
+
+## Windows lookup: one powershell process looping over argv
+## ($args, so paths never pass through shell quoting — only single
+## quotes inside the static script are doubled). Tries powershell,
+## then pwsh; validates shape like the stat path. Never fails.
+static func _creation_map_windows(paths: Array, runner: Callable) -> Dictionary:
+	var script := "$o = @()\nforeach ($p in $args) {\n  try {\n    $i = Get-Item -LiteralPath $p -Force\n    $o += (\"{0}|{1}\" -f [int64]([datetimeoffset]$i.CreationTimeUtc).ToUnixTimeSeconds(), [int64]([datetimeoffset]$i.LastWriteTimeUtc).ToUnixTimeSeconds())\n  } catch {\n    $o += \"0|0\"\n  }\n}\n$o -join \"`n\""
+	var argv: Array = ["-NoProfile", "-NonInteractive", "-Command", script]
+	for p in paths:
+		argv.append(str(p))
+	for exe in ["powershell", "pwsh"]:
+		var res := _run_process(exe, argv, runner)
+		if int(res.get("code", -1)) != 0:
+			continue
+		var lines := _flatten_process_lines(res.get("out", []))
+		if lines.size() != paths.size():
+			continue
+		var out := {}
+		var ok := true
+		for i in range(paths.size()):
+			var pair := _parse_stat_pair(str(lines[i]))
+			if pair.is_empty():
+				ok = false
+				break
+			out[str(paths[i])] = {"created": int((pair as Array)[0]), "modified": int((pair as Array)[1])}
+		if ok:
+			return out
+	printerr("Gnumarus Full Scan: creation lookup failed on Windows.")
+	return {}
+
+
+## Size (bytes) and modification unixtime of one file ("created" is
+## always 0 here: creation times arrive in bulk via creation_map at
+## collect level). Zeros when missing/unreadable. Static, pure IO,
+## headless-safe.
 static func file_stat(path: String) -> Dictionary:
 	var size := 0
 	var modified := 0
@@ -418,10 +568,10 @@ static func _parent_dir(path: String) -> String:
 
 ## Per-directory rollups for `dirs` from pre-statted `file_entries`
 ## ({"path","size",...}): direct file/subdir counts, recursive file/
-## subdir totals, direct and recursive byte sums. Directory dates
-## stay 0: DirAccess exposes no stat API (documented gap, same as
-## file creation times). Children roll into parents deepest-first.
-## Pure.
+## subdir totals, direct and recursive byte sums. Directory dates start
+## at 0 here and are filled later by _enrich_creation via the shell
+## (DirAccess exposes no stat API). Children roll into parents
+## deepest-first. Pure.
 static func census_dir_entries(dirs: Array, file_entries: Array) -> Array:
 	var by_parent_files := {}
 	for f in file_entries:
@@ -488,9 +638,15 @@ static func is_addons_path(path: String) -> bool:
 ## mtimes; the report additionally lists every file
 ## ({"path","size","created","modified"}) and every directory (see
 ## census_dir_entries). `read_stat` stubs per-file stats (see
-## census_group). Static, pure IO.
+## census_group); with a valid stub the shell lookup is skipped, so
+## hermetic tests never spawn processes. Static, pure IO.
 static func collect_file_census(root: String, read_stat := Callable()) -> Dictionary:
-	var entries := stat_file_entries(collect_project_files(root), read_stat)
+	var res_paths := collect_project_files(root)
+	var entries := stat_file_entries(res_paths, read_stat)
+	var dir_res := collect_project_dirs(root)
+	var dir_entries := census_dir_entries(dir_res, entries)
+	if not read_stat.is_valid():
+		_enrich_creation(root, res_paths, entries, dir_res, dir_entries)
 	var pentries: Array = []
 	var aentries: Array = []
 	for e in entries:
@@ -501,7 +657,55 @@ static func collect_file_census(root: String, read_stat := Callable()) -> Dictio
 	var pg := census_group_entries(pentries)
 	var ag := census_group_entries(aentries)
 	var merged := _merge_groups(pg, ag)
-	return {"extensions": merged.get("extensions", {}), "total": int(merged.get("total", 0)), "bytes": int(merged.get("bytes", 0)), "size": str(merged.get("size", "")), "newest": int(merged.get("newest", 0)), "oldest": int(merged.get("oldest", 0)), "project": pg, "addons": ag, "files": entries, "dirs": census_dir_entries(collect_project_dirs(root), entries)}
+	return {"extensions": merged.get("extensions", {}), "total": int(merged.get("total", 0)), "bytes": int(merged.get("bytes", 0)), "size": str(merged.get("size", "")), "newest": int(merged.get("newest", 0)), "oldest": int(merged.get("oldest", 0)), "project": pg, "addons": ag, "files": entries, "dirs": dir_entries}
+
+
+## res:// path to OS path under root ("res://" itself maps to root).
+## Pure.
+static func _os_path(root: String, res_path: String) -> String:
+	var rel := str(res_path)
+	if rel == "res://":
+		return root
+	if rel.begins_with("res://"):
+		rel = rel.substr(6)
+	if root.ends_with("/"):
+		return root + rel
+	return root + "/" + rel
+
+
+## Fills "created" on file entries and "created"/"modified" on dir
+## entries from one batched shell lookup (real runs only). Dir entries
+## are matched by path (census_dir_entries returns them sorted, not in
+## walk order), so index-based matching would misattribute dates.
+## `lookup` stubs the shell map for tests (Callable(os_paths) ->
+## {os_path: {"created","modified"}}); real runs call creation_map.
+## Unknown paths keep their zeros. Never fails.
+static func _enrich_creation(root: String, res_paths: Array, entries: Array, dir_res: Array, dir_entries: Array, lookup := Callable()) -> void:
+	var os_paths: Array = []
+	var owners: Array = []
+	for i in range(res_paths.size()):
+		os_paths.append(_os_path(root, str(res_paths[i])))
+		owners.append([0, i])
+	for j in range(dir_res.size()):
+		os_paths.append(_os_path(root, str(dir_res[j])))
+		owners.append([1, str(dir_res[j])])
+	var dir_by_path := {}
+	for d in dir_entries:
+		if d is Dictionary:
+			dir_by_path[str((d as Dictionary).get("path", ""))] = d
+	var got: Dictionary = (lookup.call(os_paths) as Dictionary) if lookup.is_valid() else creation_map(os_paths)
+	for k in range(owners.size()):
+		var hit: Dictionary = got.get(str(os_paths[k]), {})
+		if hit.is_empty():
+			continue
+		var o: Array = owners[k]
+		if int(o[0]) == 0 and int(o[1]) < entries.size():
+			(entries[int(o[1])] as Dictionary)["created"] = maxi(int(hit.get("created", 0)), 0)
+		elif int(o[0]) == 1:
+			var target: Variant = dir_by_path.get(str(o[1]), null)
+			if target is Dictionary:
+				(target as Dictionary)["created"] = maxi(int(hit.get("created", 0)), 0)
+				(target as Dictionary)["modified"] = maxi(int(hit.get("modified", 0)), 0)
 
 
 ## Stores the file census in the report without touching any stage
