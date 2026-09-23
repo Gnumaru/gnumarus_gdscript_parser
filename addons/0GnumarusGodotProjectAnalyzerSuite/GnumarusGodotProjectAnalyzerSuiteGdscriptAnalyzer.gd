@@ -147,6 +147,11 @@ const ERR_TEMPLATE_MISMATCH := "template_mismatch"
 const ERR_GENERIC_MISPLACED := "generic_misplaced"
 const ERR_GENERIC_MALFORMED := "generic_malformed"
 const ERR_GENERIC_MISMATCH := "generic_mismatch"
+const ERR_GENERIC_FUNC_MISPLACED := "generic_func_misplaced"
+const ERR_GENERIC_FUNC_MALFORMED := "generic_func_malformed"
+const ERR_GENERIC_CALL_MISPLACED := "generic_call_misplaced"
+const ERR_GENERIC_CALL_MALFORMED := "generic_call_malformed"
+const ERR_GENERIC_CALL_MISMATCH := "generic_call_mismatch"
 const ERR_STRUCT_MISPLACED := "struct_misplaced"
 const ERR_STRUCT_MALFORMED := "struct_malformed"
 const ERR_STRUCT_UNKNOWN_TYPE := "struct_unknown_type"
@@ -163,6 +168,7 @@ const ERR_IMPLEMENTS_UNKNOWN_TYPE := "implements_unknown_type"
 const ERR_IMPLEMENTS_MISMATCH := "implements_mismatch"
 const ERR_MISSING_METHOD := "missing_method"
 const ERR_MISSING_MEMBER := "missing_member"
+const ERR_ASSIGN_MISMATCH := "assign_mismatch"
 const ERR_NULL_ACCESS := "null_access"
 const ERR_MAYBE_NULL := "maybe_null"
 const ERR_VAR_NOTNULL := "var_notnull"
@@ -256,6 +262,11 @@ var _written: Array = []
 ## non-empty, user JSONs are named from it instead of user_file_base,
 ## with the script class_name appended after "_" when present.
 var _embedded_base: String = ""
+## Node path of the embedded script inside its scene ("" for plain
+## .gd files and .tres bodies): stored as "node_path" in every user
+## JSON this analysis writes, so the scene↔node origin survives
+## without parsing filenames.
+var _embedded_node: String = ""
 ## Type file lookups (builtin/classes/user JSON info or miss marker),
 ## cached per analyze() call for \@return name resolution.
 var _type_cache: Dictionary = {}
@@ -801,8 +812,11 @@ func _ensure_script_key(key: String, path: String) -> Dictionary:
 ## resource (see SemParser.embedded_base): the resource path still
 ## comes from script_path (the .tscn/.tres), while file names use the
 ## embedded stem plus "_Class" when the script declares class_name.
-func analyze(ast: Dictionary, script_path: String = "", embedded: String = "") -> Dictionary:
+## `embedded_node` optionally pins the scene node path, stored as
+## "node_path" in every user JSON written ("" for plain scripts).
+func analyze(ast: Dictionary, script_path: String = "", embedded: String = "", embedded_node: String = "") -> Dictionary:
 	_embedded_base = str(embedded)
+	_embedded_node = str(embedded_node)
 	_errors = []
 	_warnings = []
 	_members = {}
@@ -875,6 +889,7 @@ func analyze(ast: Dictionary, script_path: String = "", embedded: String = "") -
 	var scope = _new_scope(null)
 	_walk_members(ast.get("children", []), scope, "")
 	_flow_members(ast.get("children", []), _new_scope(null), "")
+	_check_pending_vartype_bounds()
 	_check_implements()
 	_sort_issues(_errors)
 	_sort_issues(_warnings)
@@ -1779,6 +1794,7 @@ func _write_tuple_file(tname: String) -> void:
 		"kind": "tuple",
 		"class_name": "",
 		"resource_path": _script_resource_path,
+		"node_path": _embedded_node,
 		"parent": "",
 		"inheritance_chain": [tname],
 		"size": int(spec.get("size", 0)),
@@ -2124,6 +2140,7 @@ func _write_alias_file(aname: String) -> void:
 		"kind": "alias",
 		"class_name": "",
 		"resource_path": _script_resource_path,
+		"node_path": _embedded_node,
 		"parent": "",
 		"inheritance_chain": [aname],
 		"alias_tree": spec.get("tree", {}),
@@ -2614,11 +2631,65 @@ static func _unify_trees(formal: Dictionary, actual: Dictionary, subst: Dictiona
 
 ## Bound check: an actual tree fits an (already validated, concrete)
 ## bound tree. `any` bounds pass everything. Pure.
-static func _check_bound(bound: Dictionary, actual: Dictionary) -> bool:
+## Bound satisfaction: an actual tree fits when it is compatible with
+## any bound arm (union bounds are alternatives, not conjunctions).
+## Names compare nominally (derivation counts, like @var narrowing,
+## so Node fits Object); generic pairs need equal heads with every
+## arg fitting; union actuals need every arm fitting. Dynamic sides
+## and unbound template references stay lenient. Instance: nominal
+## derivation reads the roster and type JSONs.
+func _check_bound(bound: Dictionary, actual: Dictionary) -> bool:
 	if bound.is_empty() or str(bound.get("kind", "")) == "any":
 		return true
-	var r := _unify_trees(bound, actual, {}, [])
-	return bool(r.get("ok", false))
+	if actual.is_empty() or str(actual.get("kind", "")) == "any":
+		return true
+	if not _template_refs(actual, _templates.keys()).is_empty():
+		return true
+	var arms: Array = []
+	if str(bound.get("kind", "")) == "union":
+		arms = (bound.get("arms", []) as Array).duplicate()
+	else:
+		arms = [bound]
+	for arm in arms:
+		if _bound_arm_fits(arm, actual):
+			return true
+	return false
+
+
+## One bound arm against an actual tree (see _check_bound).
+func _bound_arm_fits(arm: Variant, actual: Variant) -> bool:
+	if not (arm is Dictionary) or not (actual is Dictionary):
+		return true
+	var arm_d := arm as Dictionary
+	var act_d := actual as Dictionary
+	var ak := str(arm_d.get("kind", ""))
+	var xk := str(act_d.get("kind", ""))
+	if ak == "any" or xk == "any":
+		return true
+	if ak == "name" and xk == "name":
+		return _nominal_compat(str(act_d.get("name", "")), str(arm_d.get("name", "")))
+	if ak == "generic" and xk == "generic":
+		if str(arm_d.get("name", "")) != str(act_d.get("name", "")):
+			return false
+		var aargs: Array = arm_d.get("args", [])
+		var xargs: Array = act_d.get("args", [])
+		if aargs.size() != xargs.size():
+			return false
+		for i in range(aargs.size()):
+			if not _bound_arm_fits(aargs[i], xargs[i]):
+				return false
+		return true
+	if ak == "name" and xk == "generic":
+		return _nominal_compat(str(act_d.get("name", "")), str(arm_d.get("name", "")))
+	if xk == "union":
+		var subs: Array = act_d.get("arms", [])
+		if subs.is_empty():
+			return true
+		for sub in subs:
+			if not _bound_arm_fits(arm, sub):
+				return false
+		return true
+	return false
 
 
 # ------------------------------------------------------- \@generic helpers
@@ -2641,6 +2712,40 @@ func _has_generic_tag(tok: Dictionary) -> Dictionary:
 func _has_any_generic_tag(node: Dictionary) -> bool:
 	for c in node.get("leading_comments", []):
 		if c is Dictionary and not _has_generic_tag(c).is_empty():
+			return true
+	return false
+
+
+func _find_generic_func(value: String) -> Dictionary:
+	return _find_tag(value, "generic_func")
+
+
+func _has_generic_func_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_generic_func(str(tok.get("value", "")))
+
+
+func _has_any_generic_func_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_generic_func_tag(c).is_empty():
+			return true
+	return false
+
+
+func _find_generic_call(value: String) -> Dictionary:
+	return _find_tag(value, "generic_call")
+
+
+func _has_generic_call_tag(tok: Dictionary) -> Dictionary:
+	if str(tok.get("type", "")) != "TYPE_INFO":
+		return {}
+	return _find_generic_call(str(tok.get("value", "")))
+
+
+func _has_any_generic_call_tag(node: Dictionary) -> bool:
+	for c in node.get("leading_comments", []):
+		if c is Dictionary and not _has_generic_call_tag(c).is_empty():
 			return true
 	return false
 
@@ -2682,6 +2787,60 @@ func _mark_generic_class(node: Dictionary, owner: String) -> void:
 		_error(ERR_GENERIC_MALFORMED, "@generic needs at least one template name: '# @generic T1 T2'", int(node.get("line", 0)), int(node.get("column", 0)), owner)
 		return
 	rec["generic"] = names
+
+
+## Generic parameter names of every enclosing class of owner
+## ("Outer.Inner" checks "Outer.Inner" then "Outer"), deduped.
+## Used to reject @generic_func shadowing (one merged substitution
+## could not tell class from method variables apart).
+func _enclosing_class_generics(owner: String) -> Array:
+	var out: Array = []
+	var o := str(owner)
+	while o != "":
+		for g in _class_generic(o):
+			if not out.has(str(g)):
+				out.append(str(g))
+		var dot := o.rfind(".")
+		o = o.substr(0, dot) if dot >= 0 else ""
+	return out
+
+
+## Marks one FUNC_DECL node with its leading \@generic_func tags:
+## method-level type parameters ("# \@generic_func T1 T2"). Every
+## name must be a file \@template (never concrete), listed once, and
+## must not shadow an enclosing class generic. Stamps
+## fn_node["generic_func"]. Lambdas cannot carry it (v1).
+func _mark_generic_func(node: Dictionary, owner: String) -> void:
+	var names: Array = []
+	var found := false
+	for c in node.get("leading_comments", []):
+		if not (c is Dictionary):
+			continue
+		var tag := _has_generic_func_tag(c)
+		if tag.is_empty():
+			continue
+		found = true
+		for w in _split_words(str(tag.get("message", ""))):
+			var word := str(w)
+			if not _is_type_name(word):
+				_error(ERR_GENERIC_FUNC_MALFORMED, "@generic_func has an invalid template name '" + word + "'", int(c.get("line", 0)), 0, owner)
+				return
+			if not _templates.has(word):
+				_error(ERR_GENERIC_FUNC_MALFORMED, "@generic_func '" + word + "' must be a template type of this file", int(c.get("line", 0)), 0, owner)
+				return
+			if word in names:
+				_error(ERR_GENERIC_FUNC_MALFORMED, "@generic_func lists '" + word + "' more than once", int(c.get("line", 0)), 0, owner)
+				return
+			if word in _enclosing_class_generics(owner):
+				_error(ERR_GENERIC_FUNC_MALFORMED, "@generic_func '" + word + "' shadows an enclosing class type parameter", int(c.get("line", 0)), 0, owner)
+				return
+			names.append(word)
+	if not found:
+		return
+	if names.is_empty():
+		_error(ERR_GENERIC_FUNC_MALFORMED, "@generic_func needs at least one template name: '# @generic_func T1 T2'", int(node.get("line", 0)), int(node.get("column", 0)), owner)
+		return
+	node["generic_func"] = names
 
 
 ## Generic parameter names of a class key ("Outer.Inner"), [] when
@@ -3060,6 +3219,7 @@ func _write_struct_file(tname: String) -> void:
 		"kind": "struct",
 		"class_name": "",
 		"resource_path": _script_resource_path,
+		"node_path": _embedded_node,
 		"parent": "",
 		"inheritance_chain": [tname],
 		"size": int(spec.get("size", 0)),
@@ -3259,6 +3419,8 @@ func _check_param_pair(pair: Dictionary, pnode: Dictionary, owner: String) -> vo
 		return
 	if not _report_tree_errors(pair, ERR_PARAM_UNKNOWN_TYPE, ERR_PARAM_MISMATCH, "@param", line, 0, owner):
 		return
+	if not ("[" in _vartype_text(pnode)):
+		_check_ann_generics(pair.get("tree", {}), "@param", line, 0, owner)
 	var members: Array = cm.get("types", [])
 	var ref := _vartype_name(pnode)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
@@ -3752,6 +3914,7 @@ func _write_interface_file(tname: String) -> void:
 		"kind": "interface",
 		"class_name": "",
 		"resource_path": _script_resource_path,
+		"node_path": _embedded_node,
 		"parent": "",
 		"inheritance_chain": [tname],
 		"size": (spec.get("members", []) as Array).size(),
@@ -4597,7 +4760,9 @@ static func _vartype_text(decl: Dictionary, key := "vartype") -> String:
 ## class (arity + template bounds on arguments). Unknown names are
 ## left to the semantic pass on purpose (no double reports).
 ## Returns the class key or "" (skip: non-generic, unknown, engine).
-func _check_vartype_arm(head: String, args: Array, owner: String, line: int, col: int) -> String:
+## `what` labels messages ("vartype" for declarations/arrows, the
+## annotation name for \@var/\@param/\@return members).
+func _check_vartype_arm(head: String, args: Array, owner: String, line: int, col: int, what := "vartype") -> String:
 	var key := _script_key_of(head, owner)
 	if key == "":
 		if head == _script_class and head != "":
@@ -4607,19 +4772,43 @@ func _check_vartype_arm(head: String, args: Array, owner: String, line: int, col
 	if params.is_empty():
 		return ""
 	if args.size() != params.size():
-		_error(ERR_GENERIC_MISMATCH, "vartype '" + head + "' takes " + str(params.size()) + " type argument(s), got " + str(args.size()), line, col, owner)
+		_error(ERR_GENERIC_MISMATCH, what + " '" + head + "' takes " + str(params.size()) + " type argument(s), got " + str(args.size()), line, col, owner)
 		return ""
 	for i in range(args.size()):
 		if not (args[i] is Dictionary):
 			continue
-		_pending_vartype_bounds.append({"param": str(params[i]), "arg": args[i], "head": head, "line": line, "col": col, "owner": owner})
+		_pending_vartype_bounds.append({"param": str(params[i]), "arg": args[i], "head": head, "what": what, "line": line, "col": col, "owner": owner})
 	return key
+
+
+## Validates generic applications inside an annotation member tree
+## (\@var/\@param/\@return types): each top-level {kind:generic} arm
+## over a \@generic class gets the same arity + bound checks bare
+## vartypes get (bounds wait on the shared post-resolve queue).
+## Unknown/engine heads stay silent; nested args ride inside their
+## parent's bound check, like vartypes. `what` labels messages.
+func _check_ann_generics(tree: Variant, what: String, line: int, col: int, owner: String) -> void:
+	if not (tree is Dictionary):
+		return
+	var t := tree as Dictionary
+	if str(t.get("kind", "")) == "union":
+		for arm in (t.get("arms", []) as Array):
+			_check_ann_generics(arm, what, line, col, owner)
+		return
+	if str(t.get("kind", "")) != "generic":
+		return
+	_check_vartype_arm(str(t.get("name", "")), ((t.get("args", []) as Array).duplicate()), owner, line, col, what)
 
 
 ## Post-resolve pass: template bounds on vartype arguments (bounds
 ## resolve after the scan, so this waits like the other post passes).
+## Drains the queue: free-@var hooks run later, during the walk, and
+## a second call after the flow pass picks those up without
+## re-reporting scan entries.
 func _check_pending_vartype_bounds() -> void:
-	for pen in _pending_vartype_bounds:
+	var pending := _pending_vartype_bounds.duplicate()
+	_pending_vartype_bounds = []
+	for pen in pending:
 		if not (pen is Dictionary):
 			continue
 		var pd: Dictionary = pen
@@ -4632,7 +4821,7 @@ func _check_pending_vartype_bounds() -> void:
 		if not _template_refs(arg, _templates.keys()).is_empty():
 			continue
 		if not _check_bound(bound, arg):
-			_error(ERR_GENERIC_MISMATCH, "type '" + _show_tree(arg) + "' for '" + str(pd.get("param", "")) + "' violates bound '" + _show_tree(bound) + "' in vartype '" + str(pd.get("head", "")) + "'", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
+			_error(ERR_GENERIC_MISMATCH, "type '" + _show_tree(arg) + "' for '" + str(pd.get("param", "")) + "' violates bound '" + _show_tree(bound) + "' in " + str(pd.get("what", "vartype")) + " '" + str(pd.get("head", "")) + "'", int(pd.get("line", 0)), int(pd.get("col", 0)), str(pd.get("owner", "")))
 
 
 ## Validates a vartype (or `->` return type) holding brackets and
@@ -5517,13 +5706,36 @@ func _script_derives(child: String, ancestor: String) -> bool:
 		guard += 1
 		var base := str(_class_extends.get(key, ""))
 		if base == "":
-			break
+			if not _is_script_class_name(key):
+				break
+			base = "RefCounted"
 		if base == ancestor or _base_simple(base) == ancestor:
 			return true
 		if ancestor in _engine_chain(_base_simple(base)):
 			return true
 		key = _resolve_private_owner(base, key)
 	return _script_derives_json(child, ancestor, {})
+
+
+## True when key names a script class: a "class" rec in any member
+## table (or an owner key from a class body), a roster global, or a
+## script-kind JSON. Engine, virtual, template, enum and unknown
+## names all read false — only real script classes inherit
+## RefCounted by default (see _script_derives).
+func _is_script_class_name(key: String) -> bool:
+	if key == "":
+		return false
+	if not _engine_info(key).is_empty():
+		return false
+	for o in _members.keys():
+		if str(o) == key:
+			return true
+		var table: Dictionary = _members[o]
+		if (table as Dictionary).has(key) and str(((table as Dictionary)[key] as Dictionary).get("kind", "")) == "class":
+			return true
+	if _roster_has(key):
+		return true
+	return str(_type_info(key).get("kind", "")) == "script"
 
 
 ## Cross-file derivation through user JSON extends chains (recorded
@@ -5593,6 +5805,8 @@ func _attach_return(fn_node: Dictionary, tag: Dictionary, owner: String) -> void
 		spec = rebuilt
 	if not _report_tree_errors(spec, ERR_RETURN_UNKNOWN, ERR_RETURN_MISMATCH, "@return", line, col, owner):
 		return
+	if not ("[" in _vartype_text(fn_node, "return_type")):
+		_check_ann_generics(spec.get("tree", {}), "@return", line, col, owner)
 	var notnull_clash := _check_notnull_clash("@return", ERR_RETURN_MALFORMED, spec, spec.get("types", []), line, col, owner)
 	var policy_clash := _check_nullpolicy_clash("@return", ERR_RETURN_MALFORMED, spec, spec.get("types", []), line, col, owner)
 	var ret_clash := notnull_clash or policy_clash
@@ -5639,6 +5853,8 @@ func _attach_var_decl(decl_node: Dictionary, spec: Dictionary, owner: String, is
 		return
 	if not _report_tree_errors(spec, ERR_VAR_UNKNOWN_TYPE, ERR_VAR_MISMATCH, "@var", line, col, owner):
 		return
+	if not ("[" in _vartype_text(decl_node)):
+		_check_ann_generics(spec.get("tree", {}), "@var", line, col, owner)
 	var members: Array = cm.get("types", [])
 	var ref := _var_reference(decl_node, is_const)
 	if ref != "" and ref != "Variant" and ref != "dynamic":
@@ -5846,9 +6062,11 @@ func _check_free_var(spec: Dictionary, scope: Dictionary, owner: String, fn_node
 	if not bool(cm.get("ok", false)):
 		_error(ERR_VAR_UNKNOWN_TYPE, "@var has unknown type '" + str(cm.get("bad", "")) + "'", line, 0, owner)
 		return
+	var tnode: Dictionary = target.get("node", {})
+	if not ("[" in _vartype_text(tnode)):
+		_check_ann_generics(spec.get("tree", {}), "@var", line, 0, owner)
 	var members: Array = cm.get("types", [])
 	var ref := ""
-	var tnode: Dictionary = target.get("node", {})
 	if bool(target.get("is_param", false)):
 		ref = _vartype_name(tnode)
 	elif not tnode.is_empty():
@@ -6132,6 +6350,11 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 				_mark_generic_class(d, owner)
 			else:
 				_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_generic_func_tag(d):
+			if t == "FUNC_DECL":
+				_mark_generic_func(d, owner)
+			else:
+				_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "CLASS_DECL":
 			_scan_class_body(d, owner)
 		elif t == "FUNC_DECL":
@@ -6162,6 +6385,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_generic_tag(d):
 			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_generic_func_tag(d):
+			_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_implements_tag(d):
 			_record_implements("", d, int(d.get("line", 0)))
 		return
@@ -6187,6 +6412,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_generic_tag(d):
 			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if _has_any_generic_func_tag(d):
+			_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_interface_tag(d):
@@ -6229,6 +6456,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_generic_tag(d):
 			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
+		if _has_any_generic_func_tag(d):
+			_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			return
 		if _has_any_struct_tag(d):
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
@@ -6250,6 +6480,8 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_VAR_MISPLACED, "@var redefinition is only allowed inside a function body", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not _has_param_tag(d).is_empty():
 			_error(ERR_PARAM_MISPLACED, "@param can only precede function/lambda parameters or the function/lambda declaration using them", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		if t == "TYPE_INFO" and not _has_generic_call_tag(d).is_empty():
+			_error(ERR_GENERIC_CALL_MISPLACED, "@generic_call must precede an expression, return or if statement with exactly one matching call", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_tuple_tag(d).is_empty():
 			_error(ERR_TUPLE_MISPLACED, "@tuple definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_alias_tag(d).is_empty():
@@ -6285,6 +6517,9 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		# Top level: already collected by _prescan_templates; falls through.
 	if _has_any_generic_tag(d):
 		_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		return
+	if _has_any_generic_func_tag(d):
+		_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if _has_any_struct_tag(d):
 		if not (member_pos and owner == ""):
@@ -6484,6 +6719,7 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_mark_vartype_on((child as Dictionary).get("return_type", null), child, full)
 					_mark_virtual_vartype(child, full)
 					_mark_param_carrier(child, child, full)
+					_mark_generic_func(child, full)
 					_scan((child as Dictionary).get("body", null), full, false)
 				if str((child as Dictionary).get("type", "")) == "VAR_DECL" or str((child as Dictionary).get("type", "")) == "CONST_DECL":
 					_mark_var_decl(child, full)
@@ -6507,6 +6743,8 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 					_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_generic_tag(child):
 					_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+				if _has_any_generic_func_tag(child) and str((child as Dictionary).get("type", "")) != "FUNC_DECL":
+					_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
 					_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_interface_tag(child):
@@ -8289,6 +8527,330 @@ func _class_prebindings(key: String, link_args: Array) -> Dictionary:
 		else:
 			return {}
 	return out
+
+
+## Parses one @generic_call message ("name[args]" or
+## "recv.name[args]") into {ok, recv, method, args} (args raw text)
+## or {ok: false, error}. Pure.
+static func _parse_generic_call_spec(msg: String) -> Dictionary:
+	var s := str(msg).strip_edges()
+	if s == "":
+		return {"ok": false, "error": "@generic_call needs a call with type arguments: '# @generic_call myfunc[int, Object]'"}
+	var open := s.find("[")
+	if open < 0 or not s.ends_with("]"):
+		return {"ok": false, "error": "@generic_call needs type arguments in brackets: '# @generic_call myfunc[int, Object]'"}
+	var head := s.substr(0, open).strip_edges()
+	var inner := s.substr(open + 1, s.length() - open - 2).strip_edges()
+	if inner == "":
+		return {"ok": false, "error": "@generic_call needs at least one type argument: '# @generic_call myfunc[int, Object]'"}
+	var parts := head.split(".")
+	if parts.size() < 1 or parts.size() > 2:
+		return {"ok": false, "error": "@generic_call names a function or receiver.method, got '" + head + "'"}
+	var recv := ""
+	var method := ""
+	if parts.size() == 2:
+		recv = str(parts[0]).strip_edges()
+		method = str(parts[1]).strip_edges()
+	else:
+		method = str(parts[0]).strip_edges()
+	if method == "" or not _is_type_name(method):
+		return {"ok": false, "error": "@generic_call has an invalid function name '" + head + "'"}
+	if recv != "" and recv != "self" and not _is_type_name(recv):
+		return {"ok": false, "error": "@generic_call has an invalid receiver '" + recv + "'"}
+	return {"ok": true, "recv": recv, "method": method, "args": inner}
+
+
+## Extracts every @generic_call tag from a statement's leading
+## comments into [{recv, method, args, raw, line}]. Malformed shapes
+## error here (generic_call_malformed); unknown/void arguments wait
+## for the use check (they need type state).
+func _extract_generic_call_tags(node: Dictionary, owner: String) -> Array:
+	var out: Array = []
+	for c in (node as Dictionary).get("leading_comments", []):
+		if not (c is Dictionary):
+			continue
+		var tag := _has_generic_call_tag(c)
+		if tag.is_empty():
+			continue
+		var parsed := _parse_generic_call_spec(str(tag.get("message", "")))
+		if not bool(parsed.get("ok", false)):
+			_error(ERR_GENERIC_CALL_MALFORMED, str(parsed.get("error", "")), int(c.get("line", 0)), 0, owner)
+			continue
+		out.append({"recv": str(parsed.get("recv", "")), "method": str(parsed.get("method", "")), "args": str(parsed.get("args", "")), "raw": str(tag.get("message", "")).strip_edges(), "line": int(c.get("line", 0))})
+	return out
+
+
+## Primary expression tokens of a statement for @generic_call
+## matching ([] when the node type carries none).
+func _call_stmt_tokens(node: Dictionary) -> Array:
+	match str((node as Dictionary).get("type", "")):
+		"VAR_DECL", "CONST_DECL":
+			return _as_tokens((node as Dictionary).get("value", null))
+		"EXPR_STMT":
+			return _as_tokens((node as Dictionary).get("expr", null))
+		"RETURN_STMT":
+			return _as_tokens((node as Dictionary).get("value", null))
+		"IF_STMT":
+			return _as_tokens((node as Dictionary).get("condition", null))
+	return []
+
+
+## LPAREN indices of calls matching a @generic_call claim in trimmed
+## tokens: bare `name(` when recv is "", else `recv.name(` (recv may
+## be an identifier or `self`). Nested `f(f(1))` counts twice, so
+## complex expressions fail the exactly-one rule at the call site.
+static func _generic_call_occurrences(tt: Array, recv: String, method: String) -> Array:
+	var out: Array = []
+	var i := 0
+	while i < tt.size():
+		if recv == "":
+			if (tt[i] is Dictionary) and str((tt[i] as Dictionary).get("type", "")) == "IDENTIFIER" and str((tt[i] as Dictionary).get("value", "")) == method and i + 1 < tt.size() and (tt[i + 1] is Dictionary) and str((tt[i + 1] as Dictionary).get("type", "")) == "LPAREN":
+				out.append(i + 1)
+				i += 2
+				continue
+		else:
+			if i + 3 < tt.size() and (tt[i] is Dictionary) and (tt[i + 1] is Dictionary) and (tt[i + 2] is Dictionary) and (tt[i + 3] is Dictionary):
+				var rt := str((tt[i] as Dictionary).get("type", ""))
+				var rv := str((tt[i] as Dictionary).get("value", ""))
+				if (rt == "IDENTIFIER" or (rt == "KEYWORD" and rv == "self")) and rv == recv and str((tt[i + 1] as Dictionary).get("type", "")) == "DOT" and str((tt[i + 2] as Dictionary).get("type", "")) == "IDENTIFIER" and str((tt[i + 2] as Dictionary).get("value", "")) == method and str((tt[i + 3] as Dictionary).get("type", "")) == "LPAREN":
+					out.append(i + 3)
+					i += 4
+					continue
+		i += 1
+	return out
+
+
+## Actual tree against a substituted formal tree (explicit
+## @generic_call mode, inference-free): `any` either side fits;
+## unions split (formal any-arm, actual all-arms); generics need
+## equal heads with pairwise args; names go nominal. Unbound
+## template heads stay lenient.
+func _trees_fit_nominal(actual: Variant, formal: Variant) -> bool:
+	if not (actual is Dictionary) or not (formal is Dictionary):
+		return true
+	var ad := actual as Dictionary
+	var fd := formal as Dictionary
+	if str(ad.get("kind", "")) == "any" or str(fd.get("kind", "")) == "any":
+		return true
+	if str(fd.get("kind", "")) == "union":
+		for arm in (fd.get("arms", []) as Array):
+			if _trees_fit_nominal(actual, arm):
+				return true
+		return false
+	if str(ad.get("kind", "")) == "union":
+		var subs: Array = ad.get("arms", [])
+		if subs.is_empty():
+			return true
+		for sub in subs:
+			if not _trees_fit_nominal(sub, formal):
+				return false
+		return true
+	var fh := _tree_head_name(fd)
+	if fh == "" or fh == "Variant" or fh == "dynamic" or _templates.has(fh):
+		return true
+	var ah := _tree_head_name(ad)
+	if ah == "" or ah == "any" or ah == "dynamic" or ah == "Variant" or ah == "null" or _templates.has(ah):
+		return true
+	if str(ad.get("kind", "")) == "generic" and str(fd.get("kind", "")) == "generic" and ah == fh:
+		var aargs: Array = ad.get("args", [])
+		var fargs: Array = fd.get("args", [])
+		if aargs.size() != fargs.size():
+			return false
+		for i in range(aargs.size()):
+			if not _trees_fit_nominal(aargs[i], fargs[i]):
+				return false
+		return true
+	return _nominal_compat(ah, fh)
+
+
+## Head type name of a name/generic tree ("" otherwise). Static.
+static func _tree_head_name(t: Dictionary) -> String:
+	var k := str((t as Dictionary).get("kind", ""))
+	if k == "name" or k == "generic":
+		return str((t as Dictionary).get("name", ""))
+	return ""
+
+
+## Validates one @generic_call claim against its statement: the claim
+## must match exactly one call in the primary expression, then the
+## explicit args bind the callee's @generic_func list positionally
+## (total arity, known names, template bounds) and actuals are
+## checked nominally against substituted formals — inference-free, so
+## Variant-declared signatures check what inference cannot. Slot
+## comparison runs only when the call is the whole value of a typed
+## assignment (shared tail). Anything unresolvable stays silent (the
+## statement's own verification owns it); inference overlaps (same
+## actuals conflicting under both modes) may report twice, each
+## truthfully.
+func _check_generic_call_use(spec: Dictionary, tt: Array, paren: int, node: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
+	var recv := str(spec.get("recv", ""))
+	var method := str(spec.get("method", ""))
+	var disp := "'" + (recv + "." if recv != "" else "") + method + "'"
+	var mline := int((tt[paren - 1] as Dictionary).get("line", int(spec.get("line", 0))))
+	var mcol := int((tt[paren - 1] as Dictionary).get("column", 0))
+	var fn_node := {}
+	var key := ""
+	var link_args: Array = []
+	if recv == "":
+		fn_node = _script_func_node(owner, method)
+		if fn_node.is_empty() and owner != "":
+			fn_node = _script_func_node("", method)
+	else:
+		var fb := _flow_base(recv, fn, scope, owner, env, {}, mline)
+		var fkind := str(fb.get("kind", ""))
+		if fkind == "script":
+			key = str(fb.get("key", ""))
+		elif fkind == "instance":
+			var itypes: Array = []
+			for t in (fb.get("types", []) as Array):
+				if str(t) != "" and str(t) != "null":
+					itypes.append(str(t))
+			if itypes == ["Variant"]:
+				_error(ERR_GENERIC_CALL_MISMATCH, "cannot apply @generic_call to Variant-typed receiver '" + recv + "'", mline, mcol, owner)
+				return
+			if itypes.is_empty() or itypes.size() != 1:
+				return
+			var link := _link_kind_of(itypes[0], owner)
+			if link.is_empty() or str(link.get("kind", "")) != "script":
+				return
+			key = str(link.get("key", ""))
+			link_args = _link_vartype_args(recv, fn, scope, owner, env, key)
+		else:
+			return
+		fn_node = _script_func_node(key, method)
+	if fn_node.is_empty():
+		return
+	var tvars: Array = ((fn_node as Dictionary).get("generic_func", []) as Array).duplicate()
+	if tvars.is_empty():
+		_error(ERR_GENERIC_CALL_MISMATCH, "@generic_call claims " + disp + " which has no @generic_func type parameters", mline, mcol, owner)
+		return
+	var argtrees: Array = []
+	for part in _split_top_commas(str(spec.get("args", ""))):
+		var text := str(part).strip_edges()
+		if text == "":
+			_error(ERR_GENERIC_CALL_MALFORMED, "@generic_call needs complete type arguments in '" + str(spec.get("raw", "")) + "'", int(spec.get("line", 0)), 0, owner)
+			return
+		var parsed := _parse_type_expr(text, "@generic_call")
+		if not bool(parsed.get("ok", false)):
+			_error(ERR_GENERIC_CALL_MALFORMED, str(parsed.get("error", "")), int(spec.get("line", 0)), 0, owner)
+			return
+		var tree: Dictionary = _canon_tree_names(parsed.get("node", {}))
+		if str(tree.get("kind", "")) == "name" and str(tree.get("name", "")) == "void":
+			_error(ERR_GENERIC_CALL_MALFORMED, "@generic_call 'void' is not a valid type argument", int(spec.get("line", 0)), 0, owner)
+			return
+		argtrees.append(tree)
+	if argtrees.size() != tvars.size():
+		_error(ERR_GENERIC_CALL_MISMATCH, "@generic_call " + disp + " takes " + str(tvars.size()) + " type argument(s), got " + str(argtrees.size()), int(spec.get("line", 0)), 0, owner)
+		return
+	for a in argtrees:
+		var rn := _resolve_tree_names(a)
+		if not bool(rn.get("ok", false)):
+			_error(ERR_GENERIC_CALL_MISMATCH, "unknown type '" + str(rn.get("bad", "")) + "' in @generic_call " + disp, int(spec.get("line", 0)), 0, owner)
+			return
+	var subst := {}
+	var mowner := _script_func_owner(key, method)
+	if mowner != "":
+		if mowner == key:
+			subst = _class_prebindings(key, link_args)
+		else:
+			var e := _extends_args.get(key, {})
+			if e is Dictionary and str((e as Dictionary).get("key", "")) == mowner:
+				subst = _class_prebindings(mowner, (e as Dictionary).get("args", []))
+	for i in range(tvars.size()):
+		var bound := _template_bound_of(str(tvars[i]))
+		if not bound.is_empty() and _template_refs(argtrees[i], _templates.keys()).is_empty() and not _check_bound(bound, argtrees[i]):
+			_error(ERR_TEMPLATE_MISMATCH, "type '" + _show_tree(argtrees[i]) + "' for '" + str(tvars[i]) + "' violates bound '" + _show_tree(bound) + "' in @generic_call " + disp, int(spec.get("line", 0)), 0, owner)
+			return
+		subst[str(tvars[i])] = argtrees[i]
+	var sig := _func_template_sig(fn_node)
+	if not bool(sig.get("ok", false)):
+		return
+	var formals: Array = sig.get("formals", [])
+	var slices := _split_arg_slices(tt, paren)
+	if slices.size() != formals.size():
+		return
+	for idx in range(slices.size()):
+		var formal: Dictionary = formals[idx]
+		var fsub := _subst_tree((formal as Dictionary).get("tree", {}), subst)
+		var actual := _infer_arg_tree(slices[idx], scope, fn, env, {}, owner, 0)
+		if not _trees_fit_nominal(actual, fsub):
+			_error(ERR_TEMPLATE_MISMATCH, "argument " + str(idx + 1) + " of generic function " + disp + " expects '" + _show_tree(fsub) + "', got '" + _show_tree(actual) + "'", int((tt[paren] as Dictionary).get("line", mline)), int((tt[paren] as Dictionary).get("column", mcol)), owner)
+	var heads := _tree_top_heads(_subst_tree((sig.get("return", {}) as Dictionary), subst))
+	_check_call_heads(_slot_vname(node, tt, paren), heads, _slot_target(node, tt, paren, scope, fn, env, owner), mline, mcol, owner)
+
+
+## Assignment target (and name) behind an explicit-call statement:
+## the declared variable for whole-value `x = call` / `var x: T =
+## call` shapes, {} otherwise (bare calls, complex expressions,
+## other statements: args still validate, slots don't).
+func _slot_target(node: Dictionary, tt: Array, paren: int, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> Dictionary:
+	return _slot_pair(node, tt, paren, scope, fn, env, owner)[1]
+
+
+## Assigned name behind an explicit-call statement ("" when the
+## statement is not a whole-value assignment).
+func _slot_vname(node: Dictionary, tt: Array, paren: int) -> String:
+	var t := str((node as Dictionary).get("type", ""))
+	if t == "VAR_DECL" or t == "CONST_DECL":
+		return str((node as Dictionary).get("name", ""))
+	if t == "EXPR_STMT" and tt.size() > 2 and (tt[0] is Dictionary) and str((tt[0] as Dictionary).get("type", "")) == "IDENTIFIER" and (tt[1] is Dictionary) and str((tt[1] as Dictionary).get("type", "")) == "OPERATOR" and str((tt[1] as Dictionary).get("value", "")) == "=":
+		return str((tt[0] as Dictionary).get("value", ""))
+	return ""
+
+
+## [vname, target] behind an explicit-call statement: whole-value
+## assignments resolve their declared target, anything else yields
+## ["", {}]. Pure pair behind _slot_vname/_slot_target.
+func _slot_pair(node: Dictionary, tt: Array, paren: int, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> Array:
+	var t := str((node as Dictionary).get("type", ""))
+	if t == "VAR_DECL" or t == "CONST_DECL":
+		var occ := -1
+		if paren >= 3 and (tt[paren - 2] is Dictionary) and str((tt[paren - 2] as Dictionary).get("type", "")) == "DOT":
+			occ = paren - 3
+		elif paren >= 1:
+			occ = paren - 1
+		if occ == 0 and _match_close(tt, paren) == tt.size() - 1:
+			return [str((node as Dictionary).get("name", "")), node]
+		return ["", {}]
+	if t == "EXPR_STMT" and tt.size() > 2 and (tt[0] is Dictionary) and str((tt[0] as Dictionary).get("type", "")) == "IDENTIFIER" and (tt[1] is Dictionary) and str((tt[1] as Dictionary).get("type", "")) == "OPERATOR" and str((tt[1] as Dictionary).get("value", "")) == "=":
+		var vname := str((tt[0] as Dictionary).get("value", ""))
+		var start := -1
+		if paren >= 3 and (tt[paren - 2] is Dictionary) and str((tt[paren - 2] as Dictionary).get("type", "")) == "DOT":
+			start = paren - 3
+		elif paren >= 1:
+			start = paren - 1
+		if start == 2 and _match_close(tt, paren) == tt.size() - 1 and vname != "" and vname != "_":
+			return [vname, _assign_target(vname, fn, scope, owner, env, int((tt[0] as Dictionary).get("line", 0)))]
+	return ["", {}]
+
+
+## Runs @generic_call claims leading a statement: each tag must match
+## exactly one call in the statement's primary expression (bare,
+## self, class-static or instance method), then validates explicit
+## arity/args/bounds, actuals and (at whole-value assignments) the
+## declared slot. Never fails.
+func _process_generic_calls(node: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
+	if not (node is Dictionary):
+		return
+	var specs := _extract_generic_call_tags(node, owner)
+	if specs.is_empty():
+		return
+	var tt := _trim_trivia(_call_stmt_tokens(node))
+	for spec in specs:
+		if not (spec is Dictionary):
+			continue
+		var disp := "'" + str((spec as Dictionary).get("raw", "")) + "'"
+		if tt.is_empty():
+			_error(ERR_GENERIC_CALL_MISPLACED, "@generic_call " + disp + " must precede a statement with exactly one matching call", int((spec as Dictionary).get("line", 0)), 0, owner)
+			continue
+		var occ := _generic_call_occurrences(tt, str((spec as Dictionary).get("recv", "")), str((spec as Dictionary).get("method", "")))
+		if occ.size() != 1:
+			if (occ as Array).is_empty():
+				_error(ERR_GENERIC_CALL_MISPLACED, "@generic_call " + disp + " has no matching call in the following statement", int((spec as Dictionary).get("line", 0)), 0, owner)
+			else:
+				_error(ERR_GENERIC_CALL_MISPLACED, "@generic_call " + disp + " matches more than one call; only single expressions are supported", int((spec as Dictionary).get("line", 0)), 0, owner)
+			continue
+		_check_generic_call_use(spec, tt, int((occ as Array)[0]), node, scope, owner, fn, env)
 
 
 ## True when a FUNC_DECL has any notnull parameter.
@@ -10475,6 +11037,131 @@ func _flow_assign_call(vname: String, vtoks: Array, target: Dictionary, scope: D
 	_env_set(env, vname, _tree_top_heads(ret), ret)
 
 
+## Declared slot type names of a declaration node (vartype plus
+## \@var/\@param members, bracket arguments stripped, deduped, [] when
+## untyped). Static, pure.
+static func _slot_type_names(decl: Dictionary) -> Array:
+	var out: Array = []
+	if not (decl is Dictionary):
+		return out
+	var vt := _vartype_name(decl)
+	if vt != "":
+		out.append(str(vt).split("[", true, 1)[0].strip_edges())
+	for key in ["var_ann", "param_ann"]:
+		var ann: Variant = decl.get(key, {})
+		if ann is Dictionary:
+			for m in (ann as Dictionary).get("types", []):
+				var ms := str(m).split("[", true, 1)[0].strip_edges()
+				if ms != "" and not out.has(ms):
+					out.append(ms)
+	return out
+
+
+## Compares a single `recv.method(args)` call result against a declared
+## assignment target (`var x: T = ...` init or `x = ...` with a typed
+## declaration): resolves the receiver like the chain prologue,
+## substitutes class prebindings into the method return through the
+## pure _instantiate_generic_call (argument failures stay silent here —
+## the statement's own verification already reported them), and errors
+## assign_mismatch when a concrete head fits no declared arm. Plain
+## methods (nothing to substitute), opaque receivers, unions,
+## dynamic/Variant/null/template sides and chained calls stay silent.
+func _check_call_assign(vname: String, vtoks: Array, target: Dictionary, scope: Dictionary, fn: Variant, env: Dictionary, owner: String) -> void:
+	if vname == "" or vname == "_":
+		return
+	if (target as Dictionary).is_empty() or not _decl_has_type(target):
+		return
+	var tt := _trim_trivia(vtoks)
+	if tt.size() < 5:
+		return
+	for k in [0, 1, 2, 3]:
+		if not (tt[k] is Dictionary):
+			return
+	if str((tt[0] as Dictionary).get("type", "")) != "IDENTIFIER":
+		return
+	if str((tt[1] as Dictionary).get("type", "")) != "DOT":
+		return
+	if str((tt[2] as Dictionary).get("type", "")) != "IDENTIFIER":
+		return
+	if str((tt[3] as Dictionary).get("type", "")) != "LPAREN" or _match_close(tt, 3) != tt.size() - 1:
+		return
+	var recv := str((tt[0] as Dictionary).get("value", ""))
+	var seg := str((tt[2] as Dictionary).get("value", ""))
+	if recv == "" or recv == "_" or seg == "" or seg == "new":
+		return
+	var fb := _flow_base(recv, fn, scope, owner, env, {}, int((tt[0] as Dictionary).get("line", 0)))
+	if str(fb.get("kind", "")) != "instance":
+		return
+	var itypes: Array = []
+	for t in (fb.get("types", []) as Array):
+		if str(t) != "" and str(t) != "null":
+			itypes.append(str(t))
+	if itypes.size() != 1:
+		return
+	var link := _link_kind_of(itypes[0], owner)
+	if link.is_empty() or str(link.get("kind", "")) != "script":
+		return
+	var key := str(link.get("key", ""))
+	var node := _script_func_node(key, seg)
+	if node.is_empty():
+		return
+	var mowner := _script_func_owner(key, seg)
+	var pre := {}
+	if mowner != "":
+		if mowner == key:
+			pre = _class_prebindings(key, _link_vartype_args(recv, fn, scope, owner, env, key))
+		else:
+			var e := _extends_args.get(key, {})
+			if e is Dictionary and str((e as Dictionary).get("key", "")) == mowner:
+				pre = _class_prebindings(mowner, (e as Dictionary).get("args", []))
+	var r := _instantiate_generic_call(node, "'" + seg + "'", _split_arg_slices(tt, 3), scope, fn, env, {}, owner, pre)
+	if not bool(r.get("ok", false)) or not bool(r.get("generic", false)):
+		return
+	_check_call_heads(vname, (r.get("heads", []) as Array).duplicate(), target, int((tt[2] as Dictionary).get("line", 0)), int((tt[2] as Dictionary).get("column", 0)), owner)
+
+
+## Compares substituted call-result heads against a declared
+## assignment target, reporting assign_mismatch per unfitting head.
+## Shared by inferred (class-prebound) and explicit (@generic_call)
+## call results: dynamic/Variant/null/template heads and
+## Variant/dynamic/template slots stay lenient. Never fails.
+func _check_call_heads(vname: String, heads: Array, target: Dictionary, line: int, col: int, owner: String) -> void:
+	if vname == "" or vname == "_":
+		return
+	if (target as Dictionary).is_empty() or not _decl_has_type(target):
+		return
+	var want: Array = []
+	for h in heads:
+		var hs := str(h)
+		if hs == "" or hs == "any" or hs == "dynamic" or hs == "Variant" or hs == "null":
+			continue
+		if _templates.has(hs):
+			continue
+		if not want.has(hs):
+			want.append(hs)
+	if want.is_empty():
+		return
+	var arms: Array = []
+	for a in _slot_type_names(target):
+		var as_ := str(a)
+		if as_ == "" or as_ == "Variant" or as_ == "dynamic":
+			return
+		if _templates.has(as_):
+			continue
+		if not arms.has(as_):
+			arms.append(as_)
+	if arms.is_empty():
+		return
+	for h in want:
+		var ok := false
+		for a in arms:
+			if _nominal_compat(str(h), str(a)):
+				ok = true
+				break
+		if not ok:
+			_error(ERR_ASSIGN_MISMATCH, "cannot assign '" + str(h) + "' from call to variable '" + vname + "' declared as '" + "|".join(arms) + "' ('" + str(h) + "' is neither '" + "|".join(arms) + "' nor a subclass of it)", line, col, owner)
+
+
 ## True for a null guard ({types ["null"]}, from `==`/`!=` or
 ## `typeof`/`is_instance_of` NIL forms): the non-null side carries a
 ## notnull mark instead of trimmed heads (plain `Node` stays lenient).
@@ -10634,7 +11321,9 @@ func _flow_assign_stmt(node: Dictionary, scope: Dictionary, fn: Variant, env: Di
 	if not (toks[1] is Dictionary) or str((toks[1] as Dictionary).get("type", "")) != "OPERATOR" or str((toks[1] as Dictionary).get("value", "")) != "=":
 		return
 	var vname := str((toks[0] as Dictionary).get("value", ""))
-	_flow_assign_call(vname, toks.slice(2), _assign_target(vname, fn, scope, owner, env, int((toks[0] as Dictionary).get("line", 0))), scope, fn, env, owner)
+	var target := _assign_target(vname, fn, scope, owner, env, int((toks[0] as Dictionary).get("line", 0)))
+	_flow_assign_call(vname, toks.slice(2), target, scope, fn, env, owner)
+	_check_call_assign(vname, toks.slice(2), target, scope, fn, env, owner)
 
 
 ## Errors `vname = null` (bare null literal, trailing notes ignored)
@@ -10796,6 +11485,7 @@ static func _block_ends_return(b: Variant) -> bool:
 ## Flow pass over one statement with the current env (mutated by
 ## facts, branched by guards). fn is the enclosing function/lambda.
 func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant, env: Dictionary) -> void:
+	_process_generic_calls(node, scope, owner, fn, env)
 	var t := str(node.get("type", ""))
 	if t == "FUNC_DECL":
 		_flow_func(node, scope, owner)
@@ -10814,6 +11504,7 @@ func _flow_stmt(node: Dictionary, scope: Dictionary, owner: String, fn: Variant,
 		_verify_tokens(_as_tokens(node.get("value", null)), scope, owner, fn, env, {})
 		_apply_assign_invalidation(str(node.get("name", "")), _as_tokens(node.get("value", null)), scope, fn, env, owner, true)
 		_flow_assign_call(str(node.get("name", "")), _as_tokens(node.get("value", null)), node, scope, fn, env, owner)
+		_check_call_assign(str(node.get("name", "")), _as_tokens(node.get("value", null)), node, scope, fn, env, owner)
 		_flow_lambda_value(node.get("value", null), scope, owner)
 		var acc: Variant = node.get("accessors", null)
 		if acc is Dictionary:
@@ -11077,6 +11768,8 @@ static func _signature_param_info(rec: Dictionary) -> Dictionary:
 
 func _merge_members(info: Dictionary, owner: String) -> void:
 	(info as Dictionary)["null_policy"] = _effective_file_policy()
+	(info as Dictionary)["resource_path"] = _script_resource_path
+	(info as Dictionary)["node_path"] = _embedded_node
 	(info as Dictionary)["extends"] = _script_extends if owner == "" else str(_class_extends.get(owner, ""))
 	var table: Dictionary = _members.get(owner, {})
 	for mname in table.keys():
@@ -11186,6 +11879,7 @@ func _minimal_info(file_base: String, owner: String, root_prefix: String) -> Dic
 		"kind": "script",
 		"class_name": _script_class,
 		"resource_path": _script_resource_path,
+		"node_path": _embedded_node,
 		"null_policy": _effective_file_policy(),
 		"extends": _script_extends if owner == "" else str(_class_extends.get(owner, "")),
 		"enums": [],

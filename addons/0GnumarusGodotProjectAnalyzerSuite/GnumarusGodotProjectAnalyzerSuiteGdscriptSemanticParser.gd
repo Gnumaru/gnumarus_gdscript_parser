@@ -97,6 +97,10 @@ var _written: Array = []
 ## user JSONs are named from it instead of user_file_base, with the
 ## script class_name appended after "_" when present. Set by analyze().
 var _embedded_base: String = ""
+## Node path of the embedded script inside its scene ("" for plain
+## .gd files and .tres bodies): stored as "node_path" in every user
+## JSON this analysis writes. Set by analyze().
+var _embedded_node: String = ""
 
 
 ## Base file stem for a GDScript embedded in a text resource: the
@@ -125,8 +129,11 @@ static func embedded_base(resource_path: String, node_path: String, sub_id: Stri
 ## in a text resource (see embedded_base): the resource path still
 ## comes from script_path (the .tscn/.tres), while file names use the
 ## embedded stem plus "_Class" when the script declares class_name.
-func analyze(ast: Dictionary, script_path: String = "", embedded: String = "") -> Dictionary:
+## `embedded_node` optionally pins the scene node path, stored as
+## "node_path" in every user JSON written ("" for plain scripts).
+func analyze(ast: Dictionary, script_path: String = "", embedded: String = "", embedded_node: String = "") -> Dictionary:
 	_embedded_base = str(embedded)
+	_embedded_node = str(embedded_node)
 	_errors = []
 	_type_cache = {}
 	_type_miss = {}
@@ -2677,6 +2684,7 @@ func _script_type_info(ast: Dictionary, base_name: String, prefix: String) -> Di
 		"kind": "script",
 		"class_name": _script_class,
 		"resource_path": _script_resource_path,
+		"node_path": _embedded_node,
 		"parent": parent,
 		"inheritance_chain": _script_chain(base_name, parent, [base_name]),
 		"enums": [],
@@ -2765,6 +2773,7 @@ func _collect_inner_recursive(node: Dictionary, prefix: String, out: Array) -> v
 		"kind": "script",
 		"class_name": full,
 		"resource_path": _script_resource_path,
+		"node_path": _embedded_node,
 		"parent": parent,
 		"inheritance_chain": _script_chain(full, parent, [full]),
 		"enums": [],

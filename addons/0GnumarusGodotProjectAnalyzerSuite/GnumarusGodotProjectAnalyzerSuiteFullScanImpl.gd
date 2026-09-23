@@ -269,7 +269,7 @@ func analyze_embedded_text(resource_path: String, text: String, opts := {}) -> D
 		var scene_line := maxi(int((item as Dictionary).get("line", 1)), 1)
 		var base := SemParser.embedded_base(resource_path, node_path, sub_id)
 		var ana = _fresh_analyzer(opts)
-		var res: Dictionary = ana.analyze(SynParser.new().parse_text(source), resource_path, base)
+		var res: Dictionary = ana.analyze(SynParser.new().parse_text(source), resource_path, base, node_path)
 		for e in res.get("errors", []):
 			var ed := (e as Dictionary).duplicate() if e is Dictionary else {}
 			ed["path"] = resource_path

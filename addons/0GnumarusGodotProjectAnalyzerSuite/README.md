@@ -579,6 +579,11 @@ class (`…_d_e.Inner.json`, `…_d_e.Inner.InnerInner.json`); both
 `GdscriptAnalyzer.analyze()` and `GdscriptSemanticParser.analyze()`
 take the stem as an optional third (`embedded`) argument, keeping
 the resource path in the JSON while naming files from the stem.
+Every user JSON carries `resource_path` (the `.gd`, or the
+`.tscn`/`.tres` for embedded scripts) plus `node_path` (the scene
+node for embedded scripts, `""` for plain files and `.tres`
+bodies), so the origin survives without parsing filenames; tuple,
+struct, alias and interface JSONs carry the same pair.
 
 `ScanResults.json` shape: `version`, `generated_unix`, per-stage
 `stages` (`errors` / `warnings` / `files` each), flat sorted
@@ -1178,11 +1183,64 @@ func f():
     b.setv("a")            # ERROR: expects 'int', got 'String'
 ```
 
+### `@generic_func`
+
+Declares a function (or method) generic over file templates:
+`# @generic_func T1 T2` immediately before a named `func` (never a
+lambda, variable or class). Every name must be a file `@template`,
+listed once, and must not shadow an enclosing class generic. Stamps
+`fn["generic_func"]` (arity source for explicit calls):
+
+```gdscript
+# @template T1
+# @template T2
+# @generic_func T1 T2
+# @param a T2
+# @return T1
+func myfunc(a: Variant) -> Variant:
+    return a
+```
+
+### `@generic_call`
+
+Instantiates a `@generic_func` function explicitly at one call site:
+`# @generic_call myfunc[int, Object]` (bare/current-scope calls),
+`# @generic_call self.m[int]`, `# @generic_call C.m[int]` or
+`# @generic_call recv.m[int, Object]` — on its own line immediately
+before a statement holding exactly one matching call (dangling or
+multi-match annotations misplaced-error). Positional total-arity
+binding; `void` arguments malformed; unknown names, bound
+violations (`template_mismatch`) and actuals (`template_mismatch`)
+checked inference-free (so `Variant`-declared signatures check what
+inference cannot); a whole-value typed assignment additionally
+compares the substituted return (`assign_mismatch`, shared tail).
+Receivers: untyped (`any`) silent, declared-`Variant` errors,
+unions/engine/opaque silent, missing callees or plain (non-generic)
+functions error only on the claim. Chained/complex expressions keep
+arg checks but never slot checks; inference overlaps (same actuals
+conflicting under both modes) may report twice, each truthfully:
+
+```gdscript
+func other():
+    # @generic_call myfunc[int, Object]
+    var a: String = myfunc(1) # ERROR x2: int vs String slot;
+                              # literal 1 vs Object param
+```
 - Vartypes (and `->` returns, and params) holding brackets validate
   against `@generic` classes: unknown or non-generic heads stay
   silent (engine generics like `Array[int]` keep working); arity and
-  template bounds on arguments error `generic_mismatch`. Bare uses
+  template bounds on arguments error `generic_mismatch`. Bounds are
+  subtyping-aware: an argument fits when nominally compatible with
+  any bound arm (derivation counts, so `Node` fits `Object`, and
+  `Inner` fits `Object|int`), and extends-less script classes derive
+  `RefCounted` (the engine default). Bare uses
   (`var b: GBox`) stay lenient (dynamic arguments).
+- `@var`/`@param`/`@return` members holding brackets get the same
+  arity + bound checks, labeled with the annotation (`in @var
+  'GBox'`): `# @var d GBox[String]` errors like the vartype form.
+  When the sibling declaration/arrow already carries brackets that
+  path owns the check (no double reports); free-`@var`
+  redefinitions are covered by a second post-walk bounds pass.
 - Member lookup substitutes through instance arguments: fields typed
   by class parameters read substituted, and method calls pre-bind
   class arguments before unifying the method's own variables
@@ -1192,6 +1250,15 @@ func f():
   (`generic_mismatch`) and members inherited from `GBox` read with
   `TplT = int`; deeper chains, unparameterized children and
   cross-file generic classes stay lenient.
+- A single `recv.method(args)` call result is compared against a
+  declared assignment target (`var x: T = ...` init or `x = ...`
+  with a typed declaration): the substituted return heads must fit
+  a declared arm (`assign_mismatch`, same nominal rule as `@var`
+  narrowing). Only generic methods apply (plain methods stay
+  silent); opaque receivers, unions, chained calls, dynamic/
+  `Variant`/`null`/template sides and member targets stay lenient,
+  and argument failures never double-report (the statement pass
+  owns them).
 - Typed constructors infer generically: `gxfirst(Array[int]([1, 2]))`
   binds through `Array[TplT]` (engine heads only; script-class
   `Box[int](...)` and unknown heads read dynamic). `Box.new()`
@@ -1202,9 +1269,9 @@ func f():
 - Gaps (documented): the script root itself cannot be generic (no
   `CLASS_DECL` to attach to); bare template names in vartypes/arrows
   (`var x: TplT`) error in the semantic pass (untouched) — use
-  applications or annotations; `@return` marks methods normally, but
-  template variables in it do not substitute — generic method returns
-  flow only via `->` arrows.
+  applications or annotations; generic method returns substitute in
+  single-call assignments (above) and chains, but `->` arrows still
+  carry the declared (unsubstituted) type.
 
 ### `@interface`
 
@@ -1613,7 +1680,12 @@ suites still print, so the marker alone could look green).
   each suite (they expose `run()`), prints a
   per-suite `PASS`/`FAIL` line plus the grand total. A suite that
   fails to load, lacks `run()`, or returns a malformed result
-  (mid-run crash) counts as a failure.
+  (mid-run crash) counts as a failure. Suites share one process and
+  every analyze writes data-dir `user/*.json` files, so `run_all`
+  snapshots `user/` up front and deletes everything new at the end:
+  virtual `res://tests/tmp_*` paths must never leak into the type
+  namespace (a leaked tuple/struct/class JSON false-positives later
+  conflict/known-type checks in the same run).
 - `addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd` holds
   the shared assertions: one instance per
   suite, `check()` per expectation, failed names via printerr.
@@ -1630,9 +1702,13 @@ suites still print, so the marker alone could look green).
   `test_type_expr.gd` (nested type-expression mini-parser + tuple
   applications),
   `test_alias.gd` (`@alias` rule),
-  `test_template.gd` (`@template` file-local variables + subst/unify IR),
-  `test_generic_call.gd` (generic call instantiation),
-  `test_generic.gd` (`@generic` classes),
+  `test_template.gd` (template variables, substitution/unification,
+  subtyping-aware bound checks),
+  `test_generic_call.gd` (generic call instantiation, including
+  explicit `@generic_call` binding),
+  `test_generic.gd` (`@generic` classes, including call-result
+  assignment checks, annotation-position bound checks and
+  `@generic_func` declarations),
   `test_virtual.gd` (virtual types: annotation-only tuples/structs/aliases),
   `test_struct.gd` (`@struct` rule),
   `test_interface.gd` (`@interface` rule),
@@ -1697,7 +1773,8 @@ suites still print, so the marker alone could look green).
   `test_full_scan.gd` (aggregated full scan: `ScanResults.json`
   merge/sort/summary, corrupt-file fallback, hermetic gdscript +
   integrity stages, embedded scripts (stem naming, opt-out setting,
-  per-node analysis with JSONs, tag extras), EditorScript dumb-proxy
+  per-node analysis with JSONs, tag extras, `resource_path` /
+  `node_path` in JSONs), EditorScript dumb-proxy
   shape, Project > Tools wiring null-safety).
   `test_dock.gd` (bottom-panel dock: severity/type filter logic,
   row format and status text, per-file overlay plus scan-report

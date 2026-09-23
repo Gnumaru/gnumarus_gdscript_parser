@@ -16,6 +16,7 @@ func run() -> Dictionary:
 	_g_mismatch(h)
 	_g_bounds(h)
 	_g_returns(h)
+	_g_explicit(h)
 	_g_boundaries(h)
 	_g_flow(h)
 	return h.result()
@@ -26,6 +27,13 @@ func _has_err(res: Dictionary, kind: String, part: String) -> bool:
 		if str((e as Dictionary).get("kind", "")) == kind and part in str((e as Dictionary).get("message", "")):
 			return true
 	return false
+
+
+func _kinds(res: Dictionary) -> Array:
+	var out: Array = []
+	for e in res.get("errors", []):
+		out.append(str((e as Dictionary).get("kind", "")))
+	return out
 
 
 func _clean(res: Dictionary) -> bool:
@@ -58,6 +66,34 @@ func _g_bounds(h) -> void:
 func _g_returns(h) -> void:
 	h.check(_has_err(h.analyze_text("extends Node\n# @template GcT12 of int\n# @param x GcT12\n# @return GcT12\nfunc gcbnd3(x):\n\treturn x\nfunc f():\n\tself.gcbnd3(1).bogus()\n", "res://tests/tmp_gcl_r01.gd"), "missing_method", "has no method 'bogus()'"), "substituted return chains")
 	h.check(_clean(h.analyze_text("extends Node\nfunc gcdyn(x):\n\treturn x\nfunc f():\n\tself.gcdyn(1).bogus()\n", "res://tests/tmp_gcl_r02.gd")), "dynamic return stays silent")
+
+
+func _g_explicit(h) -> void:
+	var decl := "extends Node\n# @template GeT1\n# @template GeT2\n# @generic_func GeT1 GeT2\n# @param a GeT2\n# @return GeT1\nfunc gemyfunc(a: Variant) -> Variant:\n\treturn a\n"
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int, Object]\n\tvar a: String = gemyfunc(1)\n", "res://tests/tmp_gcl_e01.gd"), "assign_mismatch", "cannot assign 'int'"), "explicit slot mismatch errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int, Object]\n\tvar a: String = gemyfunc(1)\n", "res://tests/tmp_gcl_e01.gd"), "template_mismatch", "expects 'Object', got 'int'"), "explicit actual mismatch errors")
+	h.check(_clean(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int, int]\n\tvar a: int = gemyfunc(1)\n", "res://tests/tmp_gcl_e02.gd")), "conforming explicit clean")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int]\n\tvar a: int = gemyfunc(1)\n", "res://tests/tmp_gcl_e03.gd"), "generic_call_mismatch", "takes 2 type argument(s), got 1"), "explicit arity errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[Nope, int]\n\tvar a: int = gemyfunc(1)\n", "res://tests/tmp_gcl_e04.gd"), "generic_call_mismatch", "unknown type 'Nope'"), "explicit unknown errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[void, int]\n\tvar a: int = gemyfunc(1)\n", "res://tests/tmp_gcl_e05.gd"), "generic_call_malformed", "not a valid type argument"), "explicit void malformed")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GeT6 of int\n# @generic_func GeT6\n# @return GeT6\nfunc geint() -> Variant:\n\treturn 1\nfunc other():\n\t# @generic_call geint[String]\n\tvar a: int = geint()\n", "res://tests/tmp_gcl_e06.gd"), "template_mismatch", "violates bound 'int'"), "explicit bound errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int, int]\n\tpass\n", "res://tests/tmp_gcl_e07.gd"), "generic_call_misplaced", "must precede a statement"), "dangling errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int, int]\n\tx = gemyfunc(1) + gemyfunc(2)\n", "res://tests/tmp_gcl_e08.gd"), "generic_call_misplaced", "more than one"), "multi match errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\tpass\n\t# @generic_call gemyfunc[int, int]\n", "res://tests/tmp_gcl_e09.gd"), "generic_call_misplaced", "must precede"), "orphan errors")
+	h.check(_has_err(h.analyze_text("extends Node\nfunc genplain() -> int:\n\treturn 1\nfunc other():\n\t# @generic_call genplain[int]\n\tvar a: String = genplain()\n", "res://tests/tmp_gcl_e10.gd"), "generic_call_mismatch", "has no @generic_func"), "plain func claim errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\tvar v: Variant\n\t# @generic_call v.gemyfunc[int, int]\n\tvar a: int = v.gemyfunc(1)\n", "res://tests/tmp_gcl_e11.gd"), "generic_call_mismatch", "Variant-typed receiver"), "variant receiver errors")
+	h.check(_clean(h.analyze_text(decl + "func other():\n\tvar v\n\t# @generic_call v.gemyfunc[int, int]\n\tvar a: int = v.gemyfunc(1)\n", "res://tests/tmp_gcl_e12.gd")), "untyped receiver silent")
+	var meth := "extends Node\n# @template GeT13\n# @template GeT14\nclass GeBox:\n\t# @generic_func GeT13 GeT14\n\t# @param a GeT14\n\t# @return GeT13\n\tfunc geconv(a: Variant) -> Variant:\n\t\treturn a\n"
+	h.check(_has_err(h.analyze_text(meth + "func other():\n\tvar b: GeBox = GeBox.new()\n\t# @generic_call b.geconv[int, Object]\n\tvar s: String = b.geconv(1)\n", "res://tests/tmp_gcl_e13.gd"), "assign_mismatch", "cannot assign 'int'"), "explicit method slot errors")
+	h.check(_has_err(h.analyze_text(meth + "func other():\n\tvar b: GeBox = GeBox.new()\n\t# @generic_call b.geconv[int, Object]\n\tvar s: String = b.geconv(1)\n", "res://tests/tmp_gcl_e13.gd"), "template_mismatch", "expects 'Object', got 'int'"), "explicit method actual errors")
+	h.check(_clean(h.analyze_text(meth + "func other():\n\tvar b: GeBox = GeBox.new()\n\t# @generic_call b.geconv[int, int]\n\tvar s: int = b.geconv(1)\n", "res://tests/tmp_gcl_e14.gd")), "explicit method conforming clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GeT15\n# @generic_func GeT15\n# @return GeT15\nfunc geone() -> Variant:\n\treturn 1\nfunc other():\n\t# @generic_call self.geone[int]\n\tvar s: String = self.geone()\n", "res://tests/tmp_gcl_e15.gd"), "assign_mismatch", "cannot assign 'int'"), "explicit self slot errors")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GeT16\nclass GeBox16:\n\t# @generic_func GeT16\n\t# @return GeT16\n\tstatic func gemake() -> Variant:\n\t\treturn 1\nfunc other():\n\t# @generic_call GeBox16.gemake[int]\n\tvar s: String = GeBox16.gemake()\n", "res://tests/tmp_gcl_e16.gd"), "assign_mismatch", "cannot assign 'int'"), "explicit static slot errors")
+	h.check(_has_err(h.analyze_text(decl + "func other():\n\tvar s: String\n\t# @generic_call gemyfunc[int, int]\n\ts = gemyfunc(1)\n", "res://tests/tmp_gcl_e17.gd"), "assign_mismatch", "cannot assign 'int'"), "explicit reassign errors")
+	var bareurteil: Dictionary = h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int, Object]\n\tgemyfunc(1)\n", "res://tests/tmp_gcl_e18.gd")
+	h.check(_has_err(bareurteil, "template_mismatch", "expects 'Object', got 'int'"), "bare statement args checked")
+	h.check(not _kinds(bareurteil).has("assign_mismatch"), "bare statement has no slot")
+	h.check(_clean(h.analyze_text(decl + "func other():\n\t# @generic_call gemyfunc[int, int]\n\tif gemyfunc(1):\n\t\tpass\n", "res://tests/tmp_gcl_e19.gd")), "if condition conforming clean")
 
 
 func _g_boundaries(h) -> void:

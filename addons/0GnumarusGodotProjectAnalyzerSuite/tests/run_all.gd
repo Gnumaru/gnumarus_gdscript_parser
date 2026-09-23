@@ -7,6 +7,33 @@ extends SceneTree
 ## grand total, and exits 0 only when every check passed.
 ## Loading is defensive: a suite that fails to load still counts as a
 ## failure, so _init() always reaches quit() with the right code.
+##
+## Hermeticity: suites share one process and every analyze() writes
+## data-dir user/*.json files — including suites using virtual
+## res://tests/tmp_* paths that never exist on disk. A leaked tuple/
+## struct/class JSON would false-positive later conflict/known-type
+## checks in the SAME run (e.g. a phantom T1.json vs @template T1),
+## so run_all snapshots user/ up front and deletes everything new at
+## the end. Pre-existing files are never touched.
+
+const FullScan = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
+
+func _user_dir() -> String:
+	return ProjectSettings.globalize_path(FullScan.data_dir() + "/user")
+
+
+func _user_files() -> Array:
+	var dir := _user_dir()
+	if not DirAccess.dir_exists_absolute(dir):
+		return []
+	return DirAccess.get_files_at(dir)
+
+
+func _clean_user_files(before: Array) -> void:
+	var base := _user_dir() + "/"
+	for f in _user_files():
+		if not before.has(f):
+			DirAccess.remove_absolute(base + str(f))
 
 func _init() -> void:
 	var suite_files: Array = [
@@ -45,6 +72,7 @@ func _init() -> void:
 	]
 	var total_p := 0
 	var total_f := 0
+	var user_before := _user_files()
 	for f in suite_files:
 		var scr: Variant = load(f)
 		if not (scr is Script):
@@ -64,6 +92,7 @@ func _init() -> void:
 		total_p += int((r as Dictionary).get("passed", 0))
 		total_f += int((r as Dictionary).get("failed", 0))
 		print("SUITE ", str((r as Dictionary).get("suite", "?")), ": PASS ", int((r as Dictionary).get("passed", 0)), " FAIL ", int((r as Dictionary).get("failed", 0)))
+	_clean_user_files(user_before)
 	print("TOTAL PASS: ", total_p, " FAIL: ", total_f)
 	if total_f == 0:
 		print("ALL TESTS PASSED")

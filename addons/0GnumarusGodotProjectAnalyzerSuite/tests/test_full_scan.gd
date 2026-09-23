@@ -10,6 +10,7 @@ extends RefCounted
 
 const Impl = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteFullScanImpl.gd")
 const SemParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSemanticParser.gd")
+const SynParser = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuiteGdscriptSyntaticParser.gd")
 const PluginImpl = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/GnumarusGodotProjectAnalyzerSuitePluginImpl.gd")
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
@@ -151,6 +152,15 @@ func _clean_user_jsons(before: Array) -> void:
 	for f in _user_files():
 		if not before.has(f):
 			DirAccess.remove_absolute(base + str(f))
+
+
+## One user/*.json file as a Dictionary ({} when missing/unreadable).
+func _read_user_json(file_name: String) -> Dictionary:
+	var p := Impl.data_dir() + "/user/" + file_name
+	if not FileAccess.file_exists(p):
+		return {}
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(p))
+	return parsed as Dictionary if parsed is Dictionary else {}
 
 
 func _r_paths(h) -> void:
@@ -462,11 +472,31 @@ func _r_embedded(h) -> void:
 			fresh.append(str(f))
 	h.check("a_b_c.tscn_SceneRoot_e.json" in fresh, "embedded root json named per spec")
 	h.check("a_b_c.tscn_SceneRoot_e.Inner.json" in fresh, "embedded inner json dotted")
+	var root_json := _read_user_json("a_b_c.tscn_SceneRoot_e.json")
+	h.check(str(root_json.get("resource_path", "")) == "res://a/b/c.tscn", "embedded root json stores scene path")
+	h.check(str(root_json.get("node_path", "")) == "SceneRoot/e", "embedded root json stores node path")
+	var inner_json := _read_user_json("a_b_c.tscn_SceneRoot_e.Inner.json")
+	h.check(str(inner_json.get("resource_path", "")) == "res://a/b/c.tscn", "embedded inner json stores scene path")
+	h.check(str(inner_json.get("node_path", "")) == "SceneRoot/e", "embedded inner json stores node path")
 	_clean_user_jsons(before)
 	var clean: Dictionary = Impl.new().analyze_embedded_text("res://a/b/c.tscn", "[gd_scene format=3]\n\n[node name=\"R\" type=\"Node\"]\n", {"embedded": true})
 	h.check((clean.get("errors", []) as Array).is_empty() and (clean.get("warnings", []) as Array).is_empty(), "embedded scriptless clean")
 	h.check((Impl.new().analyze_embedded_text("", bad_text, {}) as Dictionary).get("errors", []).is_empty(), "embedded empty path safe")
 	_clean_user_jsons(before)
+	var tup_text := "[gd_scene format=3]\n\n[sub_resource type=\"GDScript\" id=\"g\"]\nscript/source = \"extends Node\\n# @tuple EmbNodeTup 1 int\\n# @var x EmbNodeTup\\nvar x: Array = [1]\\n\"\n\n[node name=\"R\" type=\"Node\"]\n\n[node name=\"e\" type=\"Node\" parent=\".\"]\nscript = SubResource(\"g\")\n"
+	Impl.new().analyze_embedded_text("res://a/b/c.tscn", tup_text, {"embedded": true})
+	var tup_json := _read_user_json("EmbNodeTup.json")
+	h.check(str(tup_json.get("resource_path", "")) == "res://a/b/c.tscn", "embedded tuple json stores scene path")
+	h.check(str(tup_json.get("node_path", "")) == "R/e", "embedded tuple json stores node path")
+	_clean_user_jsons(before)
+	var sem_before := _user_files()
+	SemParser.new().analyze(SynParser.new().parse_text("extends Node\nclass Inner:\n\tvar y := 1\n"), "res://a/b/c.tscn", "a_b_c.tscn_SceneRoot_e", "SceneRoot/e")
+	var sem_root := _read_user_json("a_b_c.tscn_SceneRoot_e.json")
+	h.check(str(sem_root.get("resource_path", "")) == "res://a/b/c.tscn", "semantic json stores scene path")
+	h.check(str(sem_root.get("node_path", "")) == "SceneRoot/e", "semantic json stores node path")
+	var sem_inner := _read_user_json("a_b_c.tscn_SceneRoot_e.Inner.json")
+	h.check(str(sem_inner.get("node_path", "")) == "SceneRoot/e", "semantic inner json stores node path")
+	_clean_user_jsons(sem_before)
 
 
 func _r_corrupt(h) -> void:
@@ -497,6 +527,9 @@ func _r_gdscript_stage(h) -> void:
 	h.check(((entry.get("warnings", []) as Array) as Array).is_empty(), "tmp script warning-clean")
 	for e in doc.get("errors", []):
 		h.check(str((e as Dictionary).get("stage", "")) == Impl.STAGE_GDSCRIPT, "gdscript issues tagged")
+	var tmp_json := _read_user_json("addons_0GnumarusGodotProjectAnalyzerSuite_tests_TmpFullScanTarget.json")
+	h.check(str(tmp_json.get("resource_path", "")) == TMP_GD, "file json stores source path")
+	h.check(str(tmp_json.get("node_path", "")) == "", "file json stores empty node path")
 	DirAccess.remove_absolute(TMP_GD)
 	_clean_user_jsons(before)
 

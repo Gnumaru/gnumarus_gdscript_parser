@@ -62,6 +62,7 @@ Install from Project → Plugins and open any script:
 | `@tuple` / `@struct` | Fixed-shape `Array`/`Dictionary` refinements with literal checking (length, keys, per-element types) |
 | `@alias` | Named reusable type expressions, nullable included |
 | `@template` / `@generic` | File-local type variables, bounds, per-call instantiation, generic classes |
+| `@generic_func` / `@generic_call` | Method-level type parameters with explicit call-site binding (`f[int]`), checked args/slots |
 | `@interface` / `@implements` | Structural blueprints with conformance checking |
 | `@private` | Family-only members; outside uses error, cross-file included |
 | `@deprecated` | Uses warn — functions, signals, consts, enums, classes, cross-file included |
