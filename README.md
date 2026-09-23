@@ -48,8 +48,8 @@ Install from Project → Plugins and open any script:
   picking a row jumps to it and reveals the right workspace
   (Script for scripts; embedded rows open the scene, focus the node
   and open its script at the error line). The Files tab shows the project inventory
-  as a Tree (files with size/dates, sortable; directories with
-  direct/recursive counts and sizes), with an `addons` include toggle.
+  in Table and Text views, each split into files-only and
+  directories-only listings (own addons toggle, sort and order per listing).
 - Broken resource refs (`preload`/`load`/`extends`/`@icon`) are
   rechecked live on open, edit and save — no full scan needed.
 

@@ -113,11 +113,39 @@ static func empty_doc() -> Dictionary:
 
 
 ## Default dock filter state (everything visible, addons counted,
-## files sorted by path ascending). The dock owns the same shape;
-## this copy lets the report carry it without depending on the dock
-## script.
+## both Files-tab panels sorted by path ascending). The dock owns the
+## same shape; this copy lets the report carry it without depending
+## on the dock script.
 static func default_filters() -> Dictionary:
-	return {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "include_addons": true, "sort": "path", "descending": false}
+	return {"show": {"error": true, "warning": true, "note": true}, "types": {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, "files": default_panel_state(), "dirs": default_panel_state()}
+
+
+## Default Files-tab panel state (one copy per panel: "files" lists
+## files, "dirs" lists directories, each with its own addons toggle,
+## sort key and order). Pure.
+static func default_panel_state() -> Dictionary:
+	return {"include_addons": true, "sort": "path", "descending": false}
+
+
+## Normalized Files-tab panel state: known keys kept (bools strictly,
+## sort key guarded), anything else dropped. A non-empty legacy flat
+## payload (the pre-split include_addons/sort/descending keys) fills
+## in when the panel itself carries nothing, so old reports and old
+## EditorSettings migrate silently. Pure.
+static func normalize_panel_state(raw: Variant, legacy := {}) -> Dictionary:
+	var out := default_panel_state()
+	var src: Dictionary = {}
+	if raw is Dictionary and not (raw as Dictionary).is_empty():
+		src = raw
+	elif legacy is Dictionary:
+		src = legacy
+	if src.has("include_addons") and (src.get("include_addons") is bool):
+		out["include_addons"] = bool(src.get("include_addons", true))
+	var sk := str(src.get("sort", "path"))
+	out["sort"] = sk if sk in ["path", "size", "created", "modified"] else "path"
+	if src.has("descending") and (src.get("descending") is bool):
+		out["descending"] = bool(src.get("descending", false))
+	return out
 
 
 ## Loads the on-disk report, or an empty doc when missing/unreadable.
@@ -303,14 +331,14 @@ static func _write_doc(doc: Dictionary) -> Dictionary:
 	return doc
 
 
-## Stores dock filter state ("show"/"types" toggle maps, the
-## addons-census flag and the Files-tab sort) in the report without
-## touching any stage entry or aggregate. Returns the full doc. The
-## dock calls this as its file-level persistence; the EditorSettings
-## copy (when available) takes precedence on load.
-static func store_filters(show: Dictionary, types: Dictionary, include_addons := true, sort_key := "path", descending := false) -> Dictionary:
+## Stores dock filter state ("show"/"types" toggle maps plus the
+## per-panel Files-tab states under "files"/"dirs") in the report
+## without touching any stage entry or aggregate. Returns the full
+## doc. The dock calls this as its file-level persistence; the
+## EditorSettings copy (when available) takes precedence on load.
+static func store_filters(show: Dictionary, types: Dictionary, files_state := {}, dirs_state := {}) -> Dictionary:
 	var doc := load_results()
-	doc["filters"] = {"show": show.duplicate(), "types": types.duplicate(), "include_addons": bool(include_addons), "sort": str(sort_key), "descending": bool(descending)}
+	doc["filters"] = {"show": show.duplicate(), "types": types.duplicate(), "files": normalize_panel_state(files_state), "dirs": normalize_panel_state(dirs_state)}
 	doc["generated_unix"] = Time.get_unix_time_from_system()
 	return _write_doc(doc)
 

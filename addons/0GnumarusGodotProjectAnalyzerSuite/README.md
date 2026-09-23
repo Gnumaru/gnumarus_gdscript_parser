@@ -645,24 +645,31 @@ reveals the dock; Clear drops the list. Toggle state persists in
 both `EditorSettings` (`gnumarus_analyzer/dock_filters`, which wins
 on load) and the `ScanResults.json` `filters` copy, so it survives
 editor restarts with or without editor settings. The Files tab shows
-the inventory in two simultaneous views behind hidden inner tabs
-(each with a button switching to the other; the choice is session
-state): the column table and a single-column list with one
-concatenated row per entry and no res:// prefix (files:
+the inventory in two visible inner tabs, Table and Text. The table
+tab holds two separate 9-column Trees: files only (grouped by
+project/addons partition) and directories only, each with its own
+Include Addons toggle, sort dropdown and Descending switch (per-panel
+state, persisted under `filters.files` / `filters.dirs`; pre-split
+reports migrate their flat keys into both panels). The text tab
+mirrors both sections as single-column concatenated rows with no
+res:// prefix (files:
 `/a.png: created: …; modified: …; size: …`; directories add
-`rec-size`, `direct files`, `all files`, `direct dirs`, `all dirs`).
-Both views share filters, sorting, navigation and the
-extension-count fallback. The column table is a Tree: one collapsed group row per file partition
-plus a trailing directories group. File rows carry human size,
+`rec-size`, `direct files`, `all files`, `direct dirs`, `all dirs`),
+following the same per-panel state. Both table Trees share one
+column-collapse state (see below); file rows navigate to the file's
+first issue while group/dir rows are inert.
+File rows carry human size,
 creation and modification stamps and sort by path, size or either
 date (dropdown, ascending/descending toggle, path tiebreak);
-clicking a column header compacts it to a measured fit of title
+directory rows sort the same way over their direct byte sum.
+Clicking a column header compacts it to a measured fit of title
 plus widest cell (hidden rows included, never truncated), clicking
 again stretches it back; directory rows carry direct/recursive file and subdir counts plus
 both byte sums. All stamps render UTC `YYYY-MM-DD hh:mm:ss`. File
 rows navigate to the file's first issue; group/dir rows are inert.
-The sort choice persists with the other toggles. Reports without an
-inventory (older scans) fall back to extension-count rows; rescan to
+The per-panel sort choices persist with the other toggles. Reports without an
+inventory (older scans) fill the files views with extension-count rows and leave the
+directories views with the hint; rescan to
 upgrade.
 
 ```gdscript
@@ -1680,7 +1687,9 @@ suites still print, so the marker alone could look green).
   row format and status text, per-file overlay plus scan-report
   replacement, toggle wiring, row navigation, rescan/clear, editor
   openers headless-safe, dock lifecycle null-safety, Issues/Files
-  tabs with Tree inventory, sortable file rows and directory rows).
+  tabs with visible Table/Text views, separate files-only and
+  directories-only Trees with per-panel addons/sort/order state,
+  sortable dir rows and shared column collapse).
   `test_scan_worker.gd` (background scans: pool dispatch/done/
   cancel/wait mechanics, FullScan policy-snapshot and cancel plumbs,
   plugin dispatch null-safety headless).

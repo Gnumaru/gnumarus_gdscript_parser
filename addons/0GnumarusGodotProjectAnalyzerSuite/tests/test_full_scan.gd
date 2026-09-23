@@ -211,6 +211,10 @@ func _r_filters(h) -> void:
 	h.check(((doc_b.get("stages", {}) as Dictionary) as Dictionary).has("zz_keep"), "store_filters keeps stages")
 	h.check((doc_b.get("errors", []) as Array).size() == 1, "store_filters keeps aggregates")
 	h.check(not bool((((doc_b.get("filters", {}) as Dictionary).get("show", {}) as Dictionary).get("error", true))), "store_filters stores toggles")
+	h.check(str((((doc_b.get("filters", {}) as Dictionary).get("files", {}) as Dictionary).get("sort", ""))) == "path", "store_filters defaults files panel")
+	var doc_c: Dictionary = Impl.store_filters({"error": true, "warning": true, "note": true}, {"gd": true, "tscn": true, "tres": true, "godot": true, "other": true}, {"include_addons": false, "sort": "size", "descending": true}, {"include_addons": true, "sort": "bogus", "descending": "yes"})
+	h.check(not bool((((doc_c.get("filters", {}) as Dictionary).get("files", {}) as Dictionary).get("include_addons", true))), "store_filters stores files panel")
+	h.check(str((((doc_c.get("filters", {}) as Dictionary).get("dirs", {}) as Dictionary).get("sort", ""))) == "path", "store_filters guards dirs sort")
 	h.check(int((doc_a.get("summary", {}) as Dictionary).get("errors", 0)) == 1, "pre-filter summary intact")
 	DirAccess.remove_absolute(Impl.results_path())
 
