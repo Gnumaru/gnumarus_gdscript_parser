@@ -48,6 +48,7 @@ func run() -> Dictionary:
 	_exit_clears(h)
 	_tree_nulls(h)
 	_embedded_nav(h)
+	_gutter(h)
 	return h
 
 
@@ -521,3 +522,57 @@ func _warm_pump_loop(h) -> void:
 	_check(h, impl._warm_pending.is_empty() and not impl._warm_restart, "pump consumes restart")
 	DirAccess.remove_absolute(Impl.json_for_source(pair[0]))
 	DirAccess.remove_absolute(Impl.json_for_source(pair[1]))
+
+
+func _gut_issues() -> Array:
+	return [
+		{"severity": "error", "kind": "k1", "message": "first", "line": 4, "column": 1, "path": "res://a.gd"},
+		{"severity": "warning", "kind": "k2", "message": "second", "line": 4, "column": 5, "path": "res://a.gd"},
+		{"severity": "warning", "kind": "k3", "message": "third", "line": 7, "column": 1, "path": "res://a.gd"},
+	]
+
+
+func _gutter(h) -> void:
+	_check(h, Bar.gutter_line(1) == 0, "gutter line zero based")
+	_check(h, Bar.gutter_line(5) == 4, "gutter line shifts down")
+	_check(h, Bar.gutter_line(0) == 0, "gutter line clamps")
+	var plan := Bar.gutter_plan(_gut_issues(), 10)
+	_check(h, plan == {3: "error", 6: "warning"}, "gutter plan dedups error wins")
+	_check(h, Bar.gutter_plan(_gut_issues(), 3).is_empty(), "gutter plan drops out of range")
+	_check(h, Bar.gutter_plan(["junk"], 10).is_empty(), "gutter plan drops non-dicts")
+	_check(h, Bar.gutter_issue_index(_gut_issues(), 3) == 0, "gutter click picks first on line")
+	_check(h, Bar.gutter_issue_index(_gut_issues(), 6) == 2, "gutter click maps later line")
+	_check(h, Bar.gutter_issue_index(_gut_issues(), 0) == -1, "gutter click misses clean line")
+	_check(h, Bar.find_gutter(null) == -1, "gutter find null misses")
+	var ce := CodeEdit.new()
+	ce.text = "one\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+	_check(h, Bar.find_gutter(ce) == -1, "gutter absent before paint")
+	var bar = Bar.new()
+	bar.set_navigate_fn(Callable(self, "_on_goto"))
+	bar.call("set_results", _gut_issues(), "res://a.gd", ce)
+	_check(h, Bar.find_gutter(ce) == -1, "headless paints no gutter without theme icons")
+	_goto_seen.clear()
+	bar.set("_code_edit", ce)
+	bar.call("_ensure_gutter", ce)
+	var g := Bar.find_gutter(ce)
+	_check(h, g >= 3, "gutter appended past editor gutters")
+	_check(h, ce.get_gutter_name(g) == Bar.GUTTER_NAME, "gutter named")
+	_check(h, ce.get_gutter_type(g) == Bar.GUTTER_TYPE_ICON, "gutter icon typed so icons draw")
+	var tex := ImageTexture.create_from_image(Image.create_empty(16, 16, false, Image.FORMAT_RGBA8))
+	ce.set_line_gutter_icon(3, g, tex)
+	_check(h, ce.get_line_gutter_icon(3, g) == tex, "gutter icon stored retrievable")
+	ce.set_line_gutter_icon(3, g, null)
+	bar.call("_ensure_gutter", ce)
+	_check(h, Bar.find_gutter(ce) == g, "gutter ensure idempotent")
+	bar.call("_on_gutter_clicked", 3, g)
+	_check(h, _goto_seen.size() == 1 and str((_goto_seen[0] as Dictionary).get("message", "")) == "first", "gutter click reselects line message")
+	bar.call("_on_gutter_clicked", 6, g)
+	_check(h, _goto_seen.size() == 2 and str((_goto_seen[1] as Dictionary).get("message", "")) == "third", "gutter click maps later line")
+	bar.call("_on_gutter_clicked", 0, g)
+	_check(h, _goto_seen.size() == 2, "gutter click on clean line ignored")
+	bar.call("_on_gutter_clicked", 3, 0)
+	_check(h, _goto_seen.size() == 2, "foreign gutter click passes through")
+	bar.call("clear_highlights")
+	_check(h, (bar.get("_gutter_lines") as Array).is_empty(), "clear drops gutter lines")
+	bar.free()
+	ce.free()

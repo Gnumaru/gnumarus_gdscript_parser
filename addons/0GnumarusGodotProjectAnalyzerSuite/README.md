@@ -905,8 +905,10 @@ var f = func():
   wider/unrelated is `return_mismatch`. Only simple `->` names are
   compared (`Array[int]`, dotted, ... skip the check).
 - Value/bare presence is checked per function (`return_value`);
-  nested lambdas/functions get their own check. Return VALUE
-  compatibility is NOT inferred (flat token scan).
+  nested lambdas/functions get their own check. Literal `return
+  [...]` / `return {...}` values are checked against tuple/struct
+  `@return` members (same per-member rule as `@var` initializers);
+  anything else (variables, calls, plain types) skips as unprovable.
 - Misplaced tags are errors (`return_misplaced`): file header, class
   name, variables, signals, parameters, and any statement that is not
   a function or a lambda. Marked nodes gain a `return_ann` stamp;
@@ -1621,7 +1623,8 @@ suites still print, so the marker alone could look green).
   `test_classdb_merge.gd` (ClassDB completion),
   `test_doc_fetch.gd` (doc XML enums/constants, offline-safe),
   `test_deprecated.gd` (`@deprecated` rule), `test_private.gd`
-  (`@private` nested-family rule), `test_return.gd` (`@return` rule),
+  (`@private` nested-family rule), `test_return.gd` (`@return` rule,
+  including literal `return` values against tuple/struct members),
   `test_var.gd` (`@var` rule), `test_param.gd` (`@param` rule),
   `test_tuple.gd` (`@tuple` rule),
   `test_type_expr.gd` (nested type-expression mini-parser + tuple
@@ -1645,7 +1648,9 @@ suites still print, so the marker alone could look green).
   deferred begin/pump loop and dep-change gating;
   origin marker paint; snapshot/restore of foreign highlights and
   exit-time clearing; embedded navigation: relative node paths plus
-  headless-safe scene focus, node-script open and dock-goto),
+  headless-safe scene focus, node-script open and dock-goto; gutter
+  icons: paint plan, icon-typed gutter, click-to-reselect and
+  foreign-gutter passthrough),
   `test_scene.gd` (scene/resource/config parsing: value nodes,
   sections, multiline values, comments, errors, reuse, plus the
   `Node3D.tscn`, `Environment.tres`, `ProceduralSkyMaterial.tres`,
@@ -1748,7 +1753,15 @@ buttons change the dropdown selection, picking an entry focuses it in
 the editor and updates the position), and on the right a white `1/3`
 position plus the console-style counters: the `StatusError` red-circle
 icon with the error count in red, and the `StatusWarning` yellow-circle
-icon with the warning count in amber (hidden when zero). Error lines get a
+icon with the warning count in amber (hidden when zero). A dedicated
+"Gnumarus" gutter (appended past the editor's own gutters, found by
+name every time, typed `GUTTER_TYPE_ICON` — `add_gutter()` births
+`STRING` gutters whose draw switch ignores icons) shows one error/warning icon per issue line
+(errors win ties); clicking an icon reselects that line's first
+message in the dropdown and focuses it in the editor (the dropdown
+is the tooltip — the editor API exposes no per-line gutter
+tooltips). Foreign gutter clicks (breakpoints, native errors) pass
+through untouched. Error lines get a
 red background (amber for warnings): the red is Godot's own
 `text_editor/theme/highlighting/mark_color` (amber is
 `warning_color`), read live from `EditorSettings` on every analysis,

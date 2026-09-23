@@ -41,10 +41,12 @@ extends RefCounted
 ##   data-dir JSON files); "void" only works alone. When the function also
 ##   has a "->" annotation, every \@return member must equal it or
 ##   inherit from it (Control is fine for "-> Node", Node is not fine
-##   for "-> Control"). Value/bare returns are checked against voidness.
+##   for "-> Control"). Value/bare returns are checked against voidness;
+##   literal `return [...]` / `return {...}` values are checked
+##   against tuple/struct members (same per-member rule as \@var
+##   initializers; anything else skips as unprovable).
 ## - Violations generate ERRORS ("return_misplaced", "return_malformed",
 ##   "return_unknown_type", "return_mismatch", "return_value").
-##   Return VALUE compatibility is not inferred (flat token scan).
 ##
 ## The fourth rule is "@var":
 ## - It takes a variable name and a type ("# \@var myvar int|float"):
@@ -5959,7 +5961,8 @@ func _fn_display(fn_node: Dictionary) -> String:
 
 
 ## Runs the \@return checks for one function/lambda node: "->"
-## compatibility first, then value/bare/null return presence. No-op
+## compatibility first, then value/bare/null return presence plus
+## literal return values against tuple/struct members. No-op
 ## without a recorded return_ann. Takes Variant: statement values may
 ## be null.
 func _check_return_ann(fn_node: Variant, owner: String) -> void:
@@ -6005,6 +6008,23 @@ func _check_return_ann(fn_node: Variant, owner: String) -> void:
 				_error(ERR_RETURN_VALUE, "bare return in non-void function " + disp + " (expects '" + expect + "')", int((r as Dictionary).get("line", 0)), int((r as Dictionary).get("column", 0)), owner)
 			elif notnull_ret and _value_is_bare_null((r as Dictionary).get("value", null)):
 				_error(ERR_RETURN_NOTNULL, "cannot return null from notnull function " + disp, int((r as Dictionary).get("line", 0)), int((r as Dictionary).get("column", 0)), owner)
+			else:
+				_check_return_literal(ann, (r as Dictionary).get("value", null), int((r as Dictionary).get("line", 0)), owner)
+
+
+## Literal return values against every nominal tuple/struct type in
+## the \@return union — the same per-member rule as \@var
+## initializers (each member checked independently; plain types
+## no-op on missing definitions, non-literals skip as unprovable).
+func _check_return_literal(ann: Dictionary, value: Variant, line: int, owner: String) -> void:
+	var seen := {}
+	for m in (ann.get("types", []) as Array):
+		var ms := str(m)
+		if ms == "" or seen.has(ms):
+			continue
+		seen[ms] = true
+		_check_tuple_value(ms, value, line, owner)
+		_check_struct_value(ms, value, line, owner)
 
 
 # ------------------------------------------------------- collect passes

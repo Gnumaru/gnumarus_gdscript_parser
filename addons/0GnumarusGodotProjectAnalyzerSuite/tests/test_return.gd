@@ -2,7 +2,8 @@
 extends RefCounted
 
 ## \@return rule suite: placement, union shape, known names, "->"
-## compatibility (equal or narrower), and value/bare return presence.
+## compatibility (equal or narrower), value/bare return presence,
+## and literal return values against tuple/struct members.
 
 const H = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/tests/helpers.gd")
 
@@ -20,6 +21,7 @@ func run() -> Dictionary:
 	_r_lambdas(h)
 	_r_script_types(h)
 	_r_marks_and_skips(h)
+	_r_return_literals(h)
 	return h.result()
 
 
@@ -145,3 +147,15 @@ func _r_marks_and_skips(h) -> void:
 	h.check((h.analyze_text(src2, "res://tests/tmp_ret_cx.gd").get("errors", []) as Array).is_empty(), "complex -> skips mismatch check")
 	var src3 := "extends Node\n# @return Node\nfunc f() -> Variant:\n\tpass\n"
 	h.check((h.analyze_text(src3, "res://tests/tmp_ret_top.gd").get("errors", []) as Array).is_empty(), "anything narrows Variant")
+
+
+func _r_return_literals(h) -> void:
+	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T 2 Variant int\n# @return T\nfunc f() -> Array:\n\treturn ['j']\n", "res://tests/tmp_ret_t1.gd"), "tuple_mismatch", "expects 2 elements, got 1"), "short tuple literal mismatches")
+	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T 2 Variant int\n# @return T\nfunc f() -> Array:\n\treturn ['j', 'j']\n", "res://tests/tmp_ret_t2.gd"), "tuple_mismatch", "element 1 expects 'int', got 'String'"), "wrong tuple element mismatches")
+	h.check((h.analyze_text("extends Node\n# @tuple T 2 Variant int\n# @return T\nfunc f() -> Array:\n\treturn ['j', 1]\n", "res://tests/tmp_ret_t3.gd").get("errors", []) as Array).is_empty(), "conforming tuple literal clean")
+	h.check((h.analyze_text("extends Node\n# @tuple T 2 Variant int\n# @return T\nfunc f() -> Array:\n\tvar v: Array\n\treturn v\n", "res://tests/tmp_ret_t4.gd").get("errors", []) as Array).is_empty(), "variable return skips as unprovable")
+	h.check((h.analyze_text("extends Node\n# @return int\nfunc f() -> int:\n\treturn 1\n", "res://tests/tmp_ret_t5.gd").get("errors", []) as Array).is_empty(), "plain return untouched")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 x:int y:String\n# @return S\nfunc f() -> Dictionary:\n\treturn {\"x\": 1, \"y\": 2}\n", "res://tests/tmp_ret_s1.gd"), "struct_mismatch", "field 'y' expects 'String', got 'int'"), "wrong struct field mismatches")
+	h.check(_has_err(h.analyze_text("extends Node\n# @struct S 2 x:int y:String\n# @return S\nfunc f() -> Dictionary:\n\treturn {\"x\": 1}\n", "res://tests/tmp_ret_s2.gd"), "struct_mismatch", "expects 2 fields, got 1"), "short struct literal mismatches")
+	h.check((h.analyze_text("extends Node\n# @struct S 2 x:int y:String\n# @return S\nfunc f() -> Dictionary:\n\treturn {\"x\": 1, \"y\": \"a\"}\n", "res://tests/tmp_ret_s3.gd").get("errors", []) as Array).is_empty(), "conforming struct literal clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @tuple T1 1 int\n# @tuple T2 1 String\n# @return T1|T2\nfunc f() -> Array:\n\treturn [1]\n", "res://tests/tmp_ret_u1.gd"), "tuple_mismatch", "tuple 'T2'"), "union checks each member like @var")
