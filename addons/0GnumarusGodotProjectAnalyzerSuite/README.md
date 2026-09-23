@@ -646,17 +646,20 @@ both `EditorSettings` (`gnumarus_analyzer/dock_filters`, which wins
 on load) and the `ScanResults.json` `filters` copy, so it survives
 editor restarts with or without editor settings. The Files tab shows
 the inventory in two visible inner tabs, Table and Text. The table
-tab holds two separate 9-column Trees: files only (grouped by
-project/addons partition) and directories only, each with its own
+tab holds two separate Trees: files only (grouped by
+project/addons partition, then by extension: project > `.gd` >
+files) and directories only, each with its own
 Include Addons toggle, sort dropdown and Descending switch (per-panel
 state, persisted under `filters.files` / `filters.dirs`; pre-split
-reports migrate their flat keys into both panels). The text tab
+reports migrate their flat keys into both panels). The files table
+carries Path/Size/Created/Modified only; the directories table keeps
+all nine columns (direct/recursive counts and sizes). The text tab
 mirrors both sections as single-column concatenated rows with no
 res:// prefix (files:
 `/a.png: created: …; modified: …; size: …`; directories add
 `rec-size`, `direct files`, `all files`, `direct dirs`, `all dirs`),
-following the same per-panel state. Both table Trees share one
-column-collapse state (see below); file rows navigate to the file's
+following the same per-panel state. Both tables keep their own
+column-collapse state (different layouts). File rows navigate to the file's
 first issue while group/dir rows are inert.
 File rows carry human size,
 creation and modification stamps and sort by path, size or either

@@ -44,6 +44,12 @@ const CENSUS_HINT := "No file census yet. Run Project > Tools > Gnumaru's Full S
 const SORT_KEYS := ["path", "size", "created", "modified"]
 const SORT_LABELS := {"path": "Path", "size": "Size", "created": "Created", "modified": "Modified"}
 const TREE_COLUMNS := 9
+## Files-only table width: Path, Size, Created, Modified (the
+## file/subdir count columns only make sense for directories).
+const FILES_COLUMNS := 4
+const FILE_COL_SIZE := 1
+const FILE_COL_CREATED := 2
+const FILE_COL_MODIFIED := 3
 ## Files-tab inner views (visible tabs of the view TabContainer):
 ## the 9-column tables or the single-column concatenated rows.
 const TAB_TABLE := "Table"
@@ -78,7 +84,10 @@ var _panel := {
 }
 var _goto: Callable = Callable()
 var _rescan: Callable = Callable()
-var _collapsed_cols := {}
+## Column-collapse state per table tree ({"files": {col: bool},
+## "dirs": {col: bool}}): the two tables have different layouts, so a
+## collapsed Size here never touches the dirs table.
+var _collapsed_cols := {"files": {}, "dirs": {}}
 
 var _issues: Tree = null
 var _unhide_btn: Button = null
@@ -372,6 +381,36 @@ static func view_groups(census: Dictionary, include_addons: bool, files: Array) 
 	if include_addons and ((census.get("addons") is Dictionary) or not files.is_empty()):
 		groups.append(["addons", (census.get("addons", {}) as Dictionary)])
 	return groups
+
+
+## Inventory files grouped by extension (same buckets as
+## FullScan.census_ext, dotted for display): [[ext, [files...]], ...]
+## with extensions alphabetical and files in input order. Pure,
+## unit-tested headless.
+static func group_files_by_ext(files: Array) -> Array:
+	var buckets := {}
+	var order: Array = []
+	for f in files:
+		if not (f is Dictionary):
+			continue
+		var ext := FullScan.census_ext(str((f as Dictionary).get("path", "")))
+		if not buckets.has(ext):
+			buckets[ext] = []
+			order.append(ext)
+		(buckets[ext] as Array).append(f)
+	order.sort()
+	var out: Array = []
+	for ext in order:
+		out.append([ext, buckets[ext]])
+	return out
+
+
+## Display label of an extension bucket (".gd", "(no ext)" as-is).
+## Pure.
+static func ext_label(ext: String) -> String:
+	if str(ext) == "" or str(ext) == "(no ext)":
+		return "(no ext)"
+	return "." + str(ext)
 
 
 ## Inventory files belonging to one partition ("project" skips
@@ -752,8 +791,9 @@ func _rebuild_dirs_flat() -> void:
 		_set_row_selectable(hint, false, 1)
 
 
-## One collapsed flat file-group row with its sorted file children
-## (single concatenated row per file).
+## One collapsed flat file-group row with one collapsed extension
+## subgroup per bucket holding the sorted concatenated file rows
+## (single column, no res:// prefix).
 func _add_flat_file_group(root: TreeItem, label: String, group: Variant, files: Array, min_line: Dictionary) -> void:
 	var own := own_files(files, label)
 	var summary := _census_group_row(label, group)
@@ -765,17 +805,24 @@ func _add_flat_file_group(root: TreeItem, label: String, group: Variant, files: 
 	node.set_text(0, summary)
 	node.collapsed = true
 	_set_row_selectable(node, false, 1)
-	for f in sort_file_entries(own, _panel_sort(PANEL_FILES), _panel_desc(PANEL_FILES)):
-		var fd := f as Dictionary
-		var p := str(fd.get("path", ""))
-		var row := _files_flat.create_item(node)
-		row.set_text(0, flat_file_row(fd))
-		row.set_metadata(0, {"path": p, "line": int(min_line.get(p, 1))})
+	for bucket in group_files_by_ext(own):
+		var sub := _files_flat.create_item(node)
+		sub.set_text(0, ext_label(str((bucket as Array)[0])))
+		sub.collapsed = true
+		_set_row_selectable(sub, false, 1)
+		for f in sort_file_entries((bucket as Array)[1], _panel_sort(PANEL_FILES), _panel_desc(PANEL_FILES)):
+			var fd := f as Dictionary
+			var p := str(fd.get("path", ""))
+			var row := _files_flat.create_item(sub)
+			row.set_text(0, flat_file_row(fd))
+			row.set_metadata(0, {"path": p, "line": int(min_line.get(p, 1))})
 
 
-## One collapsed file-group row with its sorted file children.
-## Falls back to the live file count when the group dict carries no
-## summary (hand-made censuses), so files never vanish silently.
+## One collapsed file-group row with one collapsed extension
+## subgroup per bucket (project > .gd > files) holding the sorted
+## file children. Falls back to the live file count when the group
+## dict carries no summary (hand-made censuses), so files never
+## vanish silently. File rows carry size/creation/modification only.
 func _add_file_group(tree: Tree, root: TreeItem, label: String, group: Variant, files: Array, min_line: Dictionary) -> void:
 	var own := own_files(files, label)
 	var summary := _census_group_row(label, group)
@@ -786,16 +833,29 @@ func _add_file_group(tree: Tree, root: TreeItem, label: String, group: Variant, 
 	var node := tree.create_item(root)
 	node.set_text(0, summary)
 	node.collapsed = true
-	_set_row_selectable(node, false)
-	for f in sort_file_entries(own, _panel_sort(PANEL_FILES), _panel_desc(PANEL_FILES)):
-		var fd := f as Dictionary
-		var p := str(fd.get("path", ""))
-		var row := tree.create_item(node)
-		row.set_text(0, p)
-		row.set_text(5, FullScan.human_size(maxi(int(fd.get("size", 0)), 0)))
-		row.set_text(7, census_datetime(maxi(int(fd.get("created", 0)), 0)))
-		row.set_text(8, census_datetime(maxi(int(fd.get("modified", 0)), 0)))
-		row.set_metadata(0, {"path": p, "line": int(min_line.get(p, 1))})
+	_set_row_selectable(node, false, FILES_COLUMNS)
+	for bucket in group_files_by_ext(own):
+		var ext := str((bucket as Array)[0])
+		var sub := tree.create_item(node)
+		sub.set_text(0, ext_label(ext))
+		sub.collapsed = true
+		_set_row_selectable(sub, false, FILES_COLUMNS)
+		for f in sort_file_entries((bucket as Array)[1], _panel_sort(PANEL_FILES), _panel_desc(PANEL_FILES)):
+			_add_files_table_row(tree, sub, f, min_line)
+
+
+## One file row on the files-only table (navigable). Never fails.
+func _add_files_table_row(tree: Tree, parent: TreeItem, f: Variant, min_line: Dictionary) -> void:
+	if not (f is Dictionary):
+		return
+	var fd := f as Dictionary
+	var p := str(fd.get("path", ""))
+	var row := tree.create_item(parent)
+	row.set_text(0, p)
+	row.set_text(FILE_COL_SIZE, FullScan.human_size(maxi(int(fd.get("size", 0)), 0)))
+	row.set_text(FILE_COL_CREATED, census_datetime(maxi(int(fd.get("created", 0)), 0)))
+	row.set_text(FILE_COL_MODIFIED, census_datetime(maxi(int(fd.get("modified", 0)), 0)))
+	row.set_metadata(0, {"path": p, "line": int(min_line.get(p, 1))})
 
 
 ## Legacy rows for the files-only column tree (reports without a
@@ -889,18 +949,22 @@ func _set_row_selectable(row: TreeItem, selectable: bool, total := TREE_COLUMNS)
 
 ## Header click on a Files-tab column tree: left-click toggles that
 ## column between stretched and content-fit (other mouse buttons and
-## out-of-range columns are ignored). The shared collapse state
-## applies to both column trees. The fit floor is measured, not
+## out-of-range columns are ignored). Each table keeps its own
+## collapse state (different layouts). The fit floor is measured, not
 ## trusted to the engine: header title plus every cell (hidden rows
 ## included, so expanding a group never truncates), with room for
 ## indentation, arrows, icons and padding. Never fails.
-func _on_column_title_clicked(column: int, mouse_button: int, tree: Tree) -> void:
+func _on_column_title_clicked(column: int, mouse_button: int, tree: Tree, key: String) -> void:
 	if mouse_button != MOUSE_BUTTON_LEFT:
 		return
-	if column < 0 or column >= TREE_COLUMNS:
+	if tree == null or not is_instance_valid(tree):
 		return
-	_collapsed_cols = toggle_collapsed_state(_collapsed_cols, column, TREE_COLUMNS)
-	_apply_column_collapse(tree, column)
+	if column < 0 or column >= tree.columns:
+		return
+	var collapsed: Dictionary = (_collapsed_cols.get(key, {}) as Dictionary).duplicate()
+	collapsed = toggle_collapsed_state(collapsed, column, tree.columns)
+	_collapsed_cols[key] = collapsed
+	_apply_column_collapse(tree, key, column)
 
 
 ## Natural width of one column in pixels on one column tree: the
@@ -911,7 +975,7 @@ func _on_column_title_clicked(column: int, mouse_button: int, tree: Tree) -> voi
 func _column_fit_width(tree: Tree, column: int) -> int:
 	if tree == null or not is_instance_valid(tree):
 		return 0
-	if column < 0 or column >= TREE_COLUMNS:
+	if column < 0 or column >= tree.columns:
 		return 0
 	var font := tree.get_theme_font("font", "Tree")
 	var fs := tree.get_theme_font_size("font_size", "Tree")
@@ -964,13 +1028,15 @@ static func _fit_text_width(text: String, font: Font, fs: int, depth: int, inden
 ## Applies the collapsed state of one column to one column tree:
 ## expand off with the measured fit floor when collapsed (content
 ## never truncates), stretched otherwise. Clipping stays off both
-## ways. Never fails.
-func _apply_column_collapse(tree: Tree, column: int) -> void:
+## ways. Each table keeps its own state (different layouts). Never
+## fails.
+func _apply_column_collapse(tree: Tree, key: String, column: int) -> void:
 	if tree == null or not is_instance_valid(tree):
 		return
-	if column < 0 or column >= TREE_COLUMNS:
+	if column < 0 or column >= tree.columns:
 		return
-	if bool(_collapsed_cols.get(column, false)):
+	var collapsed: Dictionary = _collapsed_cols.get(key, {})
+	if bool(collapsed.get(column, false)):
 		tree.set_column_expand(column, false)
 		tree.set_column_custom_minimum_width(column, _column_fit_width(tree, column))
 	else:
@@ -983,12 +1049,14 @@ func _apply_column_collapse(tree: Tree, column: int) -> void:
 ## trees (content changes on every rebuild: rescan, sort, toggles).
 ## Never fails.
 func _refit_collapsed_columns() -> void:
-	for tree in [_files_tree, _dirs_tree]:
+	for entry in [[_files_tree, PANEL_FILES], [_dirs_tree, PANEL_DIRS]]:
+		var tree: Tree = entry[0]
 		if tree == null or not is_instance_valid(tree):
 			continue
-		for c in _collapsed_cols.keys():
-			if bool(_collapsed_cols.get(c, false)) and int(c) >= 0 and int(c) < TREE_COLUMNS:
-				_apply_column_collapse(tree, int(c))
+		var collapsed: Dictionary = _collapsed_cols.get(str(entry[1]), {})
+		for c in collapsed.keys():
+			if bool(collapsed.get(c, false)) and int(c) >= 0 and int(c) < tree.columns:
+				_apply_column_collapse(tree, str(entry[1]), int(c))
 
 
 ## File-row activation on the files column tree: navigates to the
@@ -1154,12 +1222,12 @@ func _ensure_built() -> void:
 	table_page.name = TAB_TABLE
 	table_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_view_tabs.add_child(table_page)
-	_files_tree = _make_column_tree()
-	_files_tree.column_title_clicked.connect(_on_column_title_clicked.bind(_files_tree))
+	_files_tree = _make_files_tree()
+	_files_tree.column_title_clicked.connect(_on_column_title_clicked.bind(_files_tree, PANEL_FILES))
 	_files_tree.item_selected.connect(_on_files_tree_selected)
 	_add_panel_section(table_page, PANEL_FILES, "Files", _files_tree)
 	_dirs_tree = _make_column_tree()
-	_dirs_tree.column_title_clicked.connect(_on_column_title_clicked.bind(_dirs_tree))
+	_dirs_tree.column_title_clicked.connect(_on_column_title_clicked.bind(_dirs_tree, PANEL_DIRS))
 	_add_panel_section(table_page, PANEL_DIRS, "Directories", _dirs_tree)
 	var text_page := VBoxContainer.new()
 	text_page.name = TAB_TEXT
@@ -1249,6 +1317,21 @@ static func _make_column_tree() -> Tree:
 	tree.set_column_title(6, "Size (rec)")
 	tree.set_column_title(7, "Created")
 	tree.set_column_title(8, "Modified")
+	tree.hide_root = true
+	tree.column_titles_visible = true
+	return tree
+
+
+## One 4-column files-only table Tree (Path, Size, Created,
+## Modified). Never fails.
+static func _make_files_tree() -> Tree:
+	var tree := Tree.new()
+	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tree.columns = FILES_COLUMNS
+	tree.set_column_title(0, "Path")
+	tree.set_column_title(FILE_COL_SIZE, "Size")
+	tree.set_column_title(FILE_COL_CREATED, "Created")
+	tree.set_column_title(FILE_COL_MODIFIED, "Modified")
 	tree.hide_root = true
 	tree.column_titles_visible = true
 	return tree
