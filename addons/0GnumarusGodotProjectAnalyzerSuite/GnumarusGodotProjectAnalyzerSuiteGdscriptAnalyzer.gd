@@ -989,7 +989,7 @@ func _scan_header(ast: Dictionary) -> void:
 		# may live in the header (first in file); prescans collect them
 		# like any other top-level comment.
 		if not _find_generic(str((header as Dictionary).get("value", ""))).is_empty():
-			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
+			_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int((header as Dictionary).get("line", 0)), int((header as Dictionary).get("column", 0)), "")
 		var htag := _find_implements(str((header as Dictionary).get("value", "")))
 		if not htag.is_empty():
 			_record_implements_words("", _split_words(str(htag.get("message", ""))), int((header as Dictionary).get("line", 0)))
@@ -2692,15 +2692,15 @@ func _bound_arm_fits(arm: Variant, actual: Variant) -> bool:
 	return false
 
 
-# ------------------------------------------------------- \@generic helpers
+# ------------------------------------------------------- \@generic_class helpers
 #
-# Class-level generic parameters ("# \@generic T1 T2" immediately
+# Class-level generic parameters ("# \@generic_class T1 T2" immediately
 # before a class declaration). Every name must be a file \@template
 # (never a concrete type): the count is the class arity, tied to the
 # instance. Stored on the class rec ("generic") and the class JSON.
 
 func _find_generic(value: String) -> Dictionary:
-	return _find_tag(value, "generic")
+	return _find_tag(value, "generic_class")
 
 
 func _has_generic_tag(tok: Dictionary) -> Dictionary:
@@ -2750,7 +2750,7 @@ func _has_any_generic_call_tag(node: Dictionary) -> bool:
 	return false
 
 
-## Marks one CLASS_DECL node generic from its leading \@generic tags.
+## Marks one CLASS_DECL node generic from its leading \@generic_class tags.
 ## Merges every tag in every leading token; names must be file
 ## template types, duplicates and repeats error out.
 func _mark_generic_class(node: Dictionary, owner: String) -> void:
@@ -2772,19 +2772,19 @@ func _mark_generic_class(node: Dictionary, owner: String) -> void:
 		for w in _split_words(str(tag.get("message", ""))):
 			var word := str(w)
 			if not _is_type_name(word):
-				_error(ERR_GENERIC_MALFORMED, "@generic has an invalid template name '" + word + "'", int(c.get("line", 0)), 0, owner)
+				_error(ERR_GENERIC_MALFORMED, "@generic_class has an invalid template name '" + word + "'", int(c.get("line", 0)), 0, owner)
 				return
 			if not _templates.has(word):
-				_error(ERR_GENERIC_MALFORMED, "@generic '" + word + "' must be a template type of this file", int(c.get("line", 0)), 0, owner)
+				_error(ERR_GENERIC_MALFORMED, "@generic_class '" + word + "' must be a template type of this file", int(c.get("line", 0)), 0, owner)
 				return
 			if word in names:
-				_error(ERR_GENERIC_MALFORMED, "@generic lists '" + word + "' more than once", int(c.get("line", 0)), 0, owner)
+				_error(ERR_GENERIC_MALFORMED, "@generic_class lists '" + word + "' more than once", int(c.get("line", 0)), 0, owner)
 				return
 			names.append(word)
 	if not found:
 		return
 	if names.is_empty():
-		_error(ERR_GENERIC_MALFORMED, "@generic needs at least one template name: '# @generic T1 T2'", int(node.get("line", 0)), int(node.get("column", 0)), owner)
+		_error(ERR_GENERIC_MALFORMED, "@generic_class needs at least one template name: '# @generic_class T1 T2'", int(node.get("line", 0)), int(node.get("column", 0)), owner)
 		return
 	rec["generic"] = names
 
@@ -2960,7 +2960,7 @@ static func _split_top_commas(text: String) -> Array:
 
 
 ## Post-resolve pass: validates parameterized extends (arity against
-## \@generic classes, template bounds on arguments). Anything else
+## \@generic_class classes, template bounds on arguments). Anything else
 ## (plain bases, engine heads, unknown heads, unbalanced brackets)
 ## stays silent exactly like today.
 func _check_pending_extends() -> void:
@@ -3017,7 +3017,7 @@ func _check_pending_extends() -> void:
 				earg = eexp.get("node", {})
 			var tv := _check_tree_tuples(earg)
 			if not bool(tv.get("ok", false)):
-				_error(ERR_GENERIC_MISMATCH, "@generic " + str(tv.get("mismatch", "")), line, col, owner)
+				_error(ERR_GENERIC_MISMATCH, "@generic_class " + str(tv.get("mismatch", "")), line, col, owner)
 				tapp = true
 				break
 		if tapp:
@@ -4756,7 +4756,7 @@ static func _vartype_text(decl: Dictionary, key := "vartype") -> String:
 	return text.strip_edges()
 
 
-## Validates one generic arm of a vartype tree against a \@generic
+## Validates one generic arm of a vartype tree against a \@generic_class
 ## class (arity + template bounds on arguments). Unknown names are
 ## left to the semantic pass on purpose (no double reports).
 ## Returns the class key or "" (skip: non-generic, unknown, engine).
@@ -4783,7 +4783,7 @@ func _check_vartype_arm(head: String, args: Array, owner: String, line: int, col
 
 ## Validates generic applications inside an annotation member tree
 ## (\@var/\@param/\@return types): each top-level {kind:generic} arm
-## over a \@generic class gets the same arity + bound checks bare
+## over a \@generic_class class gets the same arity + bound checks bare
 ## vartypes get (bounds wait on the shared post-resolve queue).
 ## Unknown/engine heads stay silent; nested args ride inside their
 ## parent's bound check, like vartypes. `what` labels messages.
@@ -4826,7 +4826,7 @@ func _check_pending_vartype_bounds() -> void:
 
 ## Validates a vartype (or `->` return type) holding brackets and
 ## stamps node["vartype_ann"] = {head, key, args, raw, line} for the
-## first generic arm over a \@generic class. Anything else (simple
+## first generic arm over a \@generic_class class. Anything else (simple
 ## names, engine generics like Array[int], unknown heads) is skipped
 ## silently, exactly like today.
 func _mark_vartype_on(vt: Variant, node: Dictionary, owner: String) -> void:
@@ -6349,7 +6349,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			if t == "CLASS_DECL" and member_pos:
 				_mark_generic_class(d, owner)
 			else:
-				_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+				_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_generic_func_tag(d):
 			if t == "FUNC_DECL":
 				_mark_generic_func(d, owner)
@@ -6384,7 +6384,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_interface_tag(d) and not (member_pos and owner == ""):
 			_error(ERR_INTERFACE_MISPLACED, "@interface definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_generic_tag(d):
-			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_generic_func_tag(d):
 			_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_implements_tag(d):
@@ -6411,7 +6411,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if _has_any_template_tag(d):
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_generic_tag(d):
-			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_generic_func_tag(d):
 			_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if _has_any_struct_tag(d):
@@ -6454,7 +6454,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		if _has_any_generic_tag(d):
-			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 			return
 		if _has_any_generic_func_tag(d):
 			_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
@@ -6489,7 +6489,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 		if t == "TYPE_INFO" and not member_pos and not _has_template_tag(d).is_empty():
 			_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not _has_generic_tag(d).is_empty():
-			_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+			_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_struct_tag(d).is_empty():
 			_error(ERR_STRUCT_MISPLACED, "@struct definitions belong at the top level of the script", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		if t == "TYPE_INFO" and not member_pos and not _has_interface_tag(d).is_empty():
@@ -6516,7 +6516,7 @@ func _scan(node: Variant, owner: String, member_pos: bool = true) -> void:
 			return
 		# Top level: already collected by _prescan_templates; falls through.
 	if _has_any_generic_tag(d):
-		_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
+		_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
 		return
 	if _has_any_generic_func_tag(d):
 		_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int(d.get("line", 0)), int(d.get("column", 0)), owner)
@@ -6742,7 +6742,7 @@ func _scan_class_body(node: Dictionary, owner: String) -> void:
 				if _has_any_template_tag(child):
 					_error(ERR_TEMPLATE_MISPLACED, "@template definitions belong at the top level of the script", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_generic_tag(child):
-					_error(ERR_GENERIC_MISPLACED, "@generic belongs immediately before a class declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
+					_error(ERR_GENERIC_MISPLACED, "@generic_class belongs immediately before a class declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_generic_func_tag(child) and str((child as Dictionary).get("type", "")) != "FUNC_DECL":
 					_error(ERR_GENERIC_FUNC_MISPLACED, "@generic_func belongs immediately before a function declaration", int((child as Dictionary).get("line", 0)), int((child as Dictionary).get("column", 0)), full)
 				if _has_any_struct_tag(child):
@@ -11700,7 +11700,7 @@ func _collect_inner_names(node: Dictionary, file_prefix: String, owner_prefix: S
 
 ## Generic parameter names for the class described by a member-table
 ## owner key ("" = root script class, never generic in v1). Updates on
-## every analyze (classes may gain or lose \@generic).
+## every analyze (classes may gain or lose \@generic_class).
 func _generic_for_file(owner: String) -> Array:
 	if owner == "":
 		return []

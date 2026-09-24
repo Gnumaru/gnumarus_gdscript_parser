@@ -108,14 +108,14 @@ func template_demo() -> void:
 
 
 # @template StressTBox
-# @generic StressTBox
+# @generic_class StressTBox
 class StressBox:
 	# @param sx StressTBox
 	func store(sx) -> void:
 		pass
 
 
-# @generic Nope
+# @generic_class Nope
 class StressBadBox:
 	pass # ERROR on the tag above: non-template name
 

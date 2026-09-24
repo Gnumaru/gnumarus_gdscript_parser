@@ -76,14 +76,14 @@ func template_demo() -> void:
 
 
 # @template ShowTBox
-# @generic ShowTBox
+# @generic_class ShowTBox
 class ShowBox:
 	# @param x ShowTBox
 	func store(x) -> void:
 		pass
 
 
-# @generic Nope
+# @generic_class Nope
 class ShowBadBox:
 	pass # ERROR on the tag above: non-template name
 

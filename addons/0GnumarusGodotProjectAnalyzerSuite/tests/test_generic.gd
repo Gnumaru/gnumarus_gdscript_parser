@@ -1,7 +1,7 @@
 # @integrity_ignore_file (test harness uses virtual paths)
 extends RefCounted
 
-## \@generic suite: class declarations (placement, shapes), generic
+## \@generic_class suite: class declarations (placement, shapes), generic
 ## vartypes (arity, bounds, leniency) and substitution in member
 ## lookup (fields and methods with pre-bound class arguments).
 
@@ -42,14 +42,15 @@ func _kinds(res: Dictionary) -> Array:
 
 
 func _g_decl(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT\n# @generic GxT\nclass GxBox:\n\tpass\n", "res://tests/tmp_ggx_d01.gd")), "declaration clean")
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT1\n# @template GxT2\n# @generic GxT1 GxT2\nclass GxPair:\n\tpass\n", "res://tests/tmp_ggx_d02.gd")), "two params clean")
-	h.check(_kinds(h.analyze_text("extends Node\n# @generic GxT\nfunc f():\n\tpass\n", "res://tests/tmp_ggx_d03.gd")).has("generic_misplaced"), "before func misplaced")
-	h.check(_kinds(h.analyze_text("extends Node\nfunc f():\n\t# @generic GxT\n\tpass\n", "res://tests/tmp_ggx_d04.gd")).has("generic_misplaced"), "inside func misplaced")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT5\n# @generic\nclass GxBox5:\n\tpass\n", "res://tests/tmp_ggx_d05.gd"), "generic_malformed", "at least one"), "empty malformed")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT6\n# @generic GxT6 GxT6\nclass GxBox6:\n\tpass\n", "res://tests/tmp_ggx_d06.gd"), "generic_malformed", "more than once"), "duplicate malformed")
-	h.check(_has_err(h.analyze_text("extends Node\n# @generic int\nclass GxBox7:\n\tpass\n", "res://tests/tmp_ggx_d07.gd"), "generic_malformed", "must be a template type"), "concrete name malformed")
-	h.check(_has_err(h.analyze_text("extends Node\n# @generic NopeGx\nclass GxBox8:\n\tpass\n", "res://tests/tmp_ggx_d08.gd"), "generic_malformed", "must be a template type"), "unknown name malformed")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT\n# @generic_class GxT\nclass GxBox:\n\tpass\n", "res://tests/tmp_ggx_d01.gd")), "declaration clean")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT1\n# @template GxT2\n# @generic_class GxT1 GxT2\nclass GxPair:\n\tpass\n", "res://tests/tmp_ggx_d02.gd")), "two params clean")
+	h.check(_kinds(h.analyze_text("extends Node\n# @generic_class GxT\nfunc f():\n\tpass\n", "res://tests/tmp_ggx_d03.gd")).has("generic_misplaced"), "before func misplaced")
+	h.check(_kinds(h.analyze_text("extends Node\nfunc f():\n\t# @generic_class GxT\n\tpass\n", "res://tests/tmp_ggx_d04.gd")).has("generic_misplaced"), "inside func misplaced")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT5\n# @generic_class\nclass GxBox5:\n\tpass\n", "res://tests/tmp_ggx_d05.gd"), "generic_malformed", "at least one"), "empty malformed")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT6\n# @generic_class GxT6 GxT6\nclass GxBox6:\n\tpass\n", "res://tests/tmp_ggx_d06.gd"), "generic_malformed", "more than once"), "duplicate malformed")
+	h.check(_has_err(h.analyze_text("extends Node\n# @generic_class int\nclass GxBox7:\n\tpass\n", "res://tests/tmp_ggx_d07.gd"), "generic_malformed", "must be a template type"), "concrete name malformed")
+	h.check(_has_err(h.analyze_text("extends Node\n# @generic_class NopeGx\nclass GxBox8:\n\tpass\n", "res://tests/tmp_ggx_d08.gd"), "generic_malformed", "must be a template type"), "unknown name malformed")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT0\n# @generic GxT0\nclass GxBox0:\n\tpass\nvar b: GxBox0[int, String]\n", "res://tests/tmp_ggx_d00.gd")), "old @generic tag ignored")
 
 
 func _g_funcdecl(h) -> void:
@@ -61,28 +62,28 @@ func _g_funcdecl(h) -> void:
 	h.check(_has_err(h.analyze_text("extends Node\n# @generic_func\nfunc gxempty():\n\tpass\n", "res://tests/tmp_ggx_f06.gd"), "generic_func_malformed", "at least one"), "empty malformed")
 	h.check(_kinds(h.analyze_text("extends Node\n# @template GxF7\n# @generic_func GxF7\nvar gxvar := 1\n", "res://tests/tmp_ggx_f07.gd")).has("generic_func_misplaced"), "before var misplaced")
 	h.check(_kinds(h.analyze_text("extends Node\nfunc f():\n\t# @generic_func GxF8\n\tpass\n", "res://tests/tmp_ggx_f08.gd")).has("generic_func_misplaced"), "inside func misplaced")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxF9\n# @generic GxF9\nclass GxBox9:\n\t# @generic_func GxF9\n\tfunc getv():\n\t\tpass\n", "res://tests/tmp_ggx_f09.gd"), "generic_func_malformed", "shadows an enclosing class"), "shadowing malformed")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxF9\n# @generic_class GxF9\nclass GxBox9:\n\t# @generic_func GxF9\n\tfunc getv():\n\t\tpass\n", "res://tests/tmp_ggx_f09.gd"), "generic_func_malformed", "shadows an enclosing class"), "shadowing malformed")
 
 
 func _g_vartype(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT10\n# @generic GxT10\nclass GxBox10:\n\tpass\nvar b: GxBox10[int]\n", "res://tests/tmp_ggx_v01.gd")), "applied vartype clean")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT11\n# @generic GxT11\nclass GxBox11:\n\tpass\nvar b: GxBox11[int, String]\n", "res://tests/tmp_ggx_v02.gd"), "generic_mismatch", "takes 1 type argument(s), got 2"), "arity mismatch errors")
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT12\n# @generic GxT12\nclass GxBox12:\n\tpass\nvar b: GxBox12\n", "res://tests/tmp_ggx_v03.gd")), "bare use lenient")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT10\n# @generic_class GxT10\nclass GxBox10:\n\tpass\nvar b: GxBox10[int]\n", "res://tests/tmp_ggx_v01.gd")), "applied vartype clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT11\n# @generic_class GxT11\nclass GxBox11:\n\tpass\nvar b: GxBox11[int, String]\n", "res://tests/tmp_ggx_v02.gd"), "generic_mismatch", "takes 1 type argument(s), got 2"), "arity mismatch errors")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT12\n# @generic_class GxT12\nclass GxBox12:\n\tpass\nvar b: GxBox12\n", "res://tests/tmp_ggx_v03.gd")), "bare use lenient")
 	h.check(_clean(h.analyze_text("extends Node\nvar a: Array[int]\n", "res://tests/tmp_ggx_v04.gd")), "engine generic skipped")
 	h.check(_clean(h.analyze_text("extends Node\nvar n: NopeGx[int]\n", "res://tests/tmp_ggx_v05.gd")), "unknown head skipped")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT16 of int\n# @generic GxT16\nclass GxBox16:\n\tpass\nvar b: GxBox16[String]\n", "res://tests/tmp_ggx_v06.gd"), "generic_mismatch", "violates bound"), "bound violation errors")
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT17 of int\n# @generic GxT17\nclass GxBox17:\n\tpass\nvar b: GxBox17[int]\n", "res://tests/tmp_ggx_v07.gd")), "bound satisfied clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT16 of int\n# @generic_class GxT16\nclass GxBox16:\n\tpass\nvar b: GxBox16[String]\n", "res://tests/tmp_ggx_v06.gd"), "generic_mismatch", "violates bound"), "bound violation errors")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT17 of int\n# @generic_class GxT17\nclass GxBox17:\n\tpass\nvar b: GxBox17[int]\n", "res://tests/tmp_ggx_v07.gd")), "bound satisfied clean")
 
 
 func _g_subst(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT20\n# @generic GxT20\nclass GxBox20:\n\t# @param x GxT20\n\tfunc setv(x):\n\t\tpass\nfunc f():\n\tvar b: GxBox20[int]\n\tb.setv(1)\n", "res://tests/tmp_ggx_s01.gd")), "method call clean")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT21\n# @generic GxT21\nclass GxBox21:\n\t# @param x GxT21\n\tfunc setv(x):\n\t\tpass\nfunc f():\n\tvar b: GxBox21[int]\n\tb.setv(\"a\")\n", "res://tests/tmp_ggx_s02.gd"), "template_mismatch", "expects 'int', got 'String'"), "method call mismatch errors")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT22\n# @generic GxT22\nclass GxBox22:\n\t# @var v GxT22\n\tvar v\nfunc f():\n\tvar b: GxBox22[int]\n\tb.v.push_back(\"a\")\n", "res://tests/tmp_ggx_s03.gd"), "missing_method", "has no method 'push_back()'"), "field substitution chains")
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT23\n# @generic GxT23\nclass GxBox23:\n\t# @var v GxT23\n\tvar v\nfunc f():\n\tvar b: GxBox23\n\tb.v.push_back(\"a\")\n", "res://tests/tmp_ggx_s04.gd")), "bare instance opaque")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT20\n# @generic_class GxT20\nclass GxBox20:\n\t# @param x GxT20\n\tfunc setv(x):\n\t\tpass\nfunc f():\n\tvar b: GxBox20[int]\n\tb.setv(1)\n", "res://tests/tmp_ggx_s01.gd")), "method call clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT21\n# @generic_class GxT21\nclass GxBox21:\n\t# @param x GxT21\n\tfunc setv(x):\n\t\tpass\nfunc f():\n\tvar b: GxBox21[int]\n\tb.setv(\"a\")\n", "res://tests/tmp_ggx_s02.gd"), "template_mismatch", "expects 'int', got 'String'"), "method call mismatch errors")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT22\n# @generic_class GxT22\nclass GxBox22:\n\t# @var v GxT22\n\tvar v\nfunc f():\n\tvar b: GxBox22[int]\n\tb.v.push_back(\"a\")\n", "res://tests/tmp_ggx_s03.gd"), "missing_method", "has no method 'push_back()'"), "field substitution chains")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT23\n# @generic_class GxT23\nclass GxBox23:\n\t# @var v GxT23\n\tvar v\nfunc f():\n\tvar b: GxBox23\n\tb.v.push_back(\"a\")\n", "res://tests/tmp_ggx_s04.gd")), "bare instance opaque")
 
 
 func _g_assign(h) -> void:
-	var decl := "extends Node\n# @template GxA\n# @generic GxA\nclass GxABox:\n\t# @return GxA\n\tfunc getv() -> Variant:\n\t\treturn 1\nfunc f():\n\t# @var a GxABox[int]\n\tvar a: GxABox = GxABox.new()\n"
+	var decl := "extends Node\n# @template GxA\n# @generic_class GxA\nclass GxABox:\n\t# @return GxA\n\tfunc getv() -> Variant:\n\t\treturn 1\nfunc f():\n\t# @var a GxABox[int]\n\tvar a: GxABox = GxABox.new()\n"
 	h.check(_has_err(h.analyze_text(decl + "\tvar c: String\n\tc = a.getv()\n", "res://tests/tmp_ggx_a01.gd"), "assign_mismatch", "cannot assign 'int'"), "reassign mismatch errors")
 	h.check(_has_err(h.analyze_text(decl + "\tvar c: String = a.getv()\n", "res://tests/tmp_ggx_a02.gd"), "assign_mismatch", "declared as 'String'"), "decl init mismatch errors")
 	h.check(_clean(h.analyze_text(decl + "\tvar d: int = a.getv()\n", "res://tests/tmp_ggx_a03.gd")), "conforming init clean")
@@ -93,13 +94,13 @@ func _g_assign(h) -> void:
 	h.check(_has_err(chained, "missing_member", "has no member 'x'"), "chained member still checked")
 	h.check(not _kinds(chained).has("assign_mismatch"), "chained call skips assign check")
 	h.check(_clean(h.analyze_text(decl + "\tvar c = a.getv()\n", "res://tests/tmp_ggx_a08.gd")), "untyped target silent")
-	var bad_args: Dictionary = h.analyze_text("extends Node\n# @template GxA9\n# @generic GxA9\nclass GxABox9:\n\t# @param x GxA9\n\t# @return GxA9\n\tfunc setv(x):\n\t\treturn x\nfunc f():\n\t# @var a GxABox9[int]\n\tvar a: GxABox9 = GxABox9.new()\n\tvar c: String\n\tc = a.setv(\"s\")\n", "res://tests/tmp_ggx_a09.gd")
+	var bad_args: Dictionary = h.analyze_text("extends Node\n# @template GxA9\n# @generic_class GxA9\nclass GxABox9:\n\t# @param x GxA9\n\t# @return GxA9\n\tfunc setv(x):\n\t\treturn x\nfunc f():\n\t# @var a GxABox9[int]\n\tvar a: GxABox9 = GxABox9.new()\n\tvar c: String\n\tc = a.setv(\"s\")\n", "res://tests/tmp_ggx_a09.gd")
 	h.check(_has_err(bad_args, "template_mismatch", "expects 'int'"), "bad args still reported")
 	h.check(not _kinds(bad_args).has("assign_mismatch"), "bad args never double report")
 
 
 func _g_ann(h) -> void:
-	var decl := "extends Node\n# @template GxB of Object|int\n# @generic GxB\nclass GxBBox:\n\tpass\n"
+	var decl := "extends Node\n# @template GxB of Object|int\n# @generic_class GxB\nclass GxBBox:\n\tpass\n"
 	h.check(_has_err(h.analyze_text(decl + "func f():\n\t# @var d GxBBox[String]\n\tvar d: GxBBox\n", "res://tests/tmp_ggx_b01.gd"), "generic_mismatch", "violates bound 'Object|int' in @var"), "var union bound violation errors")
 	h.check(_clean(h.analyze_text(decl + "func f():\n\t# @var d GxBBox[int]\n\tvar d: GxBBox\n", "res://tests/tmp_ggx_b02.gd")), "var conforming arm clean")
 	h.check(_clean(h.analyze_text(decl + "func f():\n\t# @var d GxBBox[Node]\n\tvar d: GxBBox\n", "res://tests/tmp_ggx_b03.gd")), "var subclass arm clean")
@@ -107,30 +108,30 @@ func _g_ann(h) -> void:
 	var both: Dictionary = h.analyze_text(decl + "func f():\n\t# @var d GxBBox[String]\n\tvar d: GxBBox[String]\n", "res://tests/tmp_ggx_b05.gd")
 	h.check(_has_err(both, "generic_mismatch", "violates bound"), "vartype plus var reports")
 	h.check((both.get("errors", []) as Array).size() == 1, "vartype plus var reports once")
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxB6\n# @generic GxB6\nclass GxBBox6:\n\tpass\nfunc f():\n\t# @var d GxBBox6[String]\n\tvar d: GxBBox6\n", "res://tests/tmp_ggx_b06.gd")), "unbounded var clean")
-	var free_bad: Dictionary = h.analyze_text("extends Node\n# @template GxB7 of int\n# @generic GxB7\nclass GxBBox7:\n\tpass\nfunc f():\n\tvar d: GxBBox7\n\t# @var d GxBBox7[String]\n\n\tprint(d)\n", "res://tests/tmp_ggx_b07.gd")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxB6\n# @generic_class GxB6\nclass GxBBox6:\n\tpass\nfunc f():\n\t# @var d GxBBox6[String]\n\tvar d: GxBBox6\n", "res://tests/tmp_ggx_b06.gd")), "unbounded var clean")
+	var free_bad: Dictionary = h.analyze_text("extends Node\n# @template GxB7 of int\n# @generic_class GxB7\nclass GxBBox7:\n\tpass\nfunc f():\n\tvar d: GxBBox7\n\t# @var d GxBBox7[String]\n\n\tprint(d)\n", "res://tests/tmp_ggx_b07.gd")
 	h.check(_has_err(free_bad, "generic_mismatch", "violates bound 'int' in @var"), "free var bound violation errors")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxB8 of int\n# @generic GxB8\nclass GxBBox8:\n\tpass\nfunc f(\n\t# @param x GxBBox8[String]\n\tx\n):\n\tpass\n", "res://tests/tmp_ggx_b08.gd"), "generic_mismatch", "violates bound 'int' in @param"), "param bound violation errors")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxB9 of int\n# @generic GxB9\nclass GxBBox9:\n\tpass\n# @return GxBBox9[String]\nfunc f():\n\tpass\n", "res://tests/tmp_ggx_b09.gd"), "generic_mismatch", "violates bound 'int' in @return"), "return bound violation errors")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxB8 of int\n# @generic_class GxB8\nclass GxBBox8:\n\tpass\nfunc f(\n\t# @param x GxBBox8[String]\n\tx\n):\n\tpass\n", "res://tests/tmp_ggx_b08.gd"), "generic_mismatch", "violates bound 'int' in @param"), "param bound violation errors")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxB9 of int\n# @generic_class GxB9\nclass GxBBox9:\n\tpass\n# @return GxBBox9[String]\nfunc f():\n\tpass\n", "res://tests/tmp_ggx_b09.gd"), "generic_mismatch", "violates bound 'int' in @return"), "return bound violation errors")
 	h.check(_clean(h.analyze_text("extends Node\n# @template GxB10 of Object\n# @param x GxB10\nfunc gxtake(x):\n\tpass\nfunc f():\n\tvar n: Node\n\tself.gxtake(n)\n", "res://tests/tmp_ggx_b10.gd")), "call site subclass bound clean")
 
 
 func _g_json(h) -> void:
-	h.analyze_text("extends Node\n# @template GxT30\n# @generic GxT30\nclass GxBox30:\n\tpass\n", "res://tests/tmp_ggx_j01.gd")
+	h.analyze_text("extends Node\n# @template GxT30\n# @generic_class GxT30\nclass GxBox30:\n\tpass\n", "res://tests/tmp_ggx_j01.gd")
 	var info: Dictionary = h.load_json("res://.godot/0GnumarusGodotProjectAnalyzerSuiteData/user/tests_tmp_ggx_j01.GxBox30.json")
 	h.check(str(info.get("kind", "")) == "script", "json kind script")
 	h.check((info.get("generic", []) as Array) == ["GxT30"], "json generic kept")
 
 
 func _g_extends(h) -> void:
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT40\n# @generic GxT40\nclass GxBox40:\n\t# @var v GxT40\n\tvar v\nclass GxKid40 extends GxBox40[int]:\n\tpass\n", "res://tests/tmp_ggx_e01.gd")), "parameterized extends clean")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT41\n# @generic GxT41\nclass GxBox41:\n\tpass\nclass GxKid41 extends GxBox41[int, String]:\n\tpass\n", "res://tests/tmp_ggx_e02.gd"), "generic_mismatch", "takes 1 type argument(s), got 2"), "extends arity errors")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT42 of int\n# @generic GxT42\nclass GxBox42:\n\tpass\nclass GxKid42 extends GxBox42[String]:\n\tpass\n", "res://tests/tmp_ggx_e03.gd"), "generic_mismatch", "violates bound"), "extends bound errors")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT40\n# @generic_class GxT40\nclass GxBox40:\n\t# @var v GxT40\n\tvar v\nclass GxKid40 extends GxBox40[int]:\n\tpass\n", "res://tests/tmp_ggx_e01.gd")), "parameterized extends clean")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT41\n# @generic_class GxT41\nclass GxBox41:\n\tpass\nclass GxKid41 extends GxBox41[int, String]:\n\tpass\n", "res://tests/tmp_ggx_e02.gd"), "generic_mismatch", "takes 1 type argument(s), got 2"), "extends arity errors")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT42 of int\n# @generic_class GxT42\nclass GxBox42:\n\tpass\nclass GxKid42 extends GxBox42[String]:\n\tpass\n", "res://tests/tmp_ggx_e03.gd"), "generic_mismatch", "violates bound"), "extends bound errors")
 	h.check(_clean(h.analyze_text("extends Node\nclass GxKid44 extends Node:\n\tpass\n", "res://tests/tmp_ggx_e04.gd")), "plain extends untouched")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT45\n# @generic GxT45\nclass GxBox45:\n\t# @var v GxT45\n\tvar v\nclass GxKid45 extends GxBox45[int]:\n\tpass\nfunc f():\n\tvar k := GxKid45.new()\n\tk.v.push_back(1)\n", "res://tests/tmp_ggx_e05.gd"), "missing_method", "has no method 'push_back()'"), "inherited field substitutes")
-	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT46\n# @generic GxT46\nclass GxBox46:\n\t# @param x GxT46\n\tfunc setv(x):\n\t\tpass\nclass GxKid46 extends GxBox46[int]:\n\tpass\nfunc f():\n\tvar k := GxKid46.new()\n\tk.setv(1)\n\tk.setv(\"a\")\n", "res://tests/tmp_ggx_e06.gd"), "template_mismatch", "expects 'int', got 'String'"), "inherited method binds class arg")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT45\n# @generic_class GxT45\nclass GxBox45:\n\t# @var v GxT45\n\tvar v\nclass GxKid45 extends GxBox45[int]:\n\tpass\nfunc f():\n\tvar k := GxKid45.new()\n\tk.v.push_back(1)\n", "res://tests/tmp_ggx_e05.gd"), "missing_method", "has no method 'push_back()'"), "inherited field substitutes")
+	h.check(_has_err(h.analyze_text("extends Node\n# @template GxT46\n# @generic_class GxT46\nclass GxBox46:\n\t# @param x GxT46\n\tfunc setv(x):\n\t\tpass\nclass GxKid46 extends GxBox46[int]:\n\tpass\nfunc f():\n\tvar k := GxKid46.new()\n\tk.setv(1)\n\tk.setv(\"a\")\n", "res://tests/tmp_ggx_e06.gd"), "template_mismatch", "expects 'int', got 'String'"), "inherited method binds class arg")
 
 
 func _g_new(h) -> void:
 	h.check(_clean(h.analyze_text("extends Node\n# @template GxT50\n# @param x Array[GxT50]\n# @return GxT50\nfunc gxfirst(x):\n\treturn x[0]\nfunc f():\n\tgxfirst(Array[int]([1, 2]))\n", "res://tests/tmp_ggx_n01.gd")), "typed constructor binds")
-	h.check(_clean(h.analyze_text("extends Node\n# @template GxT51\n# @generic GxT51\nclass GxBox51:\n\tpass\nfunc f():\n\tvar b := GxBox51.new()\n", "res://tests/tmp_ggx_n02.gd")), "bare new opaque")
+	h.check(_clean(h.analyze_text("extends Node\n# @template GxT51\n# @generic_class GxT51\nclass GxBox51:\n\tpass\nfunc f():\n\tvar b := GxBox51.new()\n", "res://tests/tmp_ggx_n02.gd")), "bare new opaque")

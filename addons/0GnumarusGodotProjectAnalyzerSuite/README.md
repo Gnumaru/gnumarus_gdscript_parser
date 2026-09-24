@@ -697,7 +697,7 @@ dock.set_scan_results(FullScan.load_results()) # whole-project report
 
 Available annotations at a glance (details in each subsection below):
 
-- `@generic` — declares a class generic over file templates.
+- `@generic_class` — declares a class generic over file templates.
 - `@template` — declares a file-local generic type variable.
 - `@interface` … `@endinterface` — declares an interface blueprint.
 - `@implements` — claims conformance to interfaces or classes.
@@ -1154,14 +1154,14 @@ var x: Variant              # OK: known name, narrowing deferred
   `int`; reassignments (`y = id2(..)`) update it. Declarations own
   their type (vartype/`@var`/inference beat call results), guards
   erase trees when narrowing, dynamic results never widen.
-- Gaps (documented): `@generic` classes come next; generic
+- Gaps (documented): `@generic_class` classes come next; generic
   substitution results feed assignments through bare/`self` calls
   only (member-call results carry nullability taint instead — see
   Nullability — but not generic substitution).
 
-### `@generic`
+### `@generic_class`
 
-Declares a class generic: `# @generic T1 T2` immediately before a
+Declares a class generic: `# @generic_class T1 T2` immediately before a
 class declaration. Every name must be a file `@template` (never a
 concrete type); the count is the class arity, tied to the instance.
 The parameter list rides on the class rec and the class JSON
@@ -1171,7 +1171,7 @@ The parameter list rides on the class rec and the class JSON
 extends Node
 
 # @template TplT
-# @generic TplT
+# @generic_class TplT
 class GBox:
     # @param x TplT
     func setv(x):
@@ -1227,7 +1227,7 @@ func other():
                               # literal 1 vs Object param
 ```
 - Vartypes (and `->` returns, and params) holding brackets validate
-  against `@generic` classes: unknown or non-generic heads stay
+  against `@generic_class` classes: unknown or non-generic heads stay
   silent (engine generics like `Array[int]` keep working); arity and
   template bounds on arguments error `generic_mismatch`. Bounds are
   subtyping-aware: an argument fits when nominally compatible with
@@ -1706,7 +1706,7 @@ suites still print, so the marker alone could look green).
   subtyping-aware bound checks),
   `test_generic_call.gd` (generic call instantiation, including
   explicit `@generic_call` binding),
-  `test_generic.gd` (`@generic` classes, including call-result
+  `test_generic.gd` (`@generic_class` classes, including call-result
   assignment checks, annotation-position bound checks and
   `@generic_func` declarations),
   `test_virtual.gd` (virtual types: annotation-only tuples/structs/aliases),
