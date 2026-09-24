@@ -6,14 +6,9 @@ in plain comments, so your code stays 100% vanilla GDScript.
 Ships with a realtime editor plugin (errors and warnings as you
 type) and a headless pipeline (CI-friendly, ~1200 self-checks).
 
-```gdscript
-# @param target Node notnull
-func lock_on(target: Node) -> void:
-    pass
-
-func _ready() -> void:
-    lock_on(null) # ERROR: cannot pass null to notnull parameter 'target' of 'lock_on()'
-```
+![errors shown on gdscript editor 1](addons/0GnumarusGodotProjectAnalyzerSuite/screenshots/a.png)
+![errors shown on gdscript editor 1](addons/0GnumarusGodotProjectAnalyzerSuite/screenshots/b.png)
+![errors shown on gdscript editor 1](addons/0GnumarusGodotProjectAnalyzerSuite/screenshots/c.png)
 
 No code changes required: every annotation lives in a `#` comment.
 Delete the comments and the project is untouched.
