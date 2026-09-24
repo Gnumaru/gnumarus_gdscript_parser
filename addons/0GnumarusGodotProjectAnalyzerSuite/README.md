@@ -1844,7 +1844,13 @@ red background (amber for warnings): the red is Godot's own
 `warning_color`), read live from `EditorSettings` on every analysis,
 so the tone matches native Godot errors with or without Godot errors
 present (headless fallback is the built-in constant, then the legacy
-first-painted-line scan).
+first-painted-line scan). Lines carrying a recognized annotation tag
+(`ANNOTATION_TAGS` in the analyzer) get a discreet tint under the
+issue paints: the theme `comment_color` at alpha 0.1 (desaturated
+teal fallback `ANN_LINE_COLOR`), hue-clear of error red, warning
+amber, selection blue and the neutral current line. Issue colors win
+shared lines; only tagged lines tint (unknown tags and tags inside
+string literals never do).
 
 - Install: open the project in Godot 4.7.2+, enable the plugin in
   Project → Plugins. No tracked source files are touched by the
@@ -1902,8 +1908,9 @@ first-painted-line scan).
   counts, dropdown behavior, wraparound navigation, the hotkey
   predicate, debounce interval/countdown and null-safety
   of every resolver, plus bar placement, real highlight paint/clear
-  and caret movement on mock trees and a real `TextEdit`, and the
-  plugin-impl lifecycle on headless instances.
+  and caret movement on mock trees and a real `TextEdit`, the
+  annotation tint (exact tagged lines, issue precedence, clear) and
+  the plugin-impl lifecycle on headless instances.
 - Structure: `GnumarusGodotProjectAnalyzerSuitePlugin.gd` is a dumb
   `EditorPlugin` proxy (forwards `_enter_tree`/`_exit_tree`/`_input`/`_process`
   only); every behavior lives in

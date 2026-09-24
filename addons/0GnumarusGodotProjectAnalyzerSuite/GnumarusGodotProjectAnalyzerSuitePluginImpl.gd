@@ -931,7 +931,11 @@ func analyze_current(announce := true) -> void:
 				push_error("Gnumarus [%s] %s:%d - %s" % [str((issue as Dictionary).get("kind", "?")), path, int((issue as Dictionary).get("line", 0)), str((issue as Dictionary).get("message", ""))])
 			else:
 				push_warning("Gnumarus [%s] %s:%d - %s" % [str((issue as Dictionary).get("kind", "?")), path, int((issue as Dictionary).get("line", 0)), str((issue as Dictionary).get("message", ""))])
-	(bar as Object).call("set_results", issues, path, code_edit, "deps" if via_deps else "")
+	var ann: Array = []
+	var ast: Variant = res.get("ast", {})
+	if ast is Dictionary:
+		ann = ana.annotation_lines(ast)
+	(bar as Object).call("set_results", issues, path, code_edit, "deps" if via_deps else "", ann)
 	if _dock != null and is_instance_valid(_dock):
 		(_dock as Object).call("set_file_results", path, issues)
 	_rewatch_code_edit()

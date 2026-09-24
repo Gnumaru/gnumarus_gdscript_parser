@@ -45,6 +45,7 @@ func run() -> Dictionary:
 	_bar_origin(h)
 	_bar_model(h)
 	_bar_snapshot(h)
+	_ann_tint(h)
 	_exit_clears(h)
 	_tree_nulls(h)
 	_embedded_nav(h)
@@ -481,6 +482,32 @@ func _bar_snapshot(h) -> void:
 	_check(h, EdTree.line_color(null, 1) == Color(0, 0, 0, 0), "line color null transparent")
 	EdTree.restore_highlights(ce, {"x": Color.RED})
 	_check(h, true, "restore garbage safe")
+	bar.queue_free()
+	ce.queue_free()
+
+
+func _ann_tint(h) -> void:
+	_check(h, EdTree.editor_annotation_color() == Color(0, 0, 0, 0), "annotation color transparent headless")
+	_check(h, EdTree.apply_tint(null, [1], Color.RED) == [], "null tint paints nothing")
+	var ce := TextEdit.new()
+	ce.text = "a\nb\nc\nd\n"
+	var bar = Bar.new()
+	bar.set_results([], "res://x.gd", ce, "", [2, 4])
+	_check(h, ce.get_line_background_color(1) == Bar.ANN_LINE_COLOR, "tint paints annotation line")
+	_check(h, ce.get_line_background_color(3) == Bar.ANN_LINE_COLOR, "tint paints second line")
+	_check(h, ce.get_line_background_color(0) == Color(0, 0, 0, 0), "tint spares plain line")
+	_check(h, ce.get_line_background_color(2) == Color(0, 0, 0, 0), "tint spares unlisted line")
+	bar.set_results([{"severity": "error", "kind": "e", "message": "bad", "line": 2, "column": 1, "path": "res://x.gd"}], "res://x.gd", ce, "", [2])
+	_check(h, ce.get_line_background_color(1) == Bar.ERR_LINE_COLOR, "issue paint wins shared line")
+	bar.clear_highlights()
+	_check(h, ce.get_line_background_color(1) == Color(0, 0, 0, 0), "clear drops tint")
+	_check(h, ce.get_line_background_color(3) == Color(0, 0, 0, 0), "clear drops second tint")
+	var syn = Impl.SynParser.new()
+	var ana = Impl.Analyzer.new()
+	var src := "# @nullable_policy trust\nextends Node\n# @template T\n# @generic_class T\nclass Box:\n\t# @param x T\n\tfunc setv(x):\n\t\tpass\nvar s = \"@param not real\"\n# @typo nope\n@export var e := 1\n# @interface I\n# func:ping:void\n# @endinterface\n"
+	_check(h, ana.annotation_lines(syn.parse_text(src)) == [1, 3, 4, 6, 12, 14], "annotation lines exact")
+	_check(h, ana.annotation_lines({}) == [], "annotation lines empty safe")
+	_check(h, ana.annotation_lines({"leading_comments": [{"value": "@var x", "line": 7}]}) == [7], "annotation lines minimal shape")
 	bar.queue_free()
 	ce.queue_free()
 

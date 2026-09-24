@@ -9,6 +9,10 @@ extends RefCounted
 
 const CODE_EDIT_CLASS := "CodeEdit"
 
+## Fixed alpha of the annotation line tint: discreet on dark and
+## light themes alike, always under the error/warning paints.
+const ANN_TINT_ALPHA := 0.0
+
 ## Generation counter for deferred Script-workspace asserts (see
 ## _assert_script_screen_soon): every navigation bumps it, and a
 ## deferred assert only fires when nothing newer arrived, so rapid
@@ -278,6 +282,50 @@ static func godot_error_color(code_edit: Object) -> Color:
 ## callers fall back to their constant when this is transparent.
 static func godot_warning_color(_code_edit: Object) -> Color:
 	return editor_warning_color()
+
+
+## Discreet annotation-line tint: the configured comment color
+## (text_editor/theme/highlighting/comment_color) at ANN_TINT_ALPHA,
+## so it follows any theme yet stays clear of the error, warning and
+## current-line paints. Transparent when unavailable (headless):
+## callers fall back to their constant.
+static func editor_annotation_color() -> Color:
+	if not Engine.is_editor_hint():
+		return Color(0, 0, 0, 0)
+	if not Engine.has_singleton("EditorInterface"):
+		return Color(0, 0, 0, 0)
+	var ei: Object = Engine.get_singleton("EditorInterface")
+	if ei == null or not is_instance_valid(ei):
+		return Color(0, 0, 0, 0)
+	if not (ei as Object).has_method("get_editor_settings"):
+		return Color(0, 0, 0, 0)
+	var settings: Variant = (ei as Object).call("get_editor_settings")
+	if settings == null or not (settings is Object) or not is_instance_valid(settings):
+		return Color(0, 0, 0, 0)
+	if not (settings as Object).has_method("get_setting"):
+		return Color(0, 0, 0, 0)
+	var v: Variant = (settings as Object).call("get_setting", "text_editor/theme/highlighting/comment_color")
+	if v is Color and (v as Color).a > 0.01:
+		var base: Color = v
+		return Color(base.r, base.g, base.b, ANN_TINT_ALPHA)
+	return Color(0, 0, 0, 0)
+
+
+## Paints 1-based lines with one flat color, skipping out-of-range.
+## Returns the lines actually painted (for later clearing).
+static func apply_tint(code_edit: Object, lines: Array, color: Color) -> Array:
+	var painted: Array = []
+	if not is_code_edit(code_edit):
+		return painted
+	var ce: Object = code_edit
+	var count: int = int(ce.call("get_line_count"))
+	for ln in lines:
+		var line := int(ln)
+		if line < 1 or line > count:
+			continue
+		ce.call("set_line_background_color", line - 1, color)
+		painted.append(line)
+	return painted
 
 
 ## (Re)starts a one-shot debounce countdown with the given delay

@@ -7,7 +7,9 @@ const EdTree = preload("res://addons/0GnumarusGodotProjectAnalyzerSuite/Gnumarus
 ## count] [console warning icon + amber count]. Navigation calls the
 ## injected `_goto` Callable with the issue dict (the plugin wires it
 ## to editor navigation). All highlighting goes through the stored
-## code edit, re-validated on every use. A dedicated "Gnumarus"
+## code edit, re-validated on every use: annotation lines carry a
+## discreet tint (the theme comment color at low alpha), issue lines
+## paint over it. A dedicated "Gnumarus"
 ## gutter shows one error/warning icon per issue line (errors win
 ## ties); clicking an icon reselects that line's first message (the
 ## dropdown is the tooltip) and focuses it in the editor.
@@ -20,6 +22,10 @@ const MSG_ERR_COLOR := Color.RED
 const MSG_WARN_COLOR := Color(1.0, 0.75, 0.25, 1.0)
 const ERR_LINE_COLOR := Color(0.85, 0.12, 0.12, 0.28)
 const WARN_LINE_COLOR := Color(0.85, 0.65, 0.1, 0.22)
+## Fallback annotation tint (headless or theme without comment_color):
+## desaturated teal, hue-clear of error red, warning amber, selection
+## blue and the neutral current line.
+const ANN_LINE_COLOR := Color(0.3, 0.65, 0.6, 0.1)
 const STATUS_ICON_SIZE := Vector2(16, 16)
 ## Name of our dedicated CodeEdit gutter (error/warning icons per
 ## issue line). Found by name on every use: editor gutter indices
@@ -35,6 +41,9 @@ var _index: int = 0
 var _path: String = ""
 var _code_edit: Object = null
 var _painted: Array = []
+## 1-based annotation lines tinted under the issue highlights (from
+## the analyzer, via set_results; issue lines keep issue colors).
+var _ann_lines: Array = []
 ## 0-based lines carrying our gutter icons (for clearing).
 var _gutter_lines: Array = []
 ## Pre-paint background colors ({line: Color}) for the currently
@@ -206,13 +215,15 @@ static func _make_status_icon(tip: String) -> TextureRect:
 ## Issues: [{severity ("error"/"warning"), kind, message, line,
 ## column}]. Replaces previous results (old highlights cleared).
 ## `origin` ("deps" or "") marks dependency-triggered runs.
-func set_results(issues: Array, path: String, code_edit: Object, origin := "") -> void:
+## `ann_lines` (1-based) tints annotation lines under issue colors.
+func set_results(issues: Array, path: String, code_edit: Object, origin := "", ann_lines := []) -> void:
 	_ensure_built()
 	clear_highlights()
 	_issues = issues.duplicate()
 	_path = path
 	_code_edit = code_edit
 	_origin = str(origin)
+	_ann_lines = (ann_lines as Array).duplicate()
 	_index = 0
 	apply()
 
@@ -224,6 +235,7 @@ func clear_results() -> void:
 	_issues = []
 	_path = ""
 	_origin = ""
+	_ann_lines = []
 	_index = 0
 	refresh()
 
@@ -312,10 +324,12 @@ func _paint_status_icons() -> void:
 		_warn_icon.texture = warn_icon
 
 
-## Paints current issue lines and updates the widgets.
+## Paints annotation tint plus current issue lines and updates the
+## widgets. Tint lands first so issue colors win shared lines; the
+## tint paints even when no issues remain.
 func apply() -> void:
 	_ensure_built()
-	if _issues.is_empty() or _code_edit == null or not is_instance_valid(_code_edit):
+	if _code_edit == null or not is_instance_valid(_code_edit):
 		refresh()
 		return
 	var lines: Array = []
@@ -325,6 +339,20 @@ func apply() -> void:
 			lines.append(int((e as Dictionary).get("line", 0)))
 			if str((e as Dictionary).get("severity", "error")) != "error":
 				warns.append(int((e as Dictionary).get("line", 0)))
+	var tinted: Array = []
+	for ln in _ann_lines:
+		var line := int(ln)
+		if line >= 1 and not (line in lines):
+			tinted.append(line)
+	var snap := EdTree.snapshot_highlights(_code_edit, lines + tinted)
+	for k in snap.keys():
+		if not _prev_colors.has(k):
+			_prev_colors[k] = snap[k]
+	var tint_col: Color = ANN_LINE_COLOR
+	var live_ann: Color = EdTree.editor_annotation_color()
+	if live_ann.a > 0.01:
+		tint_col = live_ann
+	var done := EdTree.apply_tint(_code_edit, tinted, tint_col)
 	var err_col: Color = ERR_LINE_COLOR
 	var live: Color = EdTree.godot_error_color(_code_edit)
 	if live.a > 0.01:
@@ -333,11 +361,7 @@ func apply() -> void:
 	var live_warn: Color = EdTree.godot_warning_color(_code_edit)
 	if live_warn.a > 0.01:
 		warn_col = live_warn
-	var snap := EdTree.snapshot_highlights(_code_edit, lines)
-	for k in snap.keys():
-		if not _prev_colors.has(k):
-			_prev_colors[k] = snap[k]
-	_painted = EdTree.apply_highlights(_code_edit, lines, err_col, warn_col, warns)
+	_painted = done + EdTree.apply_highlights(_code_edit, lines, err_col, warn_col, warns)
 	_paint_gutter(_code_edit, _issues)
 	refresh()
 

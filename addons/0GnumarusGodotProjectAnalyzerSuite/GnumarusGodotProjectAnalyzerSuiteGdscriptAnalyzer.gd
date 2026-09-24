@@ -1110,6 +1110,68 @@ func _is_tag_char(c: int) -> bool:
 	return c == 95
 
 
+## Every annotation tag the analyzer understands (single source of
+## truth for the editor annotation tint): lines carrying one of these
+## read as annotation lines. End tags included (their lines are
+## annotation text even when stray).
+const ANNOTATION_TAGS := ["deprecated", "private", "nullable_policy", "strict_untyped", "return", "var", "param", "tuple", "struct", "alias", "template", "generic_class", "generic_func", "generic_call", "interface", "implements", "endinterface", "endalias"]
+
+
+## 1-based lines of an analyzed AST carrying at least one recognized
+## annotation tag (leading/header/standalone comments, any depth).
+## Comment-token based, so tags inside string literals never match.
+## The live pass tints these lines under the issue highlights.
+## Pure over the AST shape (no analyzer state). Never fails.
+func annotation_lines(ast: Dictionary) -> Array:
+	var found := {}
+	_collect_annotation_lines(ast, found)
+	var lines := found.keys()
+	lines.sort()
+	return lines
+
+
+## Recursive AST walk feeding every comment container to the tag
+## harvester (arrays/dicts, any depth; the set dedupes). Never fails.
+func _collect_annotation_lines(node: Variant, found: Dictionary) -> void:
+	if node is Array:
+		for e in node:
+			_collect_annotation_lines(e, found)
+		return
+	if not (node is Dictionary):
+		return
+	var d: Dictionary = node
+	for c in d.get("leading_comments", []):
+		_harvest_comment_tags(c, found)
+	if d.has("header_comment"):
+		_harvest_comment_tags(d.get("header_comment"), found)
+	if str(d.get("type", "")) in ["COMMENT", "DOC_COMMENT", "TYPE_INFO", "ANNOTATION_DECL"] and (d as Dictionary).has("value"):
+		_harvest_comment_tags(d, found)
+	for k in d.keys():
+		if str(k) == "leading_comments" or str(k) == "header_comment":
+			continue
+		_collect_annotation_lines(d[k], found)
+
+
+## Records the 1-based lines of one comment token carrying a known
+## tag (multi-line values offset per line, like the template
+## prescan). Never fails.
+func _harvest_comment_tags(tok: Variant, found: Dictionary) -> void:
+	if not (tok is Dictionary):
+		return
+	var t: Dictionary = tok
+	if not t.has("value"):
+		return
+	var base := int(t.get("line", 0))
+	var li := 0
+	for text in str(t.get("value", "")).split("\n"):
+		for tag in ANNOTATION_TAGS:
+			if not _find_tag(str(text), str(tag)).is_empty():
+				if base + li >= 1:
+					found[base + li] = true
+				break
+		li += 1
+
+
 func _has_deprecated_tag(tok: Dictionary) -> Dictionary:
 	if str(tok.get("type", "")) != "TYPE_INFO":
 		return {}
